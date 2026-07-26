@@ -1,0 +1,40 @@
+[project]
+name = "ddup"
+version = "0.1.0"
+description = "A-share quantitative strategy backtesting engine"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=2.0",
+    "numexpr>=2.14.2",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "pyarrow>=15.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+
+
+[tool.pytest.ini_options]
+markers = [
+    "real_db: tests requiring a real market database connection",
+]

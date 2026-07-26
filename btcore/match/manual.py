@@ -1,0 +1,288 @@
+import logging
+
+from btcore.match.core import (
+    INVALID_PRICE,
+    LIMIT_DOWN,
+    LIMIT_UNKNOWN,
+    LIMIT_UP,
+    apply_partial_sell,
+    cap_by_volume,
+    check_tradable,
+    exec_price,
+    execute_buy,
+    execute_sell,
+    is_valid_price,
+    make_holding,
+    shrink_to_affordable,
+)
+from btcore.types import bar_get
+
+logger = logging.getLogger(__name__)
+
+
+def manual_sell(account, bars: dict, sell_symbols: list,
+                limits_fn, costs_fn, slip_fn,
+                shares_map: dict | None = None,
+                trigger: str = "MANUAL") -> list:
+    """手动卖出。shares_map 为 None 时清仓（现状）；否则按指定股数部分卖出。
+
+    trigger 透传进成交记录：风控强平时引擎传 "RISK"，缺省 "MANUAL"。
+    """
+    trades = []
+    for symbol in sell_symbols:
+        if symbol not in account.holdings:
+            continue
+        holding = account.holdings[symbol]
+        bar = bars.get(symbol)
+        if bar is None:
+            continue
+
+        exec_px = exec_price(bar, account)
+        trade_date = bar_get(bar, "trade_date", "")
+
+        up, down = limits_fn(symbol, bar, trade_date)
+        reason = check_tradable("SELL", exec_px, up, down)
+        if reason == LIMIT_UNKNOWN:
+            logger.warning("[%s] %s 涨跌停无法判定, 跳过卖出",
+                           trade_date, symbol)
+            continue
+        if reason == INVALID_PRICE:
+            logger.warning("[%s] %s 成交价非法 (%s), 跳过卖出",
+                           trade_date, symbol, exec_px)
+            continue
+        if reason == LIMIT_DOWN:
+            logger.warning("[%s] %s 跌停不卖, fill=%s limit_down=%s",
+                           trade_date, symbol, exec_px, down)
+            continue
+
+        desired = holding.shares if shares_map is None else shares_map.get(
+            symbol, holding.shares)
+        shares = cap_by_volume(bar, min(desired, holding.shares), account)
+        if shares < 100:
+            logger.warning("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
+                           trade_date, symbol)
+            continue
+
+        trade = execute_sell(account, holding, bar, exec_px, trigger,
+                             costs_fn, slip_fn, shares=shares)
+        trades.append(trade)
+        if shares >= holding.shares:
+            del account.holdings[symbol]
+        else:
+            if shares < desired:
+                logger.warning("[%s] %s 成交量约束截断卖出: %d/%d",
+                               trade_date, symbol, shares, desired)
+            apply_partial_sell(holding, shares)
+
+    return trades
+
+
+def manual_buy(account, bars: dict, buy_symbols: list,
+               max_positions: int, limits_fn, costs_fn, slip_fn,
+               weights_map: dict | None = None) -> list:
+    """手动买入（仅新标的）。持仓数达 max_positions 后跳过后续买入。
+
+    weights_map 为 None 时等权（总资产的 1/max_positions）；否则按
+    总资产 × weights_map[symbol] 分配每笔买入金额。
+    """
+    if max_positions <= 0:
+        return []
+    open_total_value = _calc_exec_total_value(account, bars)
+    base_amount = open_total_value / max_positions
+
+    eligible = [s for s in buy_symbols if s not in account.holdings]
+
+    trades = []
+    for idx, symbol in enumerate(eligible):
+        n_left = len(eligible) - idx
+        if len(account.holdings) >= max_positions:
+            logger.warning("持仓数已达 max_positions=%d, 跳过 %s 及后续买入",
+                           max_positions, symbol)
+            break
+        bar = bars.get(symbol)
+        if bar is None:
+            continue
+
+        exec_px = exec_price(bar, account)
+        trade_date = bar_get(bar, "trade_date", "")
+
+        up, down = limits_fn(symbol, bar, trade_date)
+        reason = check_tradable("BUY", exec_px, up, down)
+        if reason == LIMIT_UNKNOWN:
+            logger.warning("[%s] %s 涨跌停无法判定, 跳过买入",
+                           trade_date, symbol)
+            continue
+        if reason == INVALID_PRICE:
+            logger.warning("[%s] %s 成交价非法 (%s), 跳过买入",
+                           trade_date, symbol, exec_px)
+            continue
+        if reason == LIMIT_UP:
+            logger.warning("[%s] %s 涨停不买, price=%s limit_up=%s",
+                           trade_date, symbol, exec_px, up)
+            continue
+
+        if weights_map is not None:
+            effective_amount = min(open_total_value * weights_map[symbol],
+                                   account.cash)
+        else:
+            effective_amount = min(base_amount, account.cash / n_left)
+        shares = int(effective_amount / exec_px / 100) * 100
+        shares = cap_by_volume(bar, shares, account)
+        if shares < 100:
+            logger.warning("[%s] %s 买入金额不足 100 股, fill=%s 跳过",
+                           trade_date, symbol, exec_px)
+            continue
+
+        est_price = slip_fn(exec_px, account.slippage_ticks, 1)
+        est_costs = costs_fn("BUY", est_price * shares)
+        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
+        if account.cash < est_net:
+            logger.warning("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
+                           trade_date, symbol, est_net, account.cash)
+            continue
+
+        trade = execute_buy(account, symbol, bar, shares, exec_px, "MANUAL",
+                            costs_fn, slip_fn)
+        trades.append(trade)
+
+        account.holdings[symbol] = make_holding(symbol, bar, shares, trade.price)
+
+    return trades
+
+
+def _calc_exec_total_value(account, bars: dict) -> float:
+    value = account.cash
+    for symbol, holding in account.holdings.items():
+        bar = bars.get(symbol)
+        price = exec_price(bar, account) if bar is not None else None
+        value += holding.shares * (
+            price if is_valid_price(price) else holding.last_price
+        )
+    return value
+
+
+def rebalance_to_targets(account, bars: dict, targets: dict,
+                         max_positions: int, limits_fn, costs_fn,
+                         slip_fn) -> list:
+    """按目标市值调仓（trigger="TARGET"）。先卖后买释放现金。
+
+    只调整出现在 targets 里的标的；未列出的持仓不动（不自动清仓），
+    target=0 显式清仓（零碎股一并卖出，卖出不要求整手）。
+    加仓按加权均价更新 entry_price；当天新买/加仓部分会把整个持仓
+    锁一天（locked 是持仓级布尔，保守行为），次日统一解锁。
+    """
+    trades = []
+    sells, buys = [], []
+    for symbol, target in targets.items():
+        holding = account.holdings.get(symbol)
+        current = 0.0
+        bar = bars.get(symbol)
+        if holding is not None:
+            if bar is None:
+                continue
+            price = exec_price(bar, account)
+            current = holding.shares * (
+                price if is_valid_price(price) else holding.last_price
+            )
+        diff = target - current
+        if diff < 0 and holding is not None:
+            sells.append((symbol, -diff, target <= 0))
+        elif diff > 0:
+            buys.append((symbol, diff))
+
+    for symbol, amount, full_exit in sells:
+        holding = account.holdings[symbol]
+        bar = bars[symbol]
+        exec_px = exec_price(bar, account)
+        trade_date = bar_get(bar, "trade_date", "")
+
+        up, down = limits_fn(symbol, bar, trade_date)
+        reason = check_tradable("SELL", exec_px, up, down)
+        if reason == LIMIT_UNKNOWN:
+            logger.warning("[%s] %s 涨跌停无法判定, 跳过卖出",
+                           trade_date, symbol)
+            continue
+        if reason == INVALID_PRICE:
+            logger.warning("[%s] %s 成交价非法 (%s), 跳过卖出",
+                           trade_date, symbol, exec_px)
+            continue
+        if reason == LIMIT_DOWN:
+            logger.warning("[%s] %s 跌停不卖, fill=%s limit_down=%s",
+                           trade_date, symbol, exec_px, down)
+            continue
+
+        if full_exit:
+            # 显式清仓: 零碎股一并卖出（卖出不要求整手）
+            desired = holding.shares
+        else:
+            desired = min(int(amount / exec_px / 100) * 100, holding.shares)
+        shares = cap_by_volume(bar, desired, account)
+        if shares < 100:
+            logger.warning("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
+                           trade_date, symbol)
+            continue
+
+        trade = execute_sell(account, holding, bar, exec_px, "TARGET",
+                             costs_fn, slip_fn, shares=shares)
+        trades.append(trade)
+        if shares >= holding.shares:
+            del account.holdings[symbol]
+        else:
+            if shares < desired:
+                logger.warning("[%s] %s 成交量约束截断卖出: %d/%d",
+                               trade_date, symbol, shares, desired)
+            apply_partial_sell(holding, shares)
+
+    for symbol, amount in buys:
+        holding = account.holdings.get(symbol)
+        if holding is None and len(account.holdings) >= max_positions:
+            logger.warning("%s 超出 max_positions=%d, 跳过新买",
+                           symbol, max_positions)
+            continue
+        bar = bars.get(symbol)
+        if bar is None:
+            continue
+
+        exec_px = exec_price(bar, account)
+        trade_date = bar_get(bar, "trade_date", "")
+
+        up, down = limits_fn(symbol, bar, trade_date)
+        reason = check_tradable("BUY", exec_px, up, down)
+        if reason == LIMIT_UNKNOWN:
+            logger.warning("[%s] %s 涨跌停无法判定, 跳过买入",
+                           trade_date, symbol)
+            continue
+        if reason == INVALID_PRICE:
+            logger.warning("[%s] %s 成交价非法 (%s), 跳过买入",
+                           trade_date, symbol, exec_px)
+            continue
+        if reason == LIMIT_UP:
+            logger.warning("[%s] %s 涨停不买, price=%s limit_up=%s",
+                           trade_date, symbol, exec_px, up)
+            continue
+
+        shares = int(amount / exec_px / 100) * 100
+        shares = cap_by_volume(bar, shares, account)
+        # 现金不足则按剩余现金尽量买（逐步减 100 股直到费用估可承受）
+        shares = shrink_to_affordable(account, shares, exec_px,
+                                      costs_fn, slip_fn)
+        if shares < 100:
+            logger.warning("[%s] %s 目标加仓金额不足 100 股, 跳过",
+                           trade_date, symbol)
+            continue
+
+        trade = execute_buy(account, symbol, bar, shares, exec_px, "TARGET",
+                            costs_fn, slip_fn)
+        trades.append(trade)
+
+        if holding is None:
+            account.holdings[symbol] = make_holding(symbol, bar, shares,
+                                                    trade.price)
+        else:
+            holding.shares += shares
+            holding.cost += trade.price * shares
+            holding.entry_price = holding.cost / holding.shares
+            holding.last_price = trade.price
+            holding.locked = True
+
+    return trades

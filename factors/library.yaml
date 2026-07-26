@@ -1,0 +1,59 @@
+factors:
+  mom20:
+    expr: "roc(close_hfq, 20)"
+    description: "20日动量（后复权）"
+  bias20:
+    expr: "close_hfq / ma(close_hfq, 20) - 1"
+    description: "20日乖离率"
+  low_turnover:
+    expr: "turnover_rate"
+    description: "换手率"
+  value:
+    expr: "dv_ttm / pb"
+    where: "pb > 0"
+    description: "股息率/市净率（截面组合示例）"
+  mom_z:
+    expr: "zscore(mom20)"
+    description: "截面标准化动量（候选池口径）"
+  industry_mom:
+    expr: "group_mean(mom20, industry)"
+    description: "行业平均动量（全市场聚合，map 回个股）"
+  pct_above_ma20:
+    expr: "mean(close_hfq >= ma(close_hfq, 20))"
+    description: "站上MA20的股票占比（市场广度，同日截面广播）"
+
+  # ══ 涨跌停 / 龙虎榜 / 大宗交易 / 东财资金流（limit_list_d / top_list /
+  #    block_trade / moneyflow_dc 表；事件型数据，未上榜日 = NaN）══
+  seal_strength:
+    expr: "fd_amount / (circ_mv * 10000)"   # fd_amount 单位元，circ_mv 单位万元
+    where: "fd_amount > 0"
+    description: "涨停封单金额/流通市值（封板强度，仅封板日有值）"
+  limit_solidity:
+    expr: "1 / (open_times + 1)"
+    where: "fd_amount > 0"
+    description: "封板牢固度：打开次数越少越高"
+  limit_streak:
+    expr: "limit_times"
+    description: "连板数（仅上榜日有值，原始事件列）"
+  sealed_days5:
+    expr: "sum(fd_amount > 0, 5)"
+    description: "近5日封板天数（事件计数 = sum(条件, n)）"
+  pct_sealed:
+    expr: "mean(fd_amount > 0)"
+    description: "全市场封板股票占比（市场情绪广度，坍缩口径）"
+  lhb_inflow:
+    expr: "lhb_net_rate"
+    description: "龙虎榜净买入占总成交比（仅上榜日有值）"
+  block_premium:
+    expr: "bt_price / close - 1"
+    where: "bt_amount > 1000"   # bt_amount 单位万元 → 千万级以上
+    description: "大宗交易折溢价（千万级以上交易，仅成交日有值）"
+  dc_big_money:
+    expr: "dc_elg_rate"
+    description: "东财超大单买入占比（2023-09 起）"
+  dc_inflow_ma5:
+    expr: "ma(dc_net_rate, 5)"
+    description: "主力净流入占比 5 日平滑"
+  hot_money:
+    expr: "zscore(dc_net_rate)"
+    description: "主力净流入截面标准化（候选池口径）"

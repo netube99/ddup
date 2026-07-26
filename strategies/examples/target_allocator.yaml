@@ -1,0 +1,40 @@
+name: target_allocator
+strategy: strategies.examples.target_allocator:TargetAllocator
+
+config:
+  initial_capital: 2000000
+  max_positions: 15
+  top_k: 8
+  execution_price: "close"
+
+schedule:
+  frequency: weekly           # 每周调仓一次
+  weekday: -1                 # 每周最后一个交易日
+
+factor_specs:
+  - factor: mom20
+    weight: 0.5
+    ascending: false
+  - factor: bias20
+    weight: 0.3
+    ascending: false
+  - factor: low_turnover
+    weight: 0.2
+    ascending: true
+
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true
+  exclude_boards: ["BJ"]
+  min_price: 5.0
+
+conditions:
+  stop_loss_pct: 0.06
+  trailing_pct: 0.08
+
+# 组合风控：回撤熔断 + 单票上限
+risk_rules:
+  max_drawdown: 0.12         # 回撤 ≥12% 触发熔断，清仓 + 冷却
+  cooldown_days: 5           # 冷却 5 日后恢复买入
+  max_position_pct: 0.10     # 单票买入 ≤ 总资产 10%

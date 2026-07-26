@@ -1,0 +1,74 @@
+name: state_machine
+strategy: strategies.examples.state_machine:StateMachine
+
+# 引用同目录下的自定义因子库（演示 factor_library 机制）
+factor_library: state_machine_factors.yaml
+
+config:
+  initial_capital: 3000000
+  max_positions: 20
+  top_k: 8
+  cooldown_days: 3
+  mode_confirm_days: 5       # 状态切换需连续确认的天数
+  execution_price: "open"
+  commission_rate: 0.0002
+  stamp_tax_rate: 0.0005
+  slippage_ticks: 2
+  condition_slippage_ticks: 1
+
+schedule:
+  frequency: weekly
+  weekday: -1
+
+# factor_specs 声明因子会进入 FACTOR_NODES → 引擎 preload 时物化为列
+# 子模型内部 eval_factor_specs 引用的因子也必须在此声明（确保列裁剪不丢失）
+factor_specs:
+  - factor: mom20_z
+    weight: 0.15
+    ascending: false
+  - factor: bias20_z
+    weight: 0.10
+    ascending: false
+  - factor: up_days20
+    weight: 0.10
+    ascending: false
+  - factor: mom5_rev
+    weight: 0.08
+    ascending: true
+  - factor: bias5
+    weight: 0.08
+    ascending: true
+  - factor: near_low20
+    weight: 0.07
+    ascending: true
+  - factor: vol5_z
+    weight: 0.10
+    ascending: true
+  - factor: idiosyncratic_vol
+    weight: 0.12
+    ascending: true
+  - factor: channel20
+    weight: 0.08
+    ascending: true
+  # 市场广度检测用（不参与主排名，weight=0 或很低）
+  - factor: mkt_breadth20
+    weight: 0.06
+  - factor: mkt_up_ratio
+    weight: 0.06
+
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true
+  exclude_boards: ["BJ"]
+  min_price: 3.0
+
+conditions:
+  stop_loss_pct: 0.06
+  take_profit_pct: 0.25
+  trailing_pct: 0.08
+
+risk_rules:
+  max_drawdown: 0.15
+  cooldown_days: 7
+  max_position_pct: 0.10

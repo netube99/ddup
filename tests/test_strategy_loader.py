@@ -1,0 +1,185 @@
+"""btcore.strategy_loader 测试：YAML → Strategy 实例的加载与校验。"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from btcore.strategy_loader import load_strategy
+from strategies.examples.topk_momentum import TopKMomentum
+
+EXAMPLE_YAML = "strategies/examples/topk_momentum.yaml"
+
+
+def _write(tmp_path, body: str) -> str:
+    path = tmp_path / "s.yaml"
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+def test_load_example_yaml():
+    strategy = load_strategy(EXAMPLE_YAML)
+    assert isinstance(strategy, TopKMomentum)
+    assert strategy.config["top_k"] == 5
+    assert strategy.config["conditions"]["stop_loss_pct"] == 0.06
+    assert len(strategy.FACTOR_SPECS) == 2
+    assert strategy.FILTER_RULES["exclude_st"] is True
+
+
+def test_factor_specs_resolved_from_library():
+    """factor: name 引用在加载期解析为 {name, weight, ascending}，
+    因子定义（expr/where）进入 FACTOR_NODES 闭包。"""
+    strategy = load_strategy(EXAMPLE_YAML)
+    by_name = {s["name"]: s for s in strategy.FACTOR_SPECS}
+    assert by_name["mom20"]["weight"] == 1.0
+    assert by_name["low_turnover"]["ascending"] is True
+    assert strategy.FACTOR_NODES["mom20"]["expr"] == "roc(close_hfq, 20)"
+    assert strategy.FACTOR_NODES["low_turnover"]["expr"] == "turnover_rate"
+
+
+def test_specs_and_rules_are_instance_attrs():
+    """FACTOR_SPECS / FILTER_RULES 必须经 __init__ 注入实例，不污染类变量。"""
+    s1 = load_strategy(EXAMPLE_YAML)
+    s2 = TopKMomentum(config={})
+    assert s1.FACTOR_SPECS != s2.FACTOR_SPECS
+    assert s2.FACTOR_SPECS == []
+    assert TopKMomentum.FILTER_RULES == {}
+
+
+def test_missing_strategy_key(tmp_path):
+    path = _write(tmp_path, "name: x\nconfig: {}\n")
+    with pytest.raises(ValueError, match="strategy"):
+        load_strategy(path)
+
+
+def test_bad_class_path(tmp_path):
+    path = _write(tmp_path, "strategy: btcore.strategy_loader:nope\n")
+    with pytest.raises(ValueError, match="无法导入"):
+        load_strategy(path)
+
+
+def test_not_a_strategy_subclass(tmp_path):
+    path = _write(tmp_path, "strategy: btcore.strategy_loader:load_strategy\n")
+    with pytest.raises(ValueError, match="子类"):
+        load_strategy(path)
+
+
+def test_inline_expr_rejected(tmp_path):
+    """factor_specs 只允许引用因子库名字，直写 expr 报错。"""
+    path = _write(tmp_path, """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+factor_specs:
+  - name: bad
+    expr: "close_hfq"
+""")
+    with pytest.raises(ValueError, match="library.yaml"):
+        load_strategy(path)
+
+
+def test_unknown_factor_name(tmp_path):
+    path = _write(tmp_path, """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+factor_specs:
+  - factor: nope
+""")
+    with pytest.raises(ValueError, match="未知因子"):
+        load_strategy(path)
+
+
+def test_custom_factor_library(tmp_path):
+    """factor_library 键指定自定义库（相对策略 YAML 目录解析）。"""
+    (tmp_path / "my_lib.yaml").write_text(
+        'factors:\n  my_factor:\n    expr: "close_hfq / pre_close"\n',
+        encoding="utf-8",
+    )
+    path = _write(tmp_path, """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+factor_library: my_lib.yaml
+factor_specs:
+  - factor: my_factor
+    weight: 2.0
+""")
+    strategy = load_strategy(path)
+    spec = strategy.FACTOR_SPECS[0]
+    assert spec["name"] == "my_factor"
+    assert spec["weight"] == 2.0
+    assert strategy.FACTOR_NODES["my_factor"]["expr"] == "close_hfq / pre_close"
+
+
+def test_unknown_condition_key(tmp_path):
+    path = _write(tmp_path, """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+conditions:
+  martingale_pct: 0.5
+""")
+    with pytest.raises(ValueError, match="未知 conditions 键"):
+        load_strategy(path)
+
+
+def test_condition_out_of_range(tmp_path):
+    path = _write(tmp_path, """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+conditions:
+  stop_loss_pct: 1.5
+""")
+    with pytest.raises(ValueError, match="\\(0,1\\)"):
+        load_strategy(path)
+
+
+class _OwnUniverseStrategy(TopKMomentum):
+    """自定义 get_universe 的策略：loader 不应覆盖。"""
+
+    def get_universe(self, provider, start, end):
+        return ["000001.SZ"]
+
+
+def _stub_provider(snapshots):
+    def get_index_members(index_codes, start, end):
+        return dict(snapshots)
+    return SimpleNamespace(backend=SimpleNamespace(
+        get_index_members=get_index_members))
+
+
+_INDEX_YAML = """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+filter_rules:
+  index_universe: ["000300.SH", "000905.SH"]
+"""
+
+
+class TestIndexUniverseLoading:
+    _SNAPSHOTS = {"20240531": {"000001.SZ", "600036.SH"},
+                  "20240628": {"600036.SH", "300750.SZ"}}
+
+    def test_index_universe_is_known_key(self, tmp_path):
+        strategy = load_strategy(_write(tmp_path, _INDEX_YAML))
+        assert strategy.FILTER_RULES["index_universe"] == ["000300.SH", "000905.SH"]
+
+    def test_default_get_universe_generated(self, tmp_path):
+        """配置 index_universe 且策略未自定义 get_universe → loader 生成区间并集。"""
+        strategy = load_strategy(_write(tmp_path, _INDEX_YAML))
+        universe = strategy.get_universe(
+            _stub_provider(self._SNAPSHOTS), "20240603", "20240630")
+        assert universe == ["000001.SZ", "300750.SZ", "600036.SH"]
+
+    def test_own_get_universe_not_overridden(self, tmp_path):
+        path = _write(tmp_path, _INDEX_YAML.replace(
+            "strategies.examples.topk_momentum:TopKMomentum",
+            "tests.test_strategy_loader:_OwnUniverseStrategy",
+        ))
+        strategy = load_strategy(path)
+        assert strategy.get_universe(
+            _stub_provider(self._SNAPSHOTS), "20240603", "20240630") == ["000001.SZ"]
+
+    def test_empty_snapshots_fall_back_to_full_market(self, tmp_path):
+        """无成分数据时 get_universe 返回 None（全市场），与过滤层 fail-open 一致。"""
+        strategy = load_strategy(_write(tmp_path, _INDEX_YAML))
+        assert strategy.get_universe(
+            _stub_provider({}), "20240603", "20240630") is None
+
+    def test_missing_method_soft_fallback(self, tmp_path, caplog):
+        """backend 未提供 get_index_members：告警一次，返回 None（不裁剪）。"""
+        strategy = load_strategy(_write(tmp_path, _INDEX_YAML))
+        provider = SimpleNamespace(backend=SimpleNamespace())
+        assert strategy.get_universe(provider, "20240603", "20240630") is None
+        assert strategy.get_universe(provider, "20240603", "20240630") is None
+        assert caplog.text.count("白名单规则不生效") == 1

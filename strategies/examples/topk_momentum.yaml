@@ -1,0 +1,35 @@
+name: topk_momentum
+strategy: strategies.examples.topk_momentum:TopKMomentum
+
+config:
+  initial_capital: 1000000
+  max_positions: 10
+  top_k: 5
+  cooldown_days: 3
+  # 以下为引擎识别的可选键（全部有默认值），示例展示覆盖默认值
+  commission_rate: 0.0002        # 佣金万二
+  stamp_tax_rate: 0.0005         # 印花税万五（仅卖出）
+  slippage_ticks: 2              # 滑点 ±0.02 元
+  execution_price: "open"        # 以次日开盘价成交
+
+# 只引用 factors/library.yaml 里定义好的名字，不直写表达式
+factor_specs:
+  - factor: mom20
+    weight: 1.0
+    ascending: false             # false=值越大越好（动量策略）
+  - factor: low_turnover
+    weight: 0.5
+    ascending: true              # true=值越小越好（偏好低换手）
+
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true             # 显式声明才会 preload pe_ttm 列
+  exclude_boards: ["BJ"]         # 排除北交所
+  min_price: 3.0
+
+# 条件单：同时启用三种
+conditions:
+  stop_loss_pct: 0.06            # 跌 6% 止损（策略内会按 holding_days 动态调整）
+  take_profit_pct: 0.25          # 涨 25% 止盈
+  trailing_pct: 0.08             # 从最高点回撤 8% 止盈

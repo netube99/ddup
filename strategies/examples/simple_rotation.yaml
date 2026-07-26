@@ -1,0 +1,23 @@
+name: simple_rotation
+strategy: strategies.examples.simple_rotation:SimpleRotation
+
+config:
+  initial_capital: 1000000
+  max_positions: 10
+  top_k: 5
+
+factor_specs:
+  - factor: mom20
+    weight: 1.0
+    ascending: false
+  - factor: low_turnover
+    weight: 0.5
+    ascending: true
+
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  min_price: 3.0
+
+conditions:
+  stop_loss_pct: 0.08

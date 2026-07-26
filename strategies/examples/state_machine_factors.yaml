@@ -1,0 +1,57 @@
+# 示例 4 (state_machine) 的自定义因子库。
+# 演示因子 DAG 的全部能力：ts/xsec 算子嵌套、命名引用、where 掩码、坍缩算子。
+# 策略 YAML 通过 factor_library 键引用本文件。
+factors:
+  # ── 基础动量 ──
+  mom20:
+    expr: "roc(close_hfq, 20)"
+    description: "20日动量"
+  mom5_rev:
+    expr: "roc(close_hfq, 5)"
+    description: "5日动量（反转用，ascending=true）"
+  bias5:
+    expr: "close_hfq / ma(close_hfq, 5) - 1"
+    description: "5日乖离率"
+  bias20:
+    expr: "close_hfq / ma(close_hfq, 20) - 1"
+    description: "20日乖离率"
+
+  # ── 波动率 ──
+  vol5:
+    expr: "std(roc(close_hfq, 1), 5)"
+    description: "5日波动率"
+
+  # ── 截面变换（保形）──
+  mom20_z:
+    expr: "zscore(mom20)"
+    description: "动量截面标准化"
+  bias20_z:
+    expr: "zscore(bias20)"
+    description: "乖离截面标准化"
+  vol5_z:
+    expr: "zscore(vol5)"
+    description: "波动率截面标准化"
+
+  # ── 量价因子 ──
+  up_days20:
+    expr: "sum(close_hfq > delay(close_hfq, 1), 20)"
+    description: "近20日上涨天数"
+  near_low20:
+    expr: "close_hfq / min(low_hfq, 20)"
+    description: "接近20日低点程度"
+  channel20:
+    expr: "(max(high_hfq, 20) - min(low_hfq, 20)) / close_hfq"
+    description: "20日通道宽度"
+
+  # ── 回归类 ──
+  idiosyncratic_vol:
+    expr: "resid_std(close_hfq, open_hfq, 20)"
+    description: "特质波动率（resid_std 算子）"
+
+  # ── 坍缩类（市场广度）──
+  mkt_breadth20:
+    expr: "mean(close_hfq > ma(close_hfq, 20))"
+    description: "站上MA20占比（全市场聚合后广播回个股）"
+  mkt_up_ratio:
+    expr: "mean(close_hfq > delay(close_hfq, 1))"
+    description: "上涨占比"

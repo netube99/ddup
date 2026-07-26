@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+*.db
+backtest_output/
+results/
+.pytest_cache/
+market.db
+tushare_db
+adapters/tushare.py
+!tests/fixtures/*.parquet
+.coverage

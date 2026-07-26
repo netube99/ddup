@@ -1,0 +1,33 @@
+name: condition_hunter
+strategy: strategies.examples.condition_hunter:ConditionHunter
+
+config:
+  initial_capital: 1000000
+  max_positions: 12
+  top_k: 5
+  hunt_count: 4              # 条件买入候选数量
+  execution_price: "open"
+  condition_slippage_ticks: 1  # 条件单独立滑点（1 tick = 0.01 元）
+
+factor_specs:
+  - factor: mom20
+    weight: 1.0
+    ascending: false
+  - factor: bias20
+    weight: 0.5
+    ascending: false
+  - factor: low_turnover
+    weight: 0.3
+    ascending: true
+
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true
+  exclude_boards: ["BJ"]
+  min_price: 3.0
+
+# 只启用止盈和移动止盈（标准止损被 DYNAMIC_STOP 替换）
+conditions:
+  take_profit_pct: 0.20
+  trailing_pct: 0.08

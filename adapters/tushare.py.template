@@ -1,0 +1,136 @@
+"""tushare SQLite 库接入 — 填表式后端的完整示例。
+
+零 SQL：实现全部来自 btcore.generic_sql 的通用机械。
+本文件只回答一个问题：每份数据在库里的 "表名.字段名" 是什么。
+没有主表/辅助表之分——(交易日, 代码) 网格面板由后端内部拼接，
+对齐、列裁剪、键外并集全部是内部逻辑，此处无需关心。
+文档见 docs/backend_guide.md
+
+使用方法：复制本文件为 adapters/tushare.py，将 _DEFAULT_DB_PATH 改为你的数据库路径。
+"""
+
+from btcore.generic_sql import GenericSQLBackend
+
+_DEFAULT_DB_PATH = "<YOUR_TUSHARE_DB_PATH>"  # 如 "/data/tushare/market.db"
+
+TUSHARE_FORM = {
+    # ══ 引擎必需 ══
+    "symbol": "ts_code",                 # 证券代码列的名字（各表共同的查询键）
+    "date": "trade_date",                # 交易日列的名字（YYYYMMDD）
+
+    # 数据契约 10 字段，每个空都填 "表名.字段名"（口径见 docs/backend_guide.md）
+    "open": "stk_factor_pro.open",
+    "high": "stk_factor_pro.high",
+    "low": "stk_factor_pro.low",
+    "close": "stk_factor_pro.close",
+    "vol": "stk_factor_pro.vol",             # 成交量（手）
+    "amount": "stk_factor_pro.amount",
+    "adj_factor": "stk_factor_pro.adj_factor",
+    "pre_close": "stk_factor_pro.pre_close",  # 交易所除权口径
+    "up_limit": "stk_limit.up_limit",        # 涨跌停在另一张表，直接填
+    "down_limit": "stk_limit.down_limit",
+
+    # 交易日历与分红
+    "calendar_date": "trade_cal.cal_date",        # 日历表的日期列
+    "dividend_ex_date": "dividend.ex_date",       # 除权除息日
+    "dividend_stk_div": "dividend.stk_div",       # 每股送转
+    "dividend_cash_div": "dividend.cash_div",     # 每股现金红利
+
+    # ══ 引擎辅助能力（不填 = 该能力关闭）══
+    "st_symbol": "stock_st.ts_code",              # ST 标记表的代码列
+    "industry_name": "index_member_all.l1_name",  # 行业分类列
+    "listing_date": "stock_basic.list_date",      # 上市日期列
+    "index_code": "index_weight.index_code",      # 指数代码列
+    "index_member": "index_weight.con_code",      # 指数成分列
+    "benchmark_close": "idx_factor_pro.close",  # 基准收盘价（指数点位，无复权概念）
+    "benchmark_code": "000300.SH",       # 默认基准代码（取值，非位置）
+
+    # ══ 自选扩展字段（因子/策略要用什么加什么）══
+    "extra_fields": {
+        # 基本面/估值（因子库与过滤规则消费）
+        "turnover_rate": "stk_factor_pro.turnover_rate",
+        "turnover_rate_f": "stk_factor_pro.turnover_rate_f",
+        "volume_ratio": "stk_factor_pro.volume_ratio",
+        "pe": "stk_factor_pro.pe",
+        "pe_ttm": "stk_factor_pro.pe_ttm",
+        "pb": "stk_factor_pro.pb",
+        "ps": "stk_factor_pro.ps",
+        "ps_ttm": "stk_factor_pro.ps_ttm",
+        "dv_ratio": "stk_factor_pro.dv_ratio",
+        "dv_ttm": "stk_factor_pro.dv_ttm",
+        "total_share": "stk_factor_pro.total_share",
+        "float_share": "stk_factor_pro.float_share",
+        "free_share": "stk_factor_pro.free_share",
+        "total_mv": "stk_factor_pro.total_mv",
+        "circ_mv": "stk_factor_pro.circ_mv",
+        # 资金流向（moneyflow 表）
+        "buy_sm_vol": "moneyflow.buy_sm_vol",
+        "buy_sm_amount": "moneyflow.buy_sm_amount",
+        "sell_sm_vol": "moneyflow.sell_sm_vol",
+        "sell_sm_amount": "moneyflow.sell_sm_amount",
+        "buy_md_vol": "moneyflow.buy_md_vol",
+        "buy_md_amount": "moneyflow.buy_md_amount",
+        "sell_md_vol": "moneyflow.sell_md_vol",
+        "sell_md_amount": "moneyflow.sell_md_amount",
+        "buy_lg_vol": "moneyflow.buy_lg_vol",
+        "buy_lg_amount": "moneyflow.buy_lg_amount",
+        "sell_lg_vol": "moneyflow.sell_lg_vol",
+        "sell_lg_amount": "moneyflow.sell_lg_amount",
+        "buy_elg_vol": "moneyflow.buy_elg_vol",
+        "buy_elg_amount": "moneyflow.buy_elg_amount",
+        "sell_elg_vol": "moneyflow.sell_elg_vol",
+        "sell_elg_amount": "moneyflow.sell_elg_amount",
+        "net_mf_vol": "moneyflow.net_mf_vol",
+        "net_mf_amount": "moneyflow.net_mf_amount",
+        # 筹码分布（cyq_perf 表）
+        "his_low": "cyq_perf.his_low",
+        "his_high": "cyq_perf.his_high",
+        "cost_5pct": "cyq_perf.cost_5pct",
+        "cost_15pct": "cyq_perf.cost_15pct",
+        "cost_50pct": "cyq_perf.cost_50pct",
+        "cost_85pct": "cyq_perf.cost_85pct",
+        "cost_95pct": "cyq_perf.cost_95pct",
+        "weight_avg": "cyq_perf.weight_avg",
+        "winner_rate": "cyq_perf.winner_rate",
+        # 融资融券（margin_detail 表）
+        "rzye": "margin_detail.rzye",
+        "rqye": "margin_detail.rqye",
+        "rzmre": "margin_detail.rzmre",
+        "rqyl": "margin_detail.rqyl",
+        "rzche": "margin_detail.rzche",
+        "rqchl": "margin_detail.rqchl",
+        "rqmcl": "margin_detail.rqmcl",
+        "rzrqye": "margin_detail.rzrqye",
+        # 涨跌停（limit_list_d 表，2019-11 起；仅上榜日有值，其余 NaN）
+        "limit_flag": "limit_list_d.limit",      # U 涨停 / D 跌停 / Z 炸板（字符串列）
+        "fd_amount": "limit_list_d.fd_amount",   # 封单金额
+        "open_times": "limit_list_d.open_times",  # 涨停打开次数
+        "limit_times": "limit_list_d.limit_times",  # 连板数
+        # 龙虎榜（top_list 表，2018 起；仅上榜日有值）
+        "lhb_net_amount": "top_list.net_amount",     # 龙虎榜净买额
+        "lhb_net_rate": "top_list.net_rate",         # 净买额占总成交比
+        "lhb_amount_rate": "top_list.amount_rate",   # 龙虎榜成交额占比
+        # 大宗交易（block_trade 表，2018 起，(ts_code, trade_date) 无重复键）
+        "bt_price": "block_trade.price",   # 大宗成交价
+        "bt_amount": "block_trade.amount",  # 大宗交易额
+        # 东财资金流（moneyflow_dc 表，2023-09 起，与 moneyflow 口径互补）
+        "dc_net_amount": "moneyflow_dc.net_amount",       # 主力净流入额
+        "dc_net_rate": "moneyflow_dc.net_amount_rate",    # 主力净流入占比
+        "dc_elg_rate": "moneyflow_dc.buy_elg_amount_rate",  # 超大单买入占比
+    },
+
+    # ══ 沉底：表的特殊说明（大多数库为空）══
+    "tables": {
+        "trade_cal": {"filter": {"exchange": "SSE", "is_open": 1}},  # 只取上交所开市日
+        "dividend": {"filter": {"div_proc": "实施", "ex_date": None}},  # None → IS NOT NULL
+        "stock_st": {"filter": {"type": "ST"}},
+    },
+    # tushare 库各表键列均为 ts_code/trade_date，无需 tables 键列覆盖。
+}
+
+
+class TushareBackend(GenericSQLBackend):
+    """tushare 库后端：通用机械 + 上面的表单。"""
+
+    def __init__(self, db_path: str = _DEFAULT_DB_PATH):
+        super().__init__(TUSHARE_FORM, db_path)
