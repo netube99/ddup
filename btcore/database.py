@@ -2,6 +2,8 @@ import datetime
 import json
 import sqlite3
 
+import pandas as pd
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -11,7 +13,8 @@ CREATE TABLE IF NOT EXISTS runs (
     end_date TEXT,
     initial_capital REAL,
     config_json TEXT,
-    status TEXT
+    status TEXT,
+    stats_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS account_daily (
@@ -71,6 +74,7 @@ def init_backtest_db(path: str) -> sqlite3.Connection:
     holdings 是瞬态快照表，每次 run 开始清空。
     检测到旧 schema（runs 无 run_id 列）时 DROP 全部四表重建——
     旧行为本来就是每 run 清空，丢弃旧库无回归。
+    runs 缺 stats_json 列的老库走 ALTER TABLE 轻量迁移，历史 run 保留。
     """
     conn = sqlite3.connect(path)
     cols = {
@@ -80,7 +84,12 @@ def init_backtest_db(path: str) -> sqlite3.Connection:
     if cols and "run_id" not in cols:
         for table in _ALL_TABLES:
             conn.execute(f"DROP TABLE IF EXISTS {table}")
+        cols = set()
+    needs_stats_json = bool(cols) and "stats_json" not in cols
     conn.executescript(SCHEMA_SQL)
+    if needs_stats_json:
+        # 轻量迁移：老库补 stats_json 列，历史 run 保留（stats_json 为 NULL）
+        conn.execute("ALTER TABLE runs ADD COLUMN stats_json TEXT")
     conn.execute("DELETE FROM holdings")
     return conn
 
@@ -152,3 +161,43 @@ def write_trade(conn: sqlite3.Connection, run_id: int, trade):
 
 def update_run_status(conn: sqlite3.Connection, run_id: int, status: str):
     conn.execute("UPDATE runs SET status = ? WHERE run_id = ?", (status, run_id))
+
+
+def _json_default(obj):
+    # numpy 标量/pd.Timestamp 等经 item()/str() 降级为 JSON 可序列化值
+    if hasattr(obj, "item"):
+        return obj.item()
+    return str(obj)
+
+
+def write_run_stats(conn: sqlite3.Connection, run_id: int, stats: dict):
+    """把 statistics dict 以 JSON 形式挂到 runs.stats_json，供多 run 对比。"""
+    conn.execute(
+        "UPDATE runs SET stats_json = ? WHERE run_id = ?",
+        (json.dumps(stats, default=_json_default), run_id),
+    )
+
+
+def read_runs(conn: sqlite3.Connection) -> pd.DataFrame:
+    """runs 全表（按 run_id 升序），多 run 对比的入口。"""
+    return pd.read_sql_query("SELECT * FROM runs ORDER BY run_id", conn)
+
+
+def read_run_data(conn: sqlite3.Connection, run_id: int):
+    """读取单个 run 的 (account_daily, trade_log, stats_dict|None)。
+
+    stats_json 为 NULL（老库历史 run）时 stats_dict 返回 None，调用方自行重算。
+    """
+    account_daily = pd.read_sql_query(
+        "SELECT * FROM account_daily WHERE run_id = ? ORDER BY date",
+        conn, params=(run_id,),
+    )
+    trade_log = pd.read_sql_query(
+        "SELECT * FROM trade_log WHERE run_id = ? ORDER BY date, id",
+        conn, params=(run_id,),
+    )
+    row = conn.execute(
+        "SELECT stats_json FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    stats = json.loads(row[0]) if row and row[0] else None
+    return account_daily, trade_log, stats

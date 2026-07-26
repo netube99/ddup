@@ -1,12 +1,17 @@
 import sqlite3
 from dataclasses import dataclass
 
+import numpy as np
+
 from btcore.database import (
     init_backtest_db,
+    read_run_data,
+    read_runs,
     update_run_status,
     write_daily,
     write_holdings,
     write_run,
+    write_run_stats,
     write_trade,
 )
 from tests.conftest import make_account, make_holding
@@ -163,4 +168,57 @@ def test_old_schema_rebuilt(tmp_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
     assert "run_id" in cols
     assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    conn.close()
+
+
+def test_write_run_stats():
+    """stats_json 写入并可读回；numpy 标量经 default 降级为 JSON 数值。"""
+    conn = init_backtest_db(":memory:")
+    run_id = _write_run(conn)
+    write_run_stats(conn, run_id, {
+        "total_return": np.float64(0.123),
+        "trade_count": np.int64(7),
+        "nested": {"sharpe": np.float64(1.5)},
+    })
+    _, _, stats = read_run_data(conn, run_id)
+    assert stats["total_return"] == 0.123
+    assert stats["trade_count"] == 7
+    assert stats["nested"]["sharpe"] == 1.5
+    conn.close()
+
+
+def test_read_run_data_no_stats():
+    """未写 stats_json 的 run，stats 返回 None（调用方自行重算）。"""
+    conn = init_backtest_db(":memory:")
+    run_id = _write_run(conn)
+    write_daily(conn, run_id, "20240601", 950000.0, 1000000.0, 0.0, 0.0, 1000000.0)
+    adf, tdf, stats = read_run_data(conn, run_id)
+    assert len(adf) == 1
+    assert tdf.empty
+    assert stats is None
+    runs = read_runs(conn)
+    assert list(runs["run_id"]) == [run_id]
+    conn.close()
+
+
+def test_stats_json_migration(tmp_path):
+    """老库（runs 有 run_id 无 stats_json）ALTER 迁移，历史行保留为 NULL。"""
+    db_path = str(tmp_path / "mig.db")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE runs (run_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " created_at TEXT, strategy TEXT, status TEXT)"
+    )
+    conn.execute("INSERT INTO runs (created_at, strategy, status)"
+                 " VALUES ('x', 'old', 'completed')")
+    conn.commit()
+    conn.close()
+
+    conn = init_backtest_db(db_path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    assert "stats_json" in cols
+    row = conn.execute("SELECT strategy, stats_json FROM runs").fetchone()
+    assert row[0] == "old"
+    assert row[1] is None
     conn.close()

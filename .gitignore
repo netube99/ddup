@@ -14,3 +14,6 @@ adapters/tushare.py
 # 用户策略目录（不含官方示例）
 strategies/exploring/
 strategies/selected/
+
+# 回测报告（隐私信息，不入 git）
+strategies/**/reports/

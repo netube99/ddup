@@ -472,7 +472,10 @@ print(result["statistics"])
 `run(start, end)` 返回 dict：
 - `"account_daily"`：每日账户快照 DataFrame
 - `"trade_log"`：完整成交记录 DataFrame
-- `"statistics"`：绩效指标 dict（年化收益、夏普、最大回撤等）
+- `"statistics"`：绩效指标 dict（年化收益、夏普、最大回撤等），其中
+  `trading_friction`（交易磨损：双边磨损率、年化拖累、成本占盈利比、无摩擦对照收益）
+  与 `management_complexity`（持仓管理复杂度：单日最大成交笔数、有成交天数占比、
+  单笔买入金额门槛、单票平均市值）是面向散户手动跟单场景的两组指标
 
 ---
 
@@ -490,6 +493,7 @@ print(result["statistics"])
 | `initial_capital` | REAL | 初始资金 |
 | `config_json` | TEXT | 策略完整配置 JSON |
 | `status` | TEXT | running / completed / failed |
+| `stats_json` | TEXT | statistics 完整 JSON（多 run 对比用；老库 ALTER 迁移，历史 run 为 NULL） |
 
 ### account_daily
 | 列 | 类型 | 说明 |
@@ -539,11 +543,48 @@ run 中抛异常时 status 改写为 `failed`，不留 `running` 假象。
 ```python
 from research.attribution import brinson_attribute
 
+# 签名：brinson_attribute(db_path, provider_db, start, end,
+#                         index_code="000300.SH", run_id=None)
+# provider_db 是行情库路径（提供行业映射/行业指数/基准权重）
+
 # 默认取最新 run
-result = brinson_attribute("result.db")
+result = brinson_attribute("result.db", "/path/to/market.db",
+                           "20240101", "20240630")
 
 # 指定 run_id
-result = brinson_attribute("result.db", run_id=3)
+result = brinson_attribute("result.db", "/path/to/market.db",
+                           "20240101", "20240630", run_id=3)
+```
+
+---
+
+## HTML 报告与多 run 对比
+
+`research/report.py` 提供单文件 HTML 报告（内联 SVG 图表，零第三方依赖，离线可读）：
+
+```bash
+# 回测时直接出报告
+python scripts/run.py <策略.yaml> --start 20240101 --end 20240630 \
+    --out result.db --report report.html
+
+# 从结果库离线生成单 run 报告（--run-id 缺省取最新）
+python scripts/report.py result.db [--run-id 3] --out report.html
+
+# 多 run 对比：终端打印关键指标表，--html 同时产出对比报告
+# （指标对比表 + 各 run 归一化净值叠加曲线）
+python scripts/compare.py result.db [--runs 1,2,3] [--html compare.html]
+```
+
+单 run 报告包含：核心指标、净值/回撤曲线、月度收益、交易磨损、
+持仓管理复杂度、往返交易汇总、个股盈亏贡献 Top10、成交明细。
+老 run（stats_json 为 NULL）在生成报告/对比时现场重算统计指标。
+
+程序式 API：
+```python
+from research.report import generate_report, generate_compare_report
+
+generate_report(result, "report.html")                      # engine.run() 返回值
+generate_compare_report("result.db", "compare.html")        # 全部 run 对比
 ```
 
 ---
@@ -555,8 +596,13 @@ python scripts/run.py <策略.yaml> \
     --start YYYYMMDD \         # 必填：回测开始日期
     --end YYYYMMDD \           # 必填：回测结束日期
     [--capital 初始资金] \      # 覆盖 YAML config
-    [--out 结果库路径]          # 默认 :memory: 不落盘
+    [--out 结果库路径] \        # 默认 :memory: 不落盘
+    [--report 报告.html] \      # 缺省生成到 <策略目录>/reports/<yaml名>_<起>_<止>.html
+    [--no-report]              # 不生成报告
 ```
+
+报告默认与策略绑定，生成到策略目录下的 `reports/` 文件夹；该目录已加入
+`.gitignore`（`strategies/**/reports/`），回测结果属隐私信息不入 git。
 
 行情数据库路径由 `adapters/tushare.py` 的 `_DEFAULT_DB_PATH` 决定，不存在运行时切换数据源的参数。
 

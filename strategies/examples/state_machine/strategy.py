@@ -70,13 +70,13 @@ def _time_stop(holding, cond, bar):
 
 def _volatility_exit(holding, cond, bar):
     """日内振幅超阈值退出。"""
-    o, h, l = bar.get("open"), bar.get("high"), bar.get("low")
-    if not all([o, h, l]) or o <= 0:
+    o, h, lo = bar.get("open"), bar.get("high"), bar.get("low")
+    if not all([o, h, lo]) or o <= 0:
         return (False, 0.0, {})
-    amplitude = (h - l) / o
+    amplitude = (h - lo) / o
     threshold = cond.get("threshold", 0.07)
     if amplitude >= threshold:
-        exit_price = max(o * (1 - threshold / 2), l)
+        exit_price = max(o * (1 - threshold / 2), lo)
         return (True, exit_price, {"amplitude": round(amplitude, 4)})
     return (False, 0.0, {})
 
@@ -167,7 +167,10 @@ class StateMachine(Strategy):
                     "STOP_LOSS", "TAKE_PROFIT", "TRAILING_TP",
                     "DYNAMIC_STOP", "TIME_STOP", "VOLATILITY_EXIT",
                 ):
-                    cd = self._cooldown_days * 2 if t.trigger == "STOP_LOSS" else self._cooldown_days
+                    cd = (
+                        self._cooldown_days * 2
+                        if t.trigger == "STOP_LOSS" else self._cooldown_days
+                    )
                     self._cooldown_map[t.symbol] = date_int + cd
 
                     # 更新持仓状态（记录退出原因和价格）
@@ -187,7 +190,10 @@ class StateMachine(Strategy):
                 old_cost = entry.get("entry_price", t.price) * old_shares
                 new_cost = t.price * t.shares
                 total_shares = old_shares + t.shares
-                entry["entry_price"] = (old_cost + new_cost) / total_shares if total_shares > 0 else t.price
+                if total_shares > 0:
+                    entry["entry_price"] = (old_cost + new_cost) / total_shares
+                else:
+                    entry["entry_price"] = t.price
                 entry["total_shares"] = total_shares
                 entry["entry_date"] = t.date
                 entry["highest_price"] = max(entry.get("highest_price", t.price), t.price)

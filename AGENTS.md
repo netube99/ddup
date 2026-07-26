@@ -25,6 +25,10 @@ python scripts/check_anticorrupt.py
 # 运行 YAML 策略回测（需要真实数据库）
 python scripts/run.py strategies/examples/topk_momentum/config.yaml --start 20240603 --end 20240628
 
+# 从结果库生成单 run HTML 报告 / 多 run 对比
+python scripts/report.py result.db --out report.html
+python scripts/compare.py result.db --html compare.html
+
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
 ```
@@ -37,7 +41,7 @@ python scripts/dump_fixtures.py
 btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策略加载器/工具）
               不要随意修改
 adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
-research/   — 研究工具（因子评估、归因）
+research/   — 研究工具（因子评估、归因、HTML 报告与多 run 对比）
 factors/    — 用户因子定义（library.yaml，可编辑）
 strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 ```
@@ -90,6 +94,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 滑点模型（tick=0.01） | `btcore/slippage.py` | `docs/strategy_guide.md` |
 | 成本函数（可配置费率） | `btcore/costs.py` | `docs/strategy_guide.md` |
 | 多 run 结果库 schema | `btcore/database.py` | `docs/strategy_guide.md` |
+| 单文件 HTML 报告与多 run 对比（内联 SVG） | `research/report.py` | `docs/strategy_guide.md` |
 | 涨跌停价格推算（ROUND_HALF_UP） | `btcore/limits.py` | — |
 | 撮合入口（价格校验/成交量cap等） | `btcore/match/core.py` | — |
 | 列裁剪推导 | `btcore/engine.py:required_bar_columns` | `docs/strategy_guide.md` |
@@ -102,8 +107,9 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 324 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
-  列裁剪、风控规则、index_universe、因子算子、物化规划、GenericSQLBackend 表单校验等
+- 335 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
+  列裁剪、风控规则、index_universe、因子算子、物化规划、GenericSQLBackend 表单校验、
+  统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移等
 
 ---
 

@@ -23,7 +23,10 @@ import logging
 from typing import Optional
 
 from btcore.filters import StockFilter
-from btcore.match.conditions import register_condition_handler, register_buy_condition_handler
+from btcore.match.conditions import (
+    register_buy_condition_handler,
+    register_condition_handler,
+)
 from btcore.strategy import Strategy
 from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
 
@@ -59,11 +62,11 @@ def _vwap_buy_handler(order, bar):
     VWAP 估算 = （最高价 + 最低价 + 收盘价）/ 3
     只有 open 或 low 触达该价位才触发。
     """
-    h, l, c = bar.get("high"), bar.get("low"), bar.get("close")
-    if not all([h, l, c]):
+    h, lo, c = bar.get("high"), bar.get("low"), bar.get("close")
+    if not all([h, lo, c]):
         return (False, 0.0, {})
 
-    vwap_est = (h + l + c) / 3
+    vwap_est = (h + lo + c) / 3
     if bar["open"] <= vwap_est:
         return (True, bar["open"], {"vwap": round(vwap_est, 2)})
     if bar["low"] <= vwap_est:

@@ -206,9 +206,6 @@ class Engine:
                     continue
                 self.step(today, day_bars, conn)
 
-            with conn:
-                database.update_run_status(conn, self.run_id, "completed")
-
             account_daily_df = pd.read_sql_query(
                 "SELECT * FROM account_daily WHERE run_id = ? ORDER BY date",
                 conn, params=(self.run_id,),
@@ -227,6 +224,9 @@ class Engine:
                 benchmark,
                 holdings=dict(self.account.holdings),
             )
+            with conn:
+                database.write_run_stats(conn, self.run_id, stats_result)
+                database.update_run_status(conn, self.run_id, "completed")
             return {
                 "account_daily": account_daily_df,
                 "trade_log": trade_log_df,

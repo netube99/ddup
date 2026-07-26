@@ -69,6 +69,8 @@ research/        — 研究工具
 | 因子研究 | `research/factor_eval.py` | [factor_library.md](factor_library.md) |
 | 绩效归因 | `research/attribution.py` | [strategy_guide.md](strategy_guide.md) |
 | CLI 回测 | `scripts/run.py` | [strategy_guide.md](strategy_guide.md) |
+| HTML 报告 | `scripts/report.py` / `research/report.py` | [strategy_guide.md](strategy_guide.md) |
+| 多 run 对比 | `scripts/compare.py` | [strategy_guide.md](strategy_guide.md) |
 | 程序式 API | `Engine(strategy, provider).run()` | [strategy_guide.md](strategy_guide.md) |
 
 ---

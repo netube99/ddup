@@ -146,6 +146,13 @@ def calculate_statistics(
 
     result.update(_compute_symbol_contribution(trades, div_log, holdings))
     result.update(_compute_cost_breakdown(trades))
+    result.update(
+        _compute_trading_friction(
+            trades, account_daily_df, result["cost_breakdown"],
+            result["round_trip"]["trip_detail"], annual_days,
+        )
+    )
+    result.update(_compute_management_complexity(trades, account_daily_df))
 
     result["benchmark_compare"] = _compute_benchmark_compare(
         account_daily_df, benchmark_df, annual_days, risk_free_rate
@@ -424,6 +431,104 @@ def _compute_cost_breakdown(trades: pd.DataFrame) -> dict:
                        + trades["transfer_fee"].sum() + trades["slippage_amount"].sum()),
     }
     return {"cost_breakdown": breakdown}
+
+
+def _compute_trading_friction(trades: pd.DataFrame, account_daily_df: pd.DataFrame,
+                              cost_breakdown: dict, trip_detail: list,
+                              annual_days: int) -> dict:
+    """散户视角的交易磨损：费用/滑点对收益的侵蚀程度。"""
+    zero = {
+        "total_cost": 0.0,
+        "cost_per_trade": 0.0,
+        "cost_pct_of_turnover": 0.0,
+        "annualized_cost_drag": 0.0,
+        "cost_pct_of_gross_profit": 0.0,
+        "no_cost_total_return": 0.0,
+        "slippage_share": 0.0,
+    }
+    if trades.empty or not cost_breakdown:
+        return {"trading_friction": zero}
+
+    total_cost = float(cost_breakdown["total_cost"])
+    total_values = account_daily_df["total_value"].values
+    initial_capital = account_daily_df["initial_capital"].iloc[0]
+    n_days = len(total_values)
+    n_years = n_days / annual_days if n_days > 0 else 1.0
+
+    total_turnover = float(trades["turnover"].sum())
+    avg_total_value = float(np.mean(total_values)) if n_days > 0 else 0.0
+    gross_profit = sum(t["pnl"] for t in trip_detail if t["pnl"] > 0)
+
+    friction = {
+        "total_cost": total_cost,
+        "cost_per_trade": total_cost / len(trades) if len(trades) > 0 else 0.0,
+        "cost_pct_of_turnover": total_cost / total_turnover if total_turnover > 0 else 0.0,
+        "annualized_cost_drag": (
+            (total_cost / avg_total_value) / n_years
+            if avg_total_value > 0 and n_years > 0 else 0.0
+        ),
+        "cost_pct_of_gross_profit": total_cost / gross_profit if gross_profit > 0 else 0.0,
+        "no_cost_total_return": (
+            (total_values[-1] + total_cost) / initial_capital - 1.0
+            if initial_capital > 0 else 0.0
+        ),
+        "slippage_share": (
+            float(cost_breakdown["slippage"]) / total_cost if total_cost > 0 else 0.0
+        ),
+    }
+    return {"trading_friction": friction}
+
+
+def _compute_management_complexity(trades: pd.DataFrame,
+                                   account_daily_df: pd.DataFrame) -> dict:
+    """散户视角的持仓管理复杂度：手动跟单的操作负担与资金门槛。"""
+    zero = {
+        "max_positions": 0,
+        "avg_trades_per_day": 0.0,
+        "avg_trades_per_active_day": 0.0,
+        "max_trades_per_day": 0,
+        "active_day_ratio": 0.0,
+        "avg_buy_amount": 0.0,
+        "min_buy_amount": 0.0,
+        "avg_position_value": 0.0,
+    }
+    n_days = len(account_daily_df)
+    if n_days == 0:
+        return {"management_complexity": zero}
+
+    if "n_holdings" in account_daily_df.columns:
+        nh = account_daily_df["n_holdings"].astype(float)
+        max_positions = int(nh.max())
+        held = account_daily_df[nh > 0]
+        avg_position_value = (
+            float((held["total_value"] / nh[nh > 0]).mean()) if len(held) > 0 else 0.0
+        )
+    else:
+        max_positions = 0
+        avg_position_value = 0.0
+
+    if trades.empty:
+        complexity = {
+            **zero,
+            "max_positions": max_positions,
+            "avg_position_value": avg_position_value,
+        }
+        return {"management_complexity": complexity}
+
+    active_days = int(trades["date"].nunique())
+    buys = trades[trades["side"] == "BUY"]["turnover"]
+
+    complexity = {
+        "max_positions": max_positions,
+        "avg_trades_per_day": len(trades) / n_days,
+        "avg_trades_per_active_day": len(trades) / active_days if active_days > 0 else 0.0,
+        "max_trades_per_day": int(trades.groupby("date").size().max()),
+        "active_day_ratio": active_days / n_days,
+        "avg_buy_amount": float(buys.mean()) if len(buys) > 0 else 0.0,
+        "min_buy_amount": float(buys.min()) if len(buys) > 0 else 0.0,
+        "avg_position_value": avg_position_value,
+    }
+    return {"management_complexity": complexity}
 
 
 def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
