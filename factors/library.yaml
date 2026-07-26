@@ -89,3 +89,96 @@ factors:
   mom_z_60:
     expr: "zscore(mom_60d)"
     description: "截面标准化 60 日动量"
+
+  # ══ 资金流因子（moneyflow 表；大单/超大单净流向）══
+  lg_net_rate:
+    expr: "(buy_lg_amount - sell_lg_amount) / amount"
+    description: "大单净买入占比（大资金动向）"
+  elg_net_rate:
+    expr: "(buy_elg_amount - sell_elg_amount) / amount"
+    description: "超大单净买入占比（主力资金动向）"
+  md_net_rate:
+    expr: "(buy_md_amount - sell_md_amount) / amount"
+    description: "中单净买入占比"
+  total_net_rate:
+    expr: "(buy_lg_amount + buy_elg_amount - sell_lg_amount - sell_elg_amount) / amount"
+    description: "大单+超大单净买入占比（主力合计）"
+  lg_net_ma5:
+    expr: "ma((buy_lg_amount - sell_lg_amount) / amount, 5)"
+    description: "大单净买入占比 5 日平滑"
+  elg_net_ma5:
+    expr: "ma((buy_elg_amount - sell_elg_amount) / amount, 5)"
+    description: "超大单净买入占比 5 日平滑"
+  lg_net_z:
+    expr: "zscore((buy_lg_amount - sell_lg_amount) / amount)"
+    description: "大单净买入占比截面标准化"
+  mf_divergence:
+    expr: "(buy_lg_amount - sell_lg_amount) / amount - roc(close_hfq, 5)"
+    description: "大单流向与价格背离（正=资金流入但价未涨）"
+
+  # ══ 筹码分布因子（cyq_perf 表）══
+  winner_rate_z:
+    expr: "zscore(winner_rate)"
+    description: "获利盘比例截面标准化（高=获利盘多/压力区，低=套牢盘多/支撑区）"
+  cost_concentration:
+    expr: "(cost_95pct - cost_5pct) / cost_50pct"
+    where: "cost_50pct > 0"
+    description: "筹码集中度（值越小越集中）"
+  close_vs_cost50:
+    expr: "close / cost_50pct - 1"
+    where: "cost_50pct > 0"
+    description: "收盘价相对筹码中轴位置（正=浮盈，负=浮亏）"
+  chip_support:
+    expr: "close / cost_85pct - 1"
+    where: "cost_85pct > 0"
+    description: "距上方重压区距离（负=上方有压力）"
+
+  # ══ 融资融券因子（margin_detail 表）══
+  margin_change:
+    expr: "rzmre / rzye"
+    where: "rzye > 0"
+    description: "融资买入占余额比（融资活跃度）"
+  margin_balance_z:
+    expr: "zscore(rzye / (total_mv * 10000))"
+    where: "rzye > 0 and total_mv > 0"
+    description: "融资余额占市值比截面标准化（杠杆情绪）"
+  margin_ma5:
+    expr: "ma(rzmre / rzye, 5)"
+    where: "rzye > 0"
+    description: "融资活跃度 5 日平滑"
+
+  # ══ 量价因子 ══
+  vol_ratio_z:
+    expr: "zscore(volume_ratio)"
+    description: "量比截面标准化（放量异象）"
+  turnover_z:
+    expr: "zscore(turnover_rate)"
+    description: "换手率截面标准化（低换手异象，升序）"
+  amount_z:
+    expr: "zscore(amount)"
+    description: "成交额截面标准化（流动性）"
+  amt_ma5_ratio:
+    expr: "amount / ma(amount, 5)"
+    description: "成交额相对 5 日均量"
+
+  # ══ 短周期动量/反转 ══
+  mom5:
+    expr: "roc(close_hfq, 5)"
+    description: "5日动量"
+  mom10:
+    expr: "roc(close_hfq, 10)"
+    description: "10日动量"
+  mom60:
+    expr: "roc(close_hfq, 60)"
+    description: "60日动量（同 mom_60d，别名）"
+  rev10_z:
+    expr: "zscore(-roc(close_hfq, 10))"
+    description: "截面标准化 10 日反转（升序）"
+
+  # ══ 波动率 ══
+  vol10:
+    expr: "std(roc(close_hfq, 1), 10)"
+    description: "10日波动率"
+  vol60:
+    expr: "std(roc(close_hfq, 1), 60)"
+    description: "60日波动率"

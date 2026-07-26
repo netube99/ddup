@@ -603,11 +603,22 @@ def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
     bench_total_return = bench_vals[-1] / bench_vals[0] - 1.0 if bench_vals[0] > 0 else 0.0
     strat_total_return = strat_vals[-1] / strat_vals[0] - 1.0 if strat_vals[0] > 0 else 0.0
 
+    # 基准年化收益
+    n_years = (len(bench_vals) - 1) / annual_days if annual_days > 0 else 0
+    bench_ann = (1 + bench_total_return) ** (1 / n_years) - 1 if n_years > 0 else 0.0
+
+    # 基准最大回撤
+    bench_nav = bench_vals / bench_vals[0]
+    bench_peak = np.maximum.accumulate(bench_nav)
+    bench_dd = float(np.min(bench_nav / bench_peak - 1.0))
+
     return {
         "alpha": alpha_annualized,
         "beta": beta,
         "information_ratio": ir,
         "tracking_error": tracking_error,
         "benchmark_total_return": bench_total_return,
+        "benchmark_annual_return": bench_ann,
+        "benchmark_max_drawdown": bench_dd,
         "strategy_total_return": float(strat_total_return),
     }

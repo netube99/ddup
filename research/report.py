@@ -10,6 +10,7 @@
 """
 
 import html
+import re
 import sqlite3
 
 import numpy as np
@@ -18,6 +19,53 @@ import pandas as pd
 from btcore import database, stats
 
 _PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"]
+_STOCK_NAME_CACHE: dict[str, str] = {}
+
+
+def _load_stock_names() -> dict[str, str]:
+    """从 tushare market.db 加载 ts_code → 股票名称映射（含指数名）。"""
+    global _STOCK_NAME_CACHE
+    if _STOCK_NAME_CACHE:
+        return _STOCK_NAME_CACHE
+    market_db = _market_db_path()
+    if not market_db:
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{market_db}?mode=ro", uri=True)
+        rows = conn.execute("SELECT ts_code, name FROM stock_basic").fetchall()
+        _STOCK_NAME_CACHE = {r[0]: r[1] for r in rows}
+        # 同时加载指数名称
+        idx_rows = conn.execute("SELECT ts_code, name FROM index_basic").fetchall()
+        for r in idx_rows:
+            _STOCK_NAME_CACHE[r[0]] = r[1]
+        conn.close()
+    except Exception:
+        pass
+    return _STOCK_NAME_CACHE
+
+
+def _market_db_path() -> str | None:
+    from pathlib import Path
+    import re
+    adapter = Path(__file__).resolve().parents[1] / "adapters" / "tushare.py"
+    with open(adapter) as f:
+        content = f.read()
+    m = re.search(r'_DEFAULT_DB_PATH\s*=\s*"([^"]+)"', content)
+    return m.group(1) if m else None
+
+
+def _benchmark_name(code: str | None) -> str:
+    if not code:
+        return "基准"
+    names = _load_stock_names()
+    name = names.get(code)
+    return f"{name}({code})" if name else code
+
+
+def _stock_name(code: str) -> str:
+    names = _load_stock_names()
+    name = names.get(code, "")
+    return f"{name}({code})" if name else code
 
 
 # ---------------------------------------------------------------- 数据加载
@@ -151,14 +199,26 @@ def _svg_line_chart(series: list[tuple[str, list[float], str]],
             f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.6"/>'
         )
 
-    # 图例
-    lx = width - mr - 10
-    for k, (name, _, color) in enumerate(series):
+    # 图例（图表顶部居中，半透明白底避免与曲线重叠）
+    if len(series) > 0:
+        # 估算图例总宽度：色块 + 间距 + 文字
+        item_w = 120  # 每项约 120px
+        total_w = len(series) * item_w
+        lx_start = (width - total_w) / 2
+        ly = mt + 2
+        lh = 22
+        # 半透明白底
         parts.append(
-            f'<rect x="{lx - 110}" y="{mt + k * 18}" width="10" height="10" fill="{color}"/>'
-            f'<text x="{lx - 96}" y="{mt + 9 + k * 18}" font-size="11" '
-            f'fill="#374151">{_esc(name)}</text>'
+            f'<rect x="{lx_start - 4}" y="{ly}" width="{total_w + 8}" height="{lh}" '
+            f'fill="#ffffff" fill-opacity="0.85" rx="3"/>'
         )
+        for k, (name, _, color) in enumerate(series):
+            cx = lx_start + k * item_w
+            parts.append(
+                f'<rect x="{cx}" y="{ly + 6}" width="10" height="10" fill="{color}"/>'
+                f'<text x="{cx + 14}" y="{ly + 15}" font-size="11" '
+                f'fill="#374151">{_esc(name)}</text>'
+            )
 
     parts.append("</svg>")
     return "".join(parts)
@@ -184,6 +244,8 @@ th {{ background: #f3f4f6; }}
 td:first-child, th:first-child {{ text-align: left; }}
 .meta {{ color: #6b7280; font-size: 13px; }}
 .empty {{ color: #9ca3af; font-size: 13px; }}
+.up {{ color: #dc2626; }}
+.down {{ color: #16a34a; }}
 svg {{ width: 100%; height: auto; }}
 </style>
 </head>
@@ -205,12 +267,19 @@ def _metric_table(spec: list[tuple[str, str, object]], statistics: dict) -> str:
     return "<table><tr><th>指标</th><th>值</th></tr>" + "".join(rows) + "</table>"
 
 
-def _dict_table(title_row: tuple[str, str], data: dict, fmt) -> str:
+def _dict_table(title_row: tuple[str, str], data: dict, fmt,
+                colorize: bool = False) -> str:
     if not data:
         return '<p class="empty">无数据</p>'
-    rows = "".join(
-        f"<tr><td>{_esc(k)}</td><td>{fmt(v)}</td></tr>" for k, v in data.items()
-    )
+    if colorize:
+        rows = "".join(
+            f"<tr><td>{_esc(k)}</td><td class=\"{'up' if float(v) > 0 else 'down' if float(v) < 0 else ''}\">"
+            f"{fmt(v)}</td></tr>" for k, v in data.items()
+        )
+    else:
+        rows = "".join(
+            f"<tr><td>{_esc(k)}</td><td>{fmt(v)}</td></tr>" for k, v in data.items()
+        )
     return f"<table><tr><th>{title_row[0]}</th><th>{title_row[1]}</th></tr>{rows}</table>"
 
 
@@ -291,12 +360,15 @@ def _trade_table(trade_log: pd.DataFrame) -> str:
     cols = ["date", "symbol", "side", "trigger", "price", "shares", "turnover",
             "commission", "stamp_tax", "transfer_fee", "slippage_amount", "reason"]
     cols = [c for c in cols if c in trade_log.columns]
-    head = "".join(f"<th>{c}</th>" for c in cols)
+    headers = [_stock_name(c) if c == "symbol" else c for c in cols]
+    head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
     rows = []
     for row in trade_log[cols].itertuples(index=False):
         cells = []
         for c, v in zip(cols, row):
-            if c in ("price", "turnover", "commission", "stamp_tax",
+            if c == "symbol":
+                cells.append(f"<td>{_esc(_stock_name(str(v)))}</td>")
+            elif c in ("price", "turnover", "commission", "stamp_tax",
                      "transfer_fee", "slippage_amount"):
                 cells.append(f"<td>{float(v):,.2f}</td>")
             else:
@@ -313,7 +385,7 @@ def _symbol_contribution_table(statistics: dict) -> str:
         contrib.items(), key=lambda kv: abs(kv[1]["total_contribution"]), reverse=True
     )[:10]
     rows = "".join(
-        f"<tr><td>{_esc(sym)}</td><td>{_num(d['realized_pnl'])}</td>"
+        f"<tr><td>{_esc(_stock_name(sym))}</td><td>{_num(d['realized_pnl'])}</td>"
         f"<td>{_num(d['unrealized_pnl'])}</td><td>{_num(d['dividend_received'])}</td>"
         f"<td>{_num(d['total_contribution'])}</td></tr>"
         for sym, d in top
@@ -358,8 +430,15 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     parts.append("<h2>核心指标</h2>")
     parts.append(_metric_table(_CORE_SPEC, statistics))
 
+    # 净值曲线：策略 + 基准（如有）
+    bm_code = result.get("benchmark_code")
+    bm_label = _benchmark_name(bm_code)
+    nav_series = [("策略净值", nav, _PALETTE[0])]
+    bm_nav = result.get("benchmark_nav")
+    if bm_nav and len(bm_nav) == len(dates):
+        nav_series.append((bm_label, bm_nav, "#9ca3af"))
     parts.append("<h2>净值曲线</h2>")
-    parts.append(_svg_line_chart([("净值", nav, _PALETTE[0])], dates, baseline=1.0))
+    parts.append(_svg_line_chart(nav_series, dates, baseline=1.0))
 
     parts.append("<h2>回撤曲线</h2>")
     parts.append(_svg_line_chart(
@@ -367,7 +446,24 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     ))
 
     parts.append("<h2>月度收益</h2>")
-    parts.append(_dict_table(("月份", "收益"), statistics.get("monthly_returns", {}), _pct))
+    parts.append(_dict_table(("月份", "收益"), statistics.get("monthly_returns", {}), _pct, colorize=True))
+
+    parts.append(f"<h2>基准对比 — {bm_label}</h2>")
+    bench = statistics.get("benchmark_compare", {})
+    if bench:
+        bench_spec = [
+            ("策略收益率", "strategy_total_return", _pct),
+            ("基准收益率", "benchmark_total_return", _pct),
+            ("基准年化收益率", "benchmark_annual_return", _pct),
+            ("基准最大回撤", "benchmark_max_drawdown", _pct),
+            ("Alpha", "alpha", _pct),
+            ("Beta", "beta", _ratio),
+            ("信息比率", "information_ratio", _ratio),
+            ("跟踪误差", "tracking_error", _pct),
+        ]
+        parts.append(_metric_table(bench_spec, bench))
+    else:
+        parts.append('<p class="empty">无基准数据</p>')
 
     parts.append("<h2>交易磨损</h2>")
     parts.append(_metric_table(_FRICTION_SPEC, statistics.get("trading_friction", {})))

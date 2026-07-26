@@ -225,6 +225,18 @@ class Engine:
                 benchmark,
                 holdings=dict(self.account.holdings),
             )
+            # 提取基准净值序列，供报告使用
+            benchmark_nav = None
+            if benchmark is not None and not benchmark.empty:
+                bm = benchmark.copy()
+                if "date" in bm.columns:
+                    bm = bm.set_index("date")
+                hfq_col = "hfq_close" if "hfq_close" in bm.columns else "close"
+                if hfq_col in bm.columns and len(bm) > 0:
+                    first = float(bm[hfq_col].iloc[0])
+                    if first > 0:
+                        benchmark_nav = (bm[hfq_col] / first).tolist()
+                        benchmark_nav = [float(v) for v in benchmark_nav]
             with conn:
                 database.write_run_stats(conn, self.run_id, stats_result)
                 database.update_run_status(conn, self.run_id, "completed")
@@ -232,6 +244,8 @@ class Engine:
                 "account_daily": account_daily_df,
                 "trade_log": trade_log_df,
                 "statistics": stats_result,
+                "benchmark_nav": benchmark_nav,
+                "benchmark_code": self.benchmark,
             }
         except Exception:
             # 崩溃不留 "running" 假象；run_id=0 说明还没落库，无需标记
