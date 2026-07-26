@@ -77,16 +77,21 @@ class DrawdownBreaker:
                       else max(self._peak, total_value))
         if self._cooldown == 0 and total_value <= self._peak * (1 - self._mdd):
             self._cooldown = self._cooldown_days
-            logger.warning(
+            logger.info(
                 "回撤熔断触发: 峰值 %.2f 当前 %.2f 回撤 %.1f%%, 冷却 %d 日",
                 self._peak, total_value,
                 (1 - total_value / self._peak) * 100, self._cooldown_days,
             )
 
     def tick(self) -> bool:
-        """每个交易日调一次；返回当日是否风控态（冷却计数随之递减）。"""
+        """每个交易日调一次；返回当日是否风控态（冷却计数随之递减）。
+
+        冷却到期时重置峰值，避免现金仓位永久低于阈值导致无限循环触发。
+        """
         if self._cooldown > 0:
             self._cooldown -= 1
+            if self._cooldown == 0:
+                self._peak = None  # 冷却结束，重置峰值以允许策略重新出发
             return True
         return False
 
@@ -104,10 +109,10 @@ def apply_risk_rules(actions: dict, account, total_value: float, rules: dict,
 
 
 def _clip_position_pct(actions: dict, total_value: float, rules: dict) -> None:
-    pct = rules.get("max_position_pct")
-    if pct is None:
+    max_pct = rules.get("max_position_pct")
+    if max_pct is None:
         return
-    cap = pct * total_value
+    cap = max_pct * total_value
 
     target_value = actions.get("target_value")
     if target_value:
@@ -128,7 +133,9 @@ def _clip_position_pct(actions: dict, total_value: float, rules: dict) -> None:
 
     weights = actions.get("buy_weights")
     if weights:
-        actions["buy_weights"] = {s: min(w, pct) for s, w in weights.items()}
+        # weights 中的值是权重分数（如 0.14），需转为绝对金额与 cap 比较
+        actions["buy_weights"] = {s: min(w * total_value, cap) / total_value
+                                   for s, w in weights.items()}
 
 
 def _apply_industry_cap(actions: dict, account, total_value: float,

@@ -10,3 +10,7 @@ tushare_db
 adapters/tushare.py
 !tests/fixtures/*.parquet
 .coverage
+
+# 用户策略目录（不含官方示例）
+strategies/exploring/
+strategies/selected/

@@ -24,7 +24,7 @@ ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/
 python scripts/check_anticorrupt.py
 
 # 运行 YAML 策略回测（需要真实数据库）
-python scripts/run.py strategies/examples/topk_momentum.yaml --start 20240603 --end 20240628
+python scripts/run.py strategies/examples/topk_momentum/config.yaml --start 20240603 --end 20240628
 
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py

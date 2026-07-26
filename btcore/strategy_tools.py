@@ -129,7 +129,7 @@ class ConditionBuilder:
 
 
 _KNOWN_KEYS = {"frequency", "weekday", "monthday"}
-_FREQUENCIES = {"daily", "weekly", "monthly"}
+_FREQUENCIES = {"daily", "weekly", "biweekly", "monthly"}
 
 
 def parse_schedule(raw: dict) -> dict:
@@ -152,6 +152,11 @@ def parse_schedule(raw: dict) -> dict:
         if weekday == 0:
             raise ValueError("schedule.weekday 从 1 起（可负），不能为 0")
         rule["weekday"] = weekday
+    elif frequency == "biweekly":
+        weekday = int(raw.get("weekday", 1))
+        if weekday == 0:
+            raise ValueError("schedule.weekday 从 1 起（可负），不能为 0")
+        rule["weekday"] = weekday
     elif frequency == "monthly":
         monthday = int(raw.get("monthday", 1))
         if monthday == 0:
@@ -169,18 +174,25 @@ def _rebalance_dates(calendar: list[str], rule: dict) -> set[str]:
     groups: dict[tuple, list[str]] = {}
     for day in calendar:
         dt = datetime.strptime(day, "%Y%m%d").date()
-        if frequency == "weekly":
+        if frequency in ("weekly", "biweekly"):
             key = dt.isocalendar()[:2]
         else:
             key = (dt.year, dt.month)
         groups.setdefault(key, []).append(day)
 
-    n = rule["weekday"] if frequency == "weekly" else rule["monthday"]
+    n = rule["weekday"] if frequency in ("weekly", "biweekly") else rule["monthday"]
     result = set()
-    for days in groups.values():
+    week_idx = 0
+    for key in sorted(groups):
+        days = groups[key]
         idx = n - 1 if n > 0 else n
         if -len(days) <= idx < len(days):
-            result.add(days[idx])
+            if frequency == "biweekly":
+                if week_idx % 2 == 0:
+                    result.add(days[idx])
+                week_idx += 1
+            else:
+                result.add(days[idx])
     return result
 
 

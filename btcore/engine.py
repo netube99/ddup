@@ -491,7 +491,7 @@ class Engine:
                         f"buy_weights[{symbol}] 必须 ∈ (0,1]: {w!r}"
                     )
                 total_w += w
-            if total_w > 1.0:
+            if total_w > 1.0 + 1e-10:
                 raise ValueError(f"buy_weights 权重之和必须 ≤ 1: {total_w}")
 
         buy_conds = actions.get("buy_conditions") or []

@@ -7,7 +7,7 @@ import pytest
 from btcore.strategy_loader import load_strategy
 from strategies.examples.topk_momentum import TopKMomentum
 
-EXAMPLE_YAML = "strategies/examples/topk_momentum.yaml"
+EXAMPLE_YAML = "strategies/examples/topk_momentum/config.yaml"
 
 
 def _write(tmp_path, body: str) -> str:

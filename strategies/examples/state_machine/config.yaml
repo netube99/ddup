@@ -2,7 +2,7 @@ name: state_machine
 strategy: strategies.examples.state_machine:StateMachine
 
 # 引用同目录下的自定义因子库（演示 factor_library 机制）
-factor_library: state_machine_factors.yaml
+factor_library: factors.yaml
 
 config:
   initial_capital: 3000000

@@ -12,7 +12,7 @@
 ## 快速开始
 
 ```bash
-python scripts/run.py strategies/examples/topk_momentum.yaml \
+python scripts/run.py strategies/examples/topk_momentum/config.yaml \
     --start 20240603 --end 20240628 --capital 1000000
 ```
 
@@ -40,8 +40,8 @@ config:                                              # 策略配置（原样进 
   top_k: 5                                           # 策略自定义参数
 
 schedule:                                            # 可选：调仓频率
-  frequency: weekly                                  # daily(默认)|weekly|monthly
-  weekday: -1                                        # weekly: 每周第 N 个交易日（可负，-1=最后）
+  frequency: weekly                                  # daily(默认)|weekly|biweekly|monthly
+  weekday: -1                                        # weekly/biweekly: 每周第 N 个交易日（可负，-1=最后）
   # monthday: 1                                      # monthly: 每月第 N 个交易日（可负）
 
 factor_specs:                                        # 只引用 factors/library.yaml 里的名字
@@ -380,8 +380,8 @@ YAML 的 `schedule` 键让 loader 用 `wrap_strategy` 包装策略实例：
 
 ```yaml
 schedule:
-  frequency: weekly     # daily(默认)|weekly|monthly
-  weekday: -1           # weekly: 每周最后一个交易日
+  frequency: weekly     # daily(默认)|weekly|biweekly|monthly
+  weekday: -1           # weekly/biweekly: 每周最后一个交易日
 ```
 
 分组语义：weekly 按 ISO (isoyear, isoweek)、monthly 按 (year, month)；
@@ -450,7 +450,7 @@ from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
 
-strategy = load_strategy("strategies/examples/topk_momentum.yaml")
+strategy = load_strategy("strategies/examples/topk_momentum/config.yaml")
 provider = DataProvider(TushareBackend("/path/to/market.db"))
 engine = Engine(
     strategy, provider,
@@ -599,7 +599,7 @@ python scripts/run.py <策略.yaml> \
 
 ## 示例策略
 
-`strategies/examples/` 下提供了三个示例，覆盖不同的 select 形式和特性：
+`strategies/examples/` 下每个策略独立一个子文件夹，包含 `strategy.py` + `config.yaml`（可多个配置）：
 
 ### `topk_momentum` — 基础买卖名单 + 条件单 + 成分白名单
 
@@ -608,16 +608,28 @@ python scripts/run.py <策略.yaml> \
 配合 `stop_loss` + `trailing` 条件单。另有 `topk_momentum_csi` 变体
 加上 `index_universe` 指数成分白名单。
 
-### `weighted_target` — target_value + risk_rules
+### `target_allocator` — target_value + risk_rules
 
 演示 `select()` 返回 `target_value` 做目标仓位调仓：
 按得分比例分配目标市值，不在 top_k 中的持仓显式给 0 清仓。
 配合 `max_drawdown` 回撤熔断 + `max_position_pct` 单票上限，
 展示风控规则如何与目标仓位形式配合。
 
-### `limit_entry` — buy_conditions 条件买入
+### `condition_hunter` — buy_conditions 条件买入
 
 在常规轮动（buy/sell 名单）之外，对排名紧随其后的备选标的
 挂 `LIMIT_BUY` 限价买单，捕捉日内回踩机会。
 演示 buy_conditions 与 buy/sell 名单的配合，
 以及条件买入的约束（涨停不买、max_positions 上限等）自动生效。
+
+### `state_machine` — 多模型状态机
+
+最完整的示例：3 套子模型（动量/反转/质量）、按市场广度切换权重、
+自定义因子库、6 种条件单类型。展示引擎能力的上限。
+
+### `value_yield` — 最优实践（股息价值策略）`strategies/selected/`
+
+基于真实研究迭代产出的策略：CSI 300 成分股中按股息率 + 盈利收益率
++ 中长动量综合评分，月频调仓，10 只等权持有。
+`config_10.yaml` 为推荐配置，2022-2024 年化收益 +4.74%，Sharpe 0.24，
+Alpha +7.7%（vs CSI 300）。

@@ -8,7 +8,7 @@ from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
 from tests.conftest import MockDataBackend
 
-EXAMPLE_YAML = "strategies/examples/topk_momentum.yaml"
+EXAMPLE_YAML = "strategies/examples/topk_momentum/config.yaml"
 
 
 def test_example_strategy_full_run():
