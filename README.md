@@ -12,7 +12,7 @@
 
 ```bash
 # 最简示例：裸因子轮动
-python scripts/run.py strategies/examples/simple_rotation.yaml \
+python scripts/run.py strategies/examples/simple_rotation/config.yaml \
     --start 20240101 --end 20240630
 
 # 从 Python 调用的完整示例
@@ -21,7 +21,7 @@ from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
 
-strategy = load_strategy("strategies/examples/topk_momentum.yaml")
+strategy = load_strategy("strategies/examples/topk_momentum/config.yaml")
 provider = DataProvider(TushareBackend("/path/to/market.db"))
 engine = Engine(strategy, provider)
 result = engine.run("20240101", "20240630")

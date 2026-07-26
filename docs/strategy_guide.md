@@ -597,9 +597,11 @@ python scripts/run.py <策略.yaml> \
 
 ---
 
-## 示例策略
+## 示例策略（`strategies/examples/`）
 
-`strategies/examples/` 下每个策略独立一个子文件夹，包含 `strategy.py` + `config.yaml`（可多个配置）：
+每个策略独立一个子文件夹，包含 `strategy.py` + `config.yaml`：
+
+以下 5 个示例涵盖引擎全部能力：
 
 ### `topk_momentum` — 基础买卖名单 + 条件单 + 成分白名单
 
@@ -607,6 +609,10 @@ python scripts/run.py <策略.yaml> \
 持有得分最高的 top_k 只，卖出不在 top_k 中的持仓。
 配合 `stop_loss` + `trailing` 条件单。另有 `topk_momentum_csi` 变体
 加上 `index_universe` 指数成分白名单。
+
+### `simple_rotation` — 最小化轮动
+
+最简入门示例：固定持仓数，按因子得分轮换。适合作为新策略的起点。
 
 ### `target_allocator` — target_value + risk_rules
 
@@ -626,10 +632,3 @@ python scripts/run.py <策略.yaml> \
 
 最完整的示例：3 套子模型（动量/反转/质量）、按市场广度切换权重、
 自定义因子库、6 种条件单类型。展示引擎能力的上限。
-
-### `value_yield` — 最优实践（股息价值策略）`strategies/selected/`
-
-基于真实研究迭代产出的策略：CSI 300 成分股中按股息率 + 盈利收益率
-+ 中长动量综合评分，月频调仓，10 只等权持有。
-`config_10.yaml` 为推荐配置，2022-2024 年化收益 +4.74%，Sharpe 0.24，
-Alpha +7.7%（vs CSI 300）。

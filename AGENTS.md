@@ -3,8 +3,7 @@
 A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理。
 
 > 用户可编辑的目录：`adapters/`（后端实现）、`factors/`（因子定义）、
-> `strategies/`（YAML + Strategy 子类）。所有机制/基础设施在 `btcore/`。
-> 详见 `docs/user_guide.md`。
+> `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。详见 `docs/user_guide.md`。
 
 ---
 
@@ -40,7 +39,7 @@ btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策
 adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
 research/   — 研究工具（因子评估、归因）
 factors/    — 用户因子定义（library.yaml，可编辑）
-strategies/ — 用户策略（YAML + Strategy 子类 + 示例；可编辑）
+strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 ```
 
 必须遵守：
