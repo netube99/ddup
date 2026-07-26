@@ -19,7 +19,7 @@
 
 import pandas as pd
 
-from btcore.factors import ops
+from btcore.factors import cse, ops
 from btcore.factors.expr import evaluate_expr, extract_expr_names
 from btcore.factors.library import spec_names
 
@@ -46,7 +46,13 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
       needs:            {market, index, industry_main, industry_breadth,
                          mktcap_main, mktcap_breadth} 布尔标志
       main_days / breadth_days: 两面板 warmup 日历天
+      windows:          {节点名: 所需历史行数}（含引用传递；供 warmup 诊断）
+      nodes:            CSE 重写后的节点（materialize 以此为准）
+      cse_temp:         CSE 合成节点名列表（物化后删除临时列）
     """
+    original = set(nodes)
+    nodes = cse.rewrite(nodes)
+    cse_temp = sorted(set(nodes) - original)
     # 闭包裁剪：只保留从入口可达的节点（容忍传入超集）
     reachable: set[str] = set()
     stack = [n for n in entry_names if n in nodes]
@@ -130,6 +136,9 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
         "main_columns": main_raw - PSEUDO_COLUMNS,
         "breadth_columns": breadth_raw - PSEUDO_COLUMNS,
         "needs": needs,
+        "windows": windows,
+        "nodes": nodes,
+        "cse_temp": cse_temp,
         "main_days": max(365, breadth_days),
         "breadth_days": breadth_days,
     }
@@ -141,7 +150,12 @@ def materialize(
     plan: dict,
     nodes: dict[str, dict],
 ) -> None:
-    """两阶段物化：广度面板求值 + 坍缩投影 + 主面板求值（原地写列）。"""
+    """两阶段物化：广度面板求值 + 坍缩投影 + 主面板求值（原地写列）。
+
+    nodes 以 plan["nodes"]（CSE 重写后）为准；CSE 合成节点的临时列在
+    物化完成后删除。
+    """
+    nodes = plan.get("nodes", nodes)
     breadth_set: set[str] = plan["breadth"]
     if breadth_df is not None:
         for name in plan["topo"]:
@@ -153,6 +167,10 @@ def materialize(
     for name in plan["topo"]:
         if name in main_set:
             main_df[name] = _eval_spec_on(main_df, nodes[name])
+    for tmp in plan.get("cse_temp", ()):
+        main_df.drop(columns=tmp, inplace=True, errors="ignore")
+        if breadth_df is not None:
+            breadth_df.drop(columns=tmp, inplace=True, errors="ignore")
 
 
 # ── 内部 ──

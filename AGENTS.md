@@ -85,6 +85,8 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 |---|---|---|
 | 因子 DAG 模型与算子 | `btcore/factors/ops.py` | `docs/factor_library.md` |
 | 因子物化规划与两路供给 | `btcore/factors/plan.py` | `docs/factor_library.md` |
+| 物化公共子表达式消除（CSE） | `btcore/factors/cse.py` | `docs/factor_library.md` |
+| 多因子合成（滚动 IC/ICIR 加权） | `research/composite.py` | `docs/factor_library.md` |
 | 策略 YAML 加载 | `btcore/strategy_loader.py` | `docs/strategy_guide.md` |
 | select 返回协议与冲突校验 | `btcore/engine.py:_compute_pending` | `docs/strategy_guide.md` |
 | 填表法后端 | `btcore/generic_sql.py` | `docs/backend_guide.md` |
@@ -107,8 +109,9 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 335 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
-  列裁剪、风控规则、index_universe、因子算子、物化规划、GenericSQLBackend 表单校验、
+- 355 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
+  列裁剪、风控规则、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
+  GenericSQLBackend 表单校验、
   统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移等
 
 ---

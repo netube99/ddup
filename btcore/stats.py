@@ -143,6 +143,7 @@ def calculate_statistics(
 
     trip_result = _compute_round_trips(trades, div_log, account_daily_df, holdings)
     result.update(trip_result)
+    result.update(_compute_sell_source(result["round_trip"]["trip_detail"]))
 
     result.update(_compute_symbol_contribution(trades, div_log, holdings))
     result.update(_compute_cost_breakdown(trades))
@@ -234,6 +235,7 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
         events.append({
             "date": row["date"], "symbol": row["symbol"], "type": row["side"],
             "shares": int(row["shares"]), "price": row["price"],
+            "trigger": row.get("trigger", "") or "",
         })
     for _, row in div_log.iterrows():
         events.append({
@@ -297,6 +299,7 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                     "pnl_pct": pnl_pct,
                     "holding_days": holding_days,
                     "dividend_received": matched_div,
+                    "sell_trigger": event["trigger"],
                 })
 
                 if matched >= lot["shares"]:
@@ -366,6 +369,26 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
             "summary": summary,
         }
     }
+
+
+def _compute_sell_source(trip_detail: list) -> dict:
+    """按卖出 trigger 分组的 round-trip 归因（信号卖/调仓/风控强平/条件单）。"""
+    if not trip_detail:
+        return {"sell_source": {}}
+    groups: dict[str, list] = defaultdict(list)
+    for t in trip_detail:
+        groups[t.get("sell_trigger") or "UNKNOWN"].append(t)
+    out = {}
+    for trigger, trips in sorted(groups.items()):
+        pnls = [t["pnl"] for t in trips]
+        out[trigger] = {
+            "count": len(trips),
+            "total_pnl": float(sum(pnls)),
+            "avg_pnl": float(np.mean(pnls)),
+            "win_rate": float(np.mean([p > 0 for p in pnls])),
+            "avg_holding_days": float(np.mean([t["holding_days"] for t in trips])),
+        }
+    return {"sell_source": out}
 
 
 def _build_final_price_map(holdings: dict | None) -> dict[str, float]:

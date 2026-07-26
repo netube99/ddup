@@ -17,3 +17,6 @@ strategies/selected/
 
 # 回测报告（隐私信息，不入 git）
 strategies/**/reports/
+
+# 开发过程文档（内部记录，不开源）
+docs/devlog/

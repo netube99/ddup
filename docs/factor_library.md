@@ -215,6 +215,16 @@ from btcore.factors.library import compute_factors
 table = compute_factors(["mom20", "value", "mom_z"], bars_df)  # 返回 DataFrame
 ```
 
+多因子合成（滚动 IC/ICIR 加权，`research/composite.py`）：
+```python
+from research.composite import combine_factors, evaluate_composite
+
+score = combine_factors(table, forward_returns, method="icir", window=60)
+ev = evaluate_composite(score, forward_returns)   # IC 汇总 + 分层累计收益
+```
+
+`t` 日权重只用 ≤ t-1 日的 IC 估计（rolling 后 shift(1)），无前视。
+
 编程式 API：
 ```python
 from btcore.factors.library import load_library, resolve_spec, resolve_closure
@@ -235,6 +245,19 @@ nodes = resolve_closure(["mom_z"], lib)                      # 传递引用闭�
 
 表达式校验在 `load_library` 加载阶段完成：不存在的列名、非法语法、
 未知算子、引用环都会在加载时立即报错，不会拖到回测中途。
+
+---
+
+## 物化优化：公共子表达式消除（CSE）
+
+`build_factor_plan` 在规划前对因子闭包做纯重写优化（`btcore/factors/cse.py`）：
+
+- 完全重复的 `(expr, where)` 只求值一次，重复节点重写为对首个同构节点的引用；
+- 出现 ≥2 次且不含坍缩算子的算子子树提取为合成节点（`__cse_N` 临时列），
+  各表达式重写为引用该节点，随正常拓扑物化。
+
+CSE 不改变任何物化结果（与无 CSE 逐值相等），只省重复计算；临时列在
+物化后删除，策略与研究侧均不可见。
 
 ---
 
@@ -263,6 +286,11 @@ nodes = resolve_closure(["mom_z"], lib)                      # 传递引用闭�
 
 **正确做法**：传入前在数据侧向前多取至少 `max(365, 最大窗口 × 1.5 + 10)` 天。
 引擎 preload 阶段自动处理，研究侧需自行保证。
+
+每个因子的精确 warmup 行数由 `infer_window` 静态推导（含嵌套表达式与
+因子引用的传递累加；`ema` 这类无限记忆算子取 `3n-1` 工程近似），
+`build_factor_plan` 返回的 `plan["windows"]` 逐节点透出，引擎 preload
+时以 debug 日志输出，可用于核对"前 N 天因子为空"是否符合预期。
 
 ### 2. 口径自负
 

@@ -175,6 +175,13 @@ def _xs_group_mean(x: pd.Series, g: pd.Series) -> pd.Series:
 
 # ── 算子表（固定白名单，非运行时注册表）──
 
+OP_NAMES = frozenset({
+    "delay", "delta", "roc", "ma", "ema", "std", "sum", "max", "min",
+    "corr", "beta", "resid_std",
+    "rank", "zscore", "winsorize", "group_rank", "neutralize",
+    "mean", "group_mean",
+})
+
 
 @dataclass(frozen=True)
 class _Op:

@@ -166,6 +166,7 @@ class Engine:
             _ensure_derived_fields(bars_df)
             if fplan:
                 # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
+                logger.debug("factor warmup rows: %s", fplan["windows"])
                 breadth_df = self._preload_breadth(fplan, calendar)
                 self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
                 factor_plan.materialize(

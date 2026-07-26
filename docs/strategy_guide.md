@@ -475,7 +475,9 @@ print(result["statistics"])
 - `"statistics"`：绩效指标 dict（年化收益、夏普、最大回撤等），其中
   `trading_friction`（交易磨损：双边磨损率、年化拖累、成本占盈利比、无摩擦对照收益）
   与 `management_complexity`（持仓管理复杂度：单日最大成交笔数、有成交天数占比、
-  单笔买入金额门槛、单票平均市值）是面向散户手动跟单场景的两组指标
+  单笔买入金额门槛、单票平均市值）是面向散户手动跟单场景的两组指标；
+  `sell_source` 按卖出 trigger（MANUAL/TARGET/RISK/条件单类型）分组统计
+  round-trip 盈亏、胜率与平均持仓天数，用于回答"哪类卖出在赚钱/亏钱"
 
 ---
 

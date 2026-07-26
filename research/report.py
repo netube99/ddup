@@ -324,6 +324,24 @@ def _symbol_contribution_table(statistics: dict) -> str:
     )
 
 
+def _sell_source_table(statistics: dict) -> str:
+    src = statistics.get("sell_source") or {}
+    if not src:
+        return '<p class="empty">无数据</p>'
+    rows = "".join(
+        f"<tr><td>{_esc(trigger)}</td><td>{d['count']}</td>"
+        f"<td>{_num(d['total_pnl'])}</td><td>{_num(d['avg_pnl'])}</td>"
+        f"<td>{_pct(d['win_rate'])}</td><td>{d['avg_holding_days']:.1f}</td></tr>"
+        for trigger, d in sorted(
+            src.items(), key=lambda kv: abs(kv[1]["total_pnl"]), reverse=True
+        )
+    )
+    return (
+        "<table><tr><th>卖出来源</th><th>次数</th><th>总盈亏</th>"
+        f"<th>平均盈亏</th><th>胜率</th><th>平均持仓天数</th></tr>{rows}</table>"
+    )
+
+
 # ---------------------------------------------------------------- 单 run 报告
 
 
@@ -361,6 +379,9 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     parts.append("<h2>往返交易汇总</h2>")
     rt = statistics.get("round_trip", {})
     parts.append(_metric_table(_ROUND_TRIP_SPEC, rt.get("summary", {})))
+
+    parts.append("<h2>卖出来源归因</h2>")
+    parts.append(_sell_source_table(statistics))
 
     parts.append("<h2>个股盈亏贡献 Top10</h2>")
     parts.append(_symbol_contribution_table(statistics))

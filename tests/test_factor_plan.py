@@ -62,6 +62,28 @@ class TestBuildPlan:
         assert p["breadth_days"] == int(250 * 1.5) + 10
 
 
+class TestWindows:
+    def test_nested_expr(self):
+        nodes = {"f": {"expr": "ma(roc(close_hfq, 20), 10)"}}
+        p = plan.build_factor_plan(nodes, ["f"])
+        assert p["windows"]["f"] == 30        # (1+20) + (10-1)
+
+    def test_ref_transitive(self):
+        """引用传递：zscore(mom20) 继承 mom20 的窗口；xsec 不消耗时间轴。"""
+        p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
+        w = p["windows"]
+        assert w["mom20"] == 21               # 1 + 20
+        assert w["mom_z"] == 21
+        assert w["industry_mom"] == 21
+        assert w["pct_above_ma20"] == 20      # 1 + (20-1)
+        assert w["rel_mom"] == 21             # max(21, 21, where 20)
+
+    def test_ema_approximation(self):
+        nodes = {"e": {"expr": "ema(close_hfq, 10)"}}
+        p = plan.build_factor_plan(nodes, ["e"])
+        assert p["windows"]["e"] == 30        # 1 + (3*10-1)，无限记忆的工程近似
+
+
 def _mk_panel(dates, syms, seed=1):
     idx = pd.MultiIndex.from_product(
         [dates, syms], names=["trade_date", "symbol"]
