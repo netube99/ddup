@@ -6,7 +6,9 @@
 
 ## 快速开始
 
-阅读文档 [docs/user_guide.md](docs/user_guide.md)，完成数据库路径和字段名适配
+阅读文档 [用户指南](docs/user_guide.md)，理解使用方法，完成数据库路径和字段名适配
+
+本项目的数据库使用 [tushare_db](https://github.com/netube99/tushare_db) 进行数据获取与管理，建议搭配使用
 
 ```bash
 # 最简示例：裸因子轮动
@@ -75,7 +77,3 @@ pytest tests/ --cov=btcore -v                  # 覆盖率
 ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/   # Lint
 python scripts/check_anticorrupt.py            # 反破坏检查
 ```
-
-## 许可
-
-[MIT](LICENSE)
