@@ -46,7 +46,6 @@ def _load_stock_names() -> dict[str, str]:
 
 def _market_db_path() -> str | None:
     from pathlib import Path
-    import re
     adapter = Path(__file__).resolve().parents[1] / "adapters" / "tushare.py"
     with open(adapter) as f:
         content = f.read()
@@ -273,7 +272,8 @@ def _dict_table(title_row: tuple[str, str], data: dict, fmt,
         return '<p class="empty">无数据</p>'
     if colorize:
         rows = "".join(
-            f"<tr><td>{_esc(k)}</td><td class=\"{'up' if float(v) > 0 else 'down' if float(v) < 0 else ''}\">"
+            f"<tr><td>{_esc(k)}</td>"
+            f"<td class=\"{'up' if float(v) > 0 else 'down' if float(v) < 0 else ''}\">"
             f"{fmt(v)}</td></tr>" for k, v in data.items()
         )
     else:
@@ -446,7 +446,9 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     ))
 
     parts.append("<h2>月度收益</h2>")
-    parts.append(_dict_table(("月份", "收益"), statistics.get("monthly_returns", {}), _pct, colorize=True))
+    parts.append(_dict_table(
+        ("月份", "收益"), statistics.get("monthly_returns", {}), _pct, colorize=True,
+    ))
 
     parts.append(f"<h2>基准对比 — {bm_label}</h2>")
     bench = statistics.get("benchmark_compare", {})

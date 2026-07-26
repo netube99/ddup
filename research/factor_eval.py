@@ -97,3 +97,35 @@ def summarize_ic(ic_series: pd.Series) -> dict:
         "ic_positive_ratio": float((ic > 0).mean()),
         "n_days": len(ic),
     }
+
+
+def calc_factor_corr(
+    factor_df: pd.DataFrame,
+    date_col: str = "trade_date",
+) -> pd.DataFrame:
+    """计算因子截面相关性矩阵（按日求 Pearson corr，再取均值）。
+
+    Args:
+        factor_df: MultiIndex (date, symbol) 宽表，每列一个因子值。
+        date_col: 日期索引名。
+
+    Returns:
+        因子间平均相关性矩阵 (DataFrame, index/columns = 因子名)。
+        样本不足 3 个的日期跳过；若全无有效日则返回 NaN 矩阵。
+    """
+    if factor_df.empty or factor_df.shape[1] < 2:
+        return pd.DataFrame()
+
+    corr_mats = []
+    for dt, g in factor_df.groupby(level=date_col, group_keys=False):
+        g_clean = g.dropna(axis=1, how="all").dropna(axis=0)
+        if g_clean.shape[0] < 3 or g_clean.shape[1] < 2:
+            continue
+        corr_mats.append(g_clean.corr())
+
+    if not corr_mats:
+        columns = list(factor_df.columns)
+        return pd.DataFrame(np.nan, index=columns, columns=columns)
+
+    avg_corr = sum(corr_mats) / len(corr_mats)
+    return avg_corr

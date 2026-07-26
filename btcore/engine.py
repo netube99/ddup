@@ -93,9 +93,17 @@ class Engine:
             )
         self.condition_slippage_ticks = condition_slippage_ticks
         self.costs_fn = make_costs_fn(config)
-        bench_code = config.get("benchmark", "000300.SH")
+        bench_code = config.get("benchmark")
+        if bench_code is None:
+            # 未显式设置 benchmark 时，从 index_universe 首个指数自动推导；
+            # 多指数或未配置 index_universe 则回退至 CSI 300。
+            idx_universe = (getattr(self.strategy, "FILTER_RULES", None) or {}).get(
+                "index_universe", []
+            )
+            bench_code = idx_universe[0] if len(idx_universe) == 1 else "000300.SH"
         # 空字符串 / None 表示无基准（即使后端提供 get_benchmark_bars 也不取）
         self.benchmark: str | None = bench_code or None
+        self.quiet_skips = bool(config.get("quiet_skips", False))
         self.order_volume_ratio = config.get("order_volume_ratio")
         execution_price = config.get("execution_price", "open")
         if execution_price not in ("open", "close"):
@@ -340,6 +348,7 @@ class Engine:
                         self.account, bars_dict, targets,
                         self.max_positions,
                         limits.get_limit_prices, self.costs_fn, apply_slippage,
+                        quiet=self.quiet_skips,
                     )
                 else:
                     manual_sell_trades = match.manual.manual_sell(
@@ -348,6 +357,7 @@ class Engine:
                         limits.get_limit_prices, self.costs_fn, apply_slippage,
                         shares_map=self.pending_actions.get("sell_shares"),
                         trigger=("RISK" if self._risk_forced else "MANUAL"),
+                        quiet=self.quiet_skips,
                     )
 
                     manual_buy_trades = match.manual.manual_buy(
@@ -356,11 +366,13 @@ class Engine:
                         self.max_positions,
                         limits.get_limit_prices, self.costs_fn, apply_slippage,
                         weights_map=self.pending_actions.get("buy_weights"),
+                        quiet=self.quiet_skips,
                     )
 
                 condition_trades = match.conditions.exit_conditions(
                     self.account, bars_dict,
                     limits.get_limit_prices, self.costs_fn, apply_slippage,
+                    quiet=self.quiet_skips,
                     slip_ticks=self.condition_slippage_ticks,
                 )
 
@@ -370,11 +382,17 @@ class Engine:
                     self.pending_actions.get("buy_conditions", []),
                     self.max_positions,
                     limits.get_limit_prices, self.costs_fn, apply_slippage,
+                    quiet=self.quiet_skips,
                     slip_ticks=self.condition_slippage_ticks,
                 )
 
                 all_trades = (manual_sell_trades + manual_buy_trades
                               + condition_trades + entry_trades)
+                logger.info(
+                    "[%s] 当日成交: sell=%d buy=%d cond=%d entry=%d total=%d",
+                    today, len(manual_sell_trades), len(manual_buy_trades),
+                    len(condition_trades), len(entry_trades), len(all_trades),
+                )
                 self._settle(today, bars_dict, all_trades, corporate_log, conn)
 
                 self._compute_pending(today, bars_dict, all_trades)
@@ -384,6 +402,7 @@ class Engine:
 
     def _settle(self, today: str, bars_dict: dict, trades: list,
                 corporate_log: list, conn):
+        _warn = logger.debug if self.quiet_skips else logger.warning
         total_value = self.account.cash
         for symbol, holding in self.account.holdings.items():
             bar = bars_dict.get(symbol)
@@ -391,7 +410,7 @@ class Engine:
             if match.core.is_valid_price(close):
                 holding.last_price = close
             elif bar is not None:
-                logger.warning("[%s] %s 收盘价非法 (%s), 沿用 last_price=%s",
+                _warn("[%s] %s 收盘价非法 (%s), 沿用 last_price=%s",
                                today, symbol, close, holding.last_price)
             total_value += holding.shares * holding.last_price
 

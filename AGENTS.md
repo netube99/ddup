@@ -29,6 +29,9 @@ python scripts/run.py strategies/examples/topk_momentum/config.yaml --start 2024
 python scripts/report.py result.db --out report.html
 python scripts/compare.py result.db --html compare.html
 
+# 因子 IC 评估 / 分层回测 / 相关性矩阵
+python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
+
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
 ```

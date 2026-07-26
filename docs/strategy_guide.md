@@ -37,6 +37,7 @@ config:                                              # 策略配置（原样进 
   # order_volume_ratio: 0.1                          # 单笔上限 = 当日 vol(手) × ratio × 100 股
   # execution_price: "close"                         # 手动单成交价：open(默认)|close
   # condition_slippage_ticks: 2                      # 条件单独立滑点档数（缺省沿用 slippage_ticks）
+  # quiet_skips: true                                # 小资金场景：撮合跳过消息降级为 DEBUG
   top_k: 5                                           # 策略自定义参数
 
 schedule:                                            # 可选：调仓频率

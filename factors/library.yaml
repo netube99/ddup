@@ -182,3 +182,24 @@ factors:
   vol60:
     expr: "std(roc(close_hfq, 1), 60)"
     description: "60日波动率"
+
+  # ══ 股东人数因子（stk_holdernumber 表，季度频）══
+  holder_count:
+    expr: "holder_num"
+    where: "holder_num > 0"
+    description: "股东人数（仅定期报告日有值）"
+
+  # ══ bak_daily 独有指标 ══
+  strength_raw:
+    expr: "strength"
+    description: "tushare 强度指标（日频）"
+  strength_z:
+    expr: "zscore(strength)"
+    description: "截面标准化强度"
+  attack_z:
+    expr: "zscore(attack)"
+    description: "截面标准化攻击力（量价配合度）"
+  net_buy_pressure:
+    expr: "(bk_buying - bk_selling) / amount"
+    where: "amount > 0"
+    description: "净买入压力占比（bak_daily 口径）"

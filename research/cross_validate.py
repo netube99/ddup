@@ -15,10 +15,8 @@ import argparse
 import json
 import sqlite3
 import sys
-from collections import Counter, defaultdict
-from pathlib import Path
+from collections import Counter
 
-import numpy as np
 import pandas as pd
 
 
@@ -37,10 +35,10 @@ def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
         raise ValueError(f"Run {run_id} not found")
 
     trades = pd.read_sql_query(
-        f"SELECT * FROM trade_log WHERE run_id = ? ORDER BY date", conn, params=(run_id,)
+        "SELECT * FROM trade_log WHERE run_id = ? ORDER BY date", conn, params=(run_id,)
     )
     daily = pd.read_sql_query(
-        f"SELECT * FROM account_daily WHERE run_id = ? ORDER BY date", conn, params=(run_id,)
+        "SELECT * FROM account_daily WHERE run_id = ? ORDER BY date", conn, params=(run_id,)
     )
     stats = json.loads(run["stats_json"]) if run["stats_json"] else {}
     config = json.loads(run["config_json"]) if run["config_json"] else {}
@@ -131,7 +129,15 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
     if capital > 0:
         cost_ratio = total_costs / capital
         min_overhead = _min_commission_overhead(n_buys, capital)
-        threshold = max(0.02, min_overhead + 0.02)
+        # 资本感知阈值：不可避免部分（双向最低佣金 + 印花税底） + 按资金规模的可变上限
+        _stamp_min = 0.0005  # 卖出印花税底
+        if capital <= 50000:
+            _variable = 0.02
+        elif capital <= 500000:
+            _variable = 0.01
+        else:
+            _variable = 0.005
+        threshold = min_overhead * 2 + _stamp_min + _variable
         notes.append(f"交易磨损/资金比: {cost_ratio:.4%} (阈值 {threshold:.2%}, "
                      f"最低佣金开销 {min_overhead:.2%})")
         if cost_ratio > threshold:

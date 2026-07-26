@@ -56,7 +56,9 @@ def validate_buy_condition_types(orders: list[dict]) -> None:
 
 
 def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
+                    quiet: bool = False,
                     slip_ticks: int | None = None) -> list:
+    _warn = logger.debug if quiet else logger.warning
     trades = []
     for symbol, holding in list(account.holdings.items()):
         if holding.locked:
@@ -68,7 +70,7 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
         trade_date = bar_get(bar, "trade_date", "")
         _, down = limits_fn(symbol, bar, trade_date)
         if down is None:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过条件单",
+            _warn("[%s] %s 涨跌停无法判定, 跳过条件单",
                            trade_date, symbol)
             continue
 
@@ -84,19 +86,19 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             if not executed:
                 continue
             if not is_valid_price(fill_price):
-                logger.warning(
+                _warn(
                     "[%s] %s 条件单 %s 成交价非法 (%s), 顺延",
                     trade_date, symbol, cond["type"], fill_price)
                 break
             if fill_price <= down:
-                logger.warning(
+                _warn(
                     "[%s] %s 跌停无法卖出, 条件单 %s 顺延 "
                     "(fill=%s limit_down=%s)",
                     trade_date, symbol, cond["type"], fill_price, down)
                 break
             shares = cap_by_volume(bar, holding.shares, account)
             if shares < 100:
-                logger.warning(
+                _warn(
                     "[%s] %s 成交量约束下可卖不足 100 股, 条件单 %s 顺延",
                     trade_date, symbol, cond["type"])
                 break
@@ -164,16 +166,18 @@ register_condition_handler("TRAILING_TP", handle_stop_loss)
 
 def entry_conditions(account, bars: dict, orders: list[dict],
                      max_positions: int, limits_fn, costs_fn, slip_fn,
+                     quiet: bool = False,
                      slip_ticks: int | None = None) -> list:
     """条件买入撮合。约束与手动买一致：涨停不买、成交量 cap、现金不足减手数、
     max_positions 硬上限、成交即 T+1 锁定。已持仓标的不重复入场。"""
+    _warn = logger.debug if quiet else logger.warning
     trades = []
     for order in orders:
         symbol = order["symbol"]
         if symbol in account.holdings:
             continue
         if len(account.holdings) >= max_positions:
-            logger.warning("持仓数已达 max_positions=%d, 跳过条件买入 %s 及后续",
+            _warn("持仓数已达 max_positions=%d, 跳过条件买入 %s 及后续",
                            max_positions, symbol)
             break
         bar = bars.get(symbol)
@@ -190,15 +194,15 @@ def entry_conditions(account, bars: dict, orders: list[dict],
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", fill_price, up, down)
         if reason == LIMIT_UNKNOWN:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过条件买入",
+            _warn("[%s] %s 涨跌停无法判定, 跳过条件买入",
                            trade_date, symbol)
             continue
         if reason == INVALID_PRICE:
-            logger.warning("[%s] %s 条件买入成交价非法 (%s), 跳过",
+            _warn("[%s] %s 条件买入成交价非法 (%s), 跳过",
                            trade_date, symbol, fill_price)
             continue
         if reason == LIMIT_UP:
-            logger.warning("[%s] %s 涨停不买, price=%s limit_up=%s",
+            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
                            trade_date, symbol, fill_price, up)
             continue
 
@@ -211,7 +215,7 @@ def entry_conditions(account, bars: dict, orders: list[dict],
                                       costs_fn, slip_fn,
                                       slip_ticks=slip_ticks)
         if shares < 100:
-            logger.warning("[%s] %s 条件买入可买不足 100 股, 跳过",
+            _warn("[%s] %s 条件买入可买不足 100 股, 跳过",
                            trade_date, symbol)
             continue
 

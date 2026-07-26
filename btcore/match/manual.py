@@ -23,11 +23,13 @@ logger = logging.getLogger(__name__)
 def manual_sell(account, bars: dict, sell_symbols: list,
                 limits_fn, costs_fn, slip_fn,
                 shares_map: dict | None = None,
+                quiet: bool = False,
                 trigger: str = "MANUAL") -> list:
     """手动卖出。shares_map 为 None 时清仓（现状）；否则按指定股数部分卖出。
 
     trigger 透传进成交记录：风控强平时引擎传 "RISK"，缺省 "MANUAL"。
     """
+    _warn = logger.debug if quiet else logger.warning
     trades = []
     for symbol in sell_symbols:
         if symbol not in account.holdings:
@@ -43,15 +45,15 @@ def manual_sell(account, bars: dict, sell_symbols: list,
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("SELL", exec_px, up, down)
         if reason == LIMIT_UNKNOWN:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过卖出",
+            _warn("[%s] %s 涨跌停无法判定, 跳过卖出",
                            trade_date, symbol)
             continue
         if reason == INVALID_PRICE:
-            logger.warning("[%s] %s 成交价非法 (%s), 跳过卖出",
+            _warn("[%s] %s 成交价非法 (%s), 跳过卖出",
                            trade_date, symbol, exec_px)
             continue
         if reason == LIMIT_DOWN:
-            logger.warning("[%s] %s 跌停不卖, fill=%s limit_down=%s",
+            _warn("[%s] %s 跌停不卖, fill=%s limit_down=%s",
                            trade_date, symbol, exec_px, down)
             continue
 
@@ -59,7 +61,7 @@ def manual_sell(account, bars: dict, sell_symbols: list,
             symbol, holding.shares)
         shares = cap_by_volume(bar, min(desired, holding.shares), account)
         if shares < 100:
-            logger.warning("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
+            _warn("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
                            trade_date, symbol)
             continue
 
@@ -70,7 +72,7 @@ def manual_sell(account, bars: dict, sell_symbols: list,
             del account.holdings[symbol]
         else:
             if shares < desired:
-                logger.warning("[%s] %s 成交量约束截断卖出: %d/%d",
+                _warn("[%s] %s 成交量约束截断卖出: %d/%d",
                                trade_date, symbol, shares, desired)
             apply_partial_sell(holding, shares)
 
@@ -79,7 +81,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
 
 def manual_buy(account, bars: dict, buy_symbols: list,
                max_positions: int, limits_fn, costs_fn, slip_fn,
-               weights_map: dict | None = None) -> list:
+               weights_map: dict | None = None,
+               quiet: bool = False) -> list:
     """手动买入（仅新标的）。持仓数达 max_positions 后跳过后续买入。
 
     weights_map 为 None 时等权（总资产的 1/max_positions）；否则按
@@ -87,6 +90,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
     """
     if max_positions <= 0:
         return []
+    _warn = logger.debug if quiet else logger.warning
     open_total_value = _calc_exec_total_value(account, bars)
     base_amount = open_total_value / max_positions
 
@@ -96,7 +100,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
     for idx, symbol in enumerate(eligible):
         n_left = len(eligible) - idx
         if len(account.holdings) >= max_positions:
-            logger.warning("持仓数已达 max_positions=%d, 跳过 %s 及后续买入",
+            _warn("持仓数已达 max_positions=%d, 跳过 %s 及后续买入",
                            max_positions, symbol)
             break
         bar = bars.get(symbol)
@@ -109,15 +113,15 @@ def manual_buy(account, bars: dict, buy_symbols: list,
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", exec_px, up, down)
         if reason == LIMIT_UNKNOWN:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过买入",
+            _warn("[%s] %s 涨跌停无法判定, 跳过买入",
                            trade_date, symbol)
             continue
         if reason == INVALID_PRICE:
-            logger.warning("[%s] %s 成交价非法 (%s), 跳过买入",
+            _warn("[%s] %s 成交价非法 (%s), 跳过买入",
                            trade_date, symbol, exec_px)
             continue
         if reason == LIMIT_UP:
-            logger.warning("[%s] %s 涨停不买, price=%s limit_up=%s",
+            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
                            trade_date, symbol, exec_px, up)
             continue
 
@@ -129,7 +133,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
         shares = int(effective_amount / exec_px / 100) * 100
         shares = cap_by_volume(bar, shares, account)
         if shares < 100:
-            logger.warning("[%s] %s 买入金额不足 100 股, fill=%s 跳过",
+            _warn("[%s] %s 买入金额不足 100 股, fill=%s 跳过",
                            trade_date, symbol, exec_px)
             continue
 
@@ -137,7 +141,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
         est_costs = costs_fn("BUY", est_price * shares)
         est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
         if account.cash < est_net:
-            logger.warning("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
+            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
                            trade_date, symbol, est_net, account.cash)
             continue
 
@@ -163,7 +167,7 @@ def _calc_exec_total_value(account, bars: dict) -> float:
 
 def rebalance_to_targets(account, bars: dict, targets: dict,
                          max_positions: int, limits_fn, costs_fn,
-                         slip_fn) -> list:
+                         slip_fn, quiet: bool = False) -> list:
     """按目标市值调仓（trigger="TARGET"）。先卖后买释放现金。
 
     只调整出现在 targets 里的标的；未列出的持仓不动（不自动清仓），
@@ -171,6 +175,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
     加仓按加权均价更新 entry_price；当天新买/加仓部分会把整个持仓
     锁一天（locked 是持仓级布尔，保守行为），次日统一解锁。
     """
+    _warn = logger.debug if quiet else logger.warning
     trades = []
     sells, buys = [], []
     for symbol, target in targets.items():
@@ -199,15 +204,15 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("SELL", exec_px, up, down)
         if reason == LIMIT_UNKNOWN:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过卖出",
+            _warn("[%s] %s 涨跌停无法判定, 跳过卖出",
                            trade_date, symbol)
             continue
         if reason == INVALID_PRICE:
-            logger.warning("[%s] %s 成交价非法 (%s), 跳过卖出",
+            _warn("[%s] %s 成交价非法 (%s), 跳过卖出",
                            trade_date, symbol, exec_px)
             continue
         if reason == LIMIT_DOWN:
-            logger.warning("[%s] %s 跌停不卖, fill=%s limit_down=%s",
+            _warn("[%s] %s 跌停不卖, fill=%s limit_down=%s",
                            trade_date, symbol, exec_px, down)
             continue
 
@@ -218,7 +223,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
             desired = min(int(amount / exec_px / 100) * 100, holding.shares)
         shares = cap_by_volume(bar, desired, account)
         if shares < 100:
-            logger.warning("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
+            _warn("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
                            trade_date, symbol)
             continue
 
@@ -229,14 +234,14 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
             del account.holdings[symbol]
         else:
             if shares < desired:
-                logger.warning("[%s] %s 成交量约束截断卖出: %d/%d",
+                _warn("[%s] %s 成交量约束截断卖出: %d/%d",
                                trade_date, symbol, shares, desired)
             apply_partial_sell(holding, shares)
 
     for symbol, amount in buys:
         holding = account.holdings.get(symbol)
         if holding is None and len(account.holdings) >= max_positions:
-            logger.warning("%s 超出 max_positions=%d, 跳过新买",
+            _warn("%s 超出 max_positions=%d, 跳过新买",
                            symbol, max_positions)
             continue
         bar = bars.get(symbol)
@@ -249,15 +254,15 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", exec_px, up, down)
         if reason == LIMIT_UNKNOWN:
-            logger.warning("[%s] %s 涨跌停无法判定, 跳过买入",
+            _warn("[%s] %s 涨跌停无法判定, 跳过买入",
                            trade_date, symbol)
             continue
         if reason == INVALID_PRICE:
-            logger.warning("[%s] %s 成交价非法 (%s), 跳过买入",
+            _warn("[%s] %s 成交价非法 (%s), 跳过买入",
                            trade_date, symbol, exec_px)
             continue
         if reason == LIMIT_UP:
-            logger.warning("[%s] %s 涨停不买, price=%s limit_up=%s",
+            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
                            trade_date, symbol, exec_px, up)
             continue
 
@@ -267,7 +272,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         shares = shrink_to_affordable(account, shares, exec_px,
                                       costs_fn, slip_fn)
         if shares < 100:
-            logger.warning("[%s] %s 目标加仓金额不足 100 股, 跳过",
+            _warn("[%s] %s 目标加仓金额不足 100 股, 跳过",
                            trade_date, symbol)
             continue
 
