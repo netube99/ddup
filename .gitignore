@@ -21,3 +21,8 @@ strategies/**/reports/
 
 # 开发过程文档（内部记录，不开源）
 docs/devlog/
+
+# VitePress 构建产物
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

@@ -1,79 +1,58 @@
 # ddup
 
-面向 A 股的日频量化研究与回测引擎：因子以声明式 YAML 定义、研究与回测同源计算，撮合、费用、滑点、公司行为、风控与前视屏蔽全部机制化，并以不变量测试保证结果可信。策略以 Python 子类编写，行情数据库以表单映射接入。
+面向 A 股的日频量化研究与回测引擎。
 
-> **重要声明：** 本软件是日频量化策略研究工具，不连接任何券商接口、不执行真实交易、不构成投资建议。引擎输出的买卖名单与持仓目标是策略代码的计算结果——将其转化为实盘订单的责任、合规义务和交易风险完全由使用者自行承担。历史回测表现不代表未来收益，回测中无法模拟日内价格路径、流动性冲击、市场制度变化等因素，实盘结果可能与回测存在显著差异。在中国境内用于辅助实盘交易的使用者须自行遵守《证券市场程序化交易管理规定（试行）》及相关法律法规。作者与贡献者不为因使用本软件而产生的任何交易损失负责。
+ddup 覆盖从数据接入、因子定义、策略表达到回测执行、绩效分析和 HTML 报告生成的完整工作流。策略与因子均以声明式配置（YAML + Python 子类）描述，引擎负责调度、撮合、风控与结果持久化。支持因子 IC 评估、多因子滚动 IC/ICIR 合成、分层回测、Brinson 行业归因和交叉验证等研究工具，并提供面向 LLM agent 的程序化 API。
 
-## 快速开始
+## 核心模块
 
-阅读文档 [用户指南](docs/user_guide.md)，理解使用方法，完成数据库路径和字段名适配
+### 数据接口
+* 填表法后端，仅需声明"表名.字段名"映射，无需编写 SQL
+* 引擎自动完成多表外并集、列对齐和列裁剪
+* 内建支持涨跌停价格、复权因子、分红、ST 标记、行业分类、指数成分等数据契约
+* 前视防护门面约定性隔离当日数据与历史数据，防止未来信息泄漏
 
-本项目的数据库使用 [tushare_db](https://github.com/netube99/tushare_db) 进行数据获取与管理，建议搭配使用
+### 因子库
+* 因子以纯 YAML 表达式定义，表达式算子在安全的 ast 求值器内运行
+* 数十种时序（ma、roc、ewm、std）与截面（zscore、rank、group_mean）算子可组合嵌套
+* 引擎自动解析依赖 DAG，规划物化链路并消除公共子表达式（CSE）
+* 因子值以列形式注入回测面板，策略直接读列使用，无需重复计算
 
-```bash
-# 最简示例：裸因子轮动
-python scripts/run.py strategies/examples/simple_rotation/config.yaml \
-    --start 20240101 --end 20240630
+### 复杂策略
+* 以 Python 类继承 Strategy ABC 表达交易逻辑，逻辑表达不受限制，可构建应对复杂市场环境的策略行为，而非仅限于生成买卖请求
+* YAML 配置文件声明因子规格、调仓频率、风控规则和条件单参数
+* select() 方法仅返回订单意图，引擎处理调仓调度与资金分配
+* 支持 target_value 目标市值调仓、buy/sell 名单手动下单和 buy_conditions 条件买单三套下单协议
+* 止损、止盈、移动止盈等条件单以声明式 handler 注册，统一 dispatch
 
-# 从 Python 调用的完整示例
-from adapters.tushare import TushareBackend
-from btcore.engine import Engine
-from btcore.provider import DataProvider
-from btcore.strategy_loader import load_strategy
+### 回测引擎
+* 日频逐笔撮合，内置涨跌停跳过、T+1 锁定、滑点模型（tick=0.01）和可配置费率
+* 现金校验与成交量上限裁剪自动执行，拒单不静默
+* 组合级熔断（最大回撤）、单票仓位上限、行业集中度上限三道风控
+* 全量成交日志与逐日账户快照写入 SQLite 结果库，支持多 run 累积存储与对比
 
-strategy = load_strategy("strategies/examples/topk_momentum/config.yaml")
-provider = DataProvider(TushareBackend("/path/to/market.db"))
-engine = Engine(strategy, provider)
-result = engine.run("20240101", "20240630")
-print(result["statistics"])
-```
+### 报告
+* 纯 Python 生成单文件离线 HTML，无第三方前端依赖
+* 内联 SVG 绘制权益曲线、回撤序列、月度收益热力图和持仓集中度
+* 多 run 对比报告将多次回测叠加于同一坐标系下对比分析
 
-## 示例策略
+### 研究工具
+* 独立的纯函数工具集，不依赖回测引擎
+* 因子评估：Pearson IC / Spearman Rank IC、分层回测、因子相关性矩阵
+* 多因子合成：滚动 IC/ICIR 加权，对因子截面进行符号敏感的加权组合
+* Brinson 行业归因：超额收益分解为配置效应与选股效应
+* 交叉验证：交易行为一致性检查、风控触发验证、异常检测
 
-从简单到复杂，每个示例专注展示一组特性：
-
-| 示例 | 特性 | 适合 |
-|---|---|---|
-| `simple_rotation` | 裸因子轮动 + 止损条件单，50 行 | 入门 |
-| `topk_momentum` | + `on_fills` 成交感知、`buy_weights` 加权分配、动态止损 | 进阶 |
-| `target_allocator` | `target_value` 目标仓位、`risk_rules` 风控、`schedule` 周频调仓 | 仓位管理 |
-| `condition_hunter` | `buy_conditions` 条件买入、自定义 handler 注册 | 条件单 |
-| `state_machine` | 三钩子全开、市场状态机、多模型投票、自定义因子库 | 架构 |
-
-## 能力一览
-
-| 能力 | 怎么用 |
-|---|---|
-| 对接数据库 | `adapters/` 下填一张 Python dict：`"open": "daily.open"` |
-| 定义因子 | `factors/library.yaml` 里一行 `expr: "roc(close_hfq, 20)"` |
-| 自定义因子库 | 策略 YAML 中 `factor_library: my_factors.yaml` |
-| 策略买卖 | 继承 `Strategy`，实现 `select()` 返回 buy/sell 名单 |
-| 目标仓位 | `select()` 返回 `target_value: {symbol: 市值}` |
-| 加权买入 / 部分卖出 | `select()` 返回 `buy_weights` / `sell_shares` |
-| 条件单 | YAML 声明 `conditions: {stop_loss_pct: 0.08}` |
-| 条件买入 | `select()` 返回 `buy_conditions: [{type: "LIMIT_BUY", ...}]` |
-| 自定义条件单 | `register_condition_handler("TYPE", handler)` |
-| 成交感知 | 实现 `on_fills(trades, provider)` 钩子 |
-| 动态调参 | `calc_conditions` 中按 `holding_days` 调整条件单参数 |
-| 组合风控 | YAML 声明 `risk_rules: {max_drawdown: 0.15}` |
-| 调仓频率 | YAML 声明 `schedule: {frequency: weekly}` |
-| 自定义滑点/费率 | YAML `config` 键覆盖默认值 |
-| 列裁剪 | 策略声明 `REQUIRED_FIELDS`，引擎自动按需取列 |
-| 因子研究 | `compute_factor("mom20", df)` → IC 评估 |
-| 绩效归因 | `brinson_attribute("result.db")` |
+### Agent 研究友好
+* 引擎、策略加载器、因子库和所有研究工具均提供 Python 程序化 API
+* 策略可通过 `build_strategy()` 以纯 dict 构造，无需 YAML 文件
+* 回测结果以结构化 dict 返回（stats / trades / daily）
+* 支持在内存中完成定义、回测、分析、迭代的闭环，适合 LLM agent 驱动的自动化量化研究
 
 ## 文档
 
-- [用户指南](docs/user_guide.md) — 设计哲学、架构、能力全景
-- [数据后端对接](docs/backend_guide.md) — 填表法、契约口径、能力空位
-- [因子库指南](docs/factor_library.md) — DAG 模型、19 个算子、伪列、研究陷阱
-- [策略系统指南](docs/strategy_guide.md) — YAML 结构、select 协议、条件单、风控、CLI
+文档站点（基于 VitePress）尚未上线，当前请参阅项目内 `docs/` 目录与 `AGENTS.md`。
 
-## 开发
+## 风险声明
 
-```bash
-pytest tests/ -v                              # 全部测试（仅 fixtures）
-pytest tests/ --cov=btcore -v                  # 覆盖率
-ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/   # Lint
-python scripts/check_anticorrupt.py            # 反破坏检查
-```
+本软件仅用于量化策略研究与历史回测，不构成任何形式的投资建议。历史回测结果不代表未来表现。策略实盘前应充分考虑容量、滑点、交易成本与市场冲击等因素。使用者应自行承担交易决策的全部风险与责任。
