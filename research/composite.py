@@ -64,9 +64,12 @@ def combine_factors(
         w = mean / std.where(std != 0)
     denom = w.abs().sum(axis=1)
     w = w.div(denom.where(denom != 0), axis=0)
+    # 部分因子在某日无 IC 时填零（不污染整日合成）；全部因子无 IC 的行保持 NaN（warmup 期）
+    valid_rows = w.notna().any(axis=1)
+    w = w.fillna(0.0).where(valid_rows, axis=0)
 
     # 逐日截面权重广播到个股（同日同权重）
-    dates = z.index.get_level_values(_DATE)
+    dates = z.index.get_level_values(_DATE).astype(str)  # 归一化防止 Timestamp→str map 静默 NaN
     comp = pd.Series(0.0, index=z.index)
     for c in z.columns:
         w_col = pd.Series(np.asarray(dates.map(w[c]), dtype=float), index=z.index)

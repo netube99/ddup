@@ -29,6 +29,7 @@ _RESERVED_NAMES = frozenset({
     "adj_factor", "pre_close", "up_limit", "down_limit",
     "open_hfq", "high_hfq", "low_hfq", "close_hfq", "pct_chg",
     "idx_ret", "log_mktcap", "industry",
+    "abs",
 })
 
 
@@ -56,7 +57,10 @@ def load_library(path: str | None = None) -> dict[str, dict]:
             else:
                 validate_expr(spec["expr"])
             if spec.get("where"):
-                validate_expr(spec["where"])
+                if ops.has_op_call(spec["where"]):
+                    ops.validate_op_expr(spec["where"])
+                else:
+                    validate_expr(spec["where"])
         except ValueError as exc:
             raise ValueError(f"因子 {name!r} 表达式非法: {exc}") from exc
 
@@ -150,9 +154,14 @@ def spec_names(spec: dict, factor_names: set[str]) -> tuple[set[str], set[str]]:
         cols, refs = names - factor_names, names & factor_names
     where = spec.get("where")
     if where:
-        names = extract_expr_names(where)
-        cols |= names - factor_names
-        refs |= names & factor_names
+        if ops.has_op_call(where):
+            w_cols, w_refs = ops.extract_op_names(where, factor_names)
+            cols |= w_cols
+            refs |= w_refs
+        else:
+            names = extract_expr_names(where)
+            cols |= names - factor_names
+            refs |= names & factor_names
     return cols, refs
 
 
@@ -219,7 +228,10 @@ def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
             values = evaluate_expr(df, spec["expr"])
         where = spec.get("where")
         if where:
-            values = values.where(df.eval(where))
+            if ops.has_op_call(where):
+                values = values.where(ops.eval_op_expr(df, where).astype(bool))
+            else:
+                values = values.where(df.eval(where))
     except Exception as e:
         raise ValueError(f"因子 '{name}' 求值失败: {e}") from e
     return values

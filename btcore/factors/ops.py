@@ -176,6 +176,7 @@ def _xs_group_mean(x: pd.Series, g: pd.Series) -> pd.Series:
 # ── 算子表（固定白名单，非运行时注册表）──
 
 OP_NAMES = frozenset({
+    "abs",
     "delay", "delta", "roc", "ma", "ema", "std", "sum", "max", "min",
     "corr", "beta", "resid_std",
     "rank", "zscore", "winsorize", "group_rank", "neutralize",
@@ -222,6 +223,7 @@ _OPS: dict[str, _Op] = {
                 window_cost=lambda n: n - 1),
     "resid_std": _Op(_ts_resid_std, 2, 1, "ts", "preserve",
                      window_cost=lambda n: n - 1),
+    "abs": _Op(np.abs, 1, 0, "xsec", "preserve"),
     "rank": _Op(_xs_rank, 1, 0, "xsec", "preserve"),
     "zscore": _Op(_xs_zscore, 1, 0, "xsec", "preserve"),
     "winsorize": _Op(_xs_winsorize, 1, 1, "xsec", "preserve",

@@ -311,20 +311,28 @@ class Engine:
 
     def _attach_pseudo_columns(self, df: pd.DataFrame, needs: dict, panel: str):
         """按需附着伪列：industry（backend 鸭子类型）/ log_mktcap / idx_ret。"""
-        if needs.get(f"industry_{panel}"):
-            fn = getattr(self.provider.backend, "get_stock_industries", None)
-            if not callable(fn):
-                raise ValueError(
-                    "因子引用 industry 分组需要 backend 提供 get_stock_industries"
-                )
-            symbols = df.index.get_level_values("symbol").unique().tolist()
-            mapping = fn(symbols)
-            df["industry"] = df.index.get_level_values("symbol").map(mapping)
-        if needs.get(f"mktcap_{panel}"):
-            total_mv = df["total_mv"]
-            df["log_mktcap"] = np.log(total_mv.where(total_mv > 0))
-        if needs.get("index"):
-            df["idx_ret"] = self._derive_idx_ret(df)
+        ensure_pseudo_columns(
+            df, needs, panel,
+            backend=self.provider.backend,
+            benchmark=self.benchmark,
+            derive_idx_ret=self._derive_idx_ret,
+        )
+
+    def _derive_idx_ret(self, df: pd.DataFrame) -> pd.Series:
+        """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
+        bench_fn = getattr(self.provider.backend, "get_benchmark_bars", None)
+        if not (callable(bench_fn) and self.benchmark):
+            raise ValueError(
+                "因子引用 idx_ret 需要 config['benchmark'] 且 backend "
+                "提供 get_benchmark_bars"
+            )
+        dates = df.index.get_level_values("trade_date")
+        bench = bench_fn(self.benchmark, dates.min(), dates.max())
+        if bench is None or bench.empty:
+            raise ValueError(f"基准 {self.benchmark} 无数据, 无法派生 idx_ret")
+        ret = bench["hfq_close"].pct_change()
+        ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
+        return dates.map(ret)
 
     def _derive_idx_ret(self, df: pd.DataFrame) -> pd.Series:
         """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
@@ -631,6 +639,40 @@ def _ensure_derived_fields(bars_df: pd.DataFrame) -> None:
             and {"close", "pre_close"} <= set(bars_df.columns)):
         pre = bars_df["pre_close"]
         bars_df["pct_chg"] = (bars_df["close"] - pre) / pre.replace(0, pd.NA)
+
+
+def ensure_pseudo_columns(
+    df: pd.DataFrame,
+    needs: dict,
+    panel: str,
+    *,
+    backend,
+    benchmark: str | None = None,
+    derive_idx_ret=None,
+) -> None:
+    """按需附着伪列：industry / log_mktcap / idx_ret（原地写列）。
+
+    引擎与 scripts/factor_eval.py 共用，backend 为鸭子类型（只需有对应方法即可）。
+    idx_ret 派生需要 benchmark 和 derive_idx_ret 回调（引擎内联供给）。
+    """
+    if needs.get(f"industry_{panel}"):
+        fn = getattr(backend, "get_stock_industries", None)
+        if not callable(fn):
+            raise ValueError(
+                "因子引用 industry 分组需要 backend 提供 get_stock_industries"
+            )
+        symbols = df.index.get_level_values("symbol").unique().tolist()
+        mapping = fn(symbols)
+        df["industry"] = df.index.get_level_values("symbol").map(mapping)
+    if needs.get(f"mktcap_{panel}"):
+        total_mv = df["total_mv"]
+        df["log_mktcap"] = np.log(total_mv.where(total_mv > 0))
+    if needs.get("index"):
+        if derive_idx_ret is None or not benchmark:
+            raise ValueError(
+                "因子引用 idx_ret 需要 benchmark 且 derive_idx_ret 回调不可缺"
+            )
+        df["idx_ret"] = derive_idx_ret(df)
 
 
 def _bars_to_dict(day_bars_df: pd.DataFrame, trade_date: str) -> dict:

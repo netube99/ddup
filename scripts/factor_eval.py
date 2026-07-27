@@ -14,7 +14,8 @@ import sys
 import pandas as pd
 
 from adapters.tushare import TushareBackend
-from btcore.engine import _ensure_derived_fields
+from btcore.engine import _ensure_derived_fields, ensure_pseudo_columns
+from btcore.factors import plan as factor_plan
 from btcore.factors.library import compute_factors, load_library, spec_names
 from research.factor_eval import (
     calc_factor_corr,
@@ -132,7 +133,8 @@ def main() -> int:
         raw_cols |= cols
     # 补齐 _ensure_derived_fields 所需的列
     raw_cols |= {"open", "high", "low", "close", "adj_factor", "pre_close"}
-    request_columns = sorted(raw_cols)
+    # 伪列（industry / log_mktcap / idx_ret）不向 backend 请求，后续由引擎附着
+    request_columns = sorted(raw_cols - factor_plan.PSEUDO_COLUMNS)
     print(f"请求列: {len(request_columns)} 列")
 
     # 查询行情面板
@@ -147,6 +149,15 @@ def main() -> int:
 
     # 补齐后复权价等派生列
     _ensure_derived_fields(bars_df)
+
+    # 附着伪列（industry / log_mktcap / idx_ret），与引擎 preload 口径一致
+    pseudo_needs = {
+        "industry_main": "industry" in raw_cols,
+        "mktcap_main": "log_mktcap" in raw_cols,
+        "index": "idx_ret" in raw_cols,
+    }
+    if any(pseudo_needs.values()):
+        ensure_pseudo_columns(bars_df, pseudo_needs, "main", backend=backend)
 
     # 计算因子值
     print(f"计算因子: {', '.join(factor_names)} ...")

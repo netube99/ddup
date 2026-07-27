@@ -78,8 +78,11 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
             w = max([windows.get(r, 1) for r in refs], default=1)
         where = spec.get("where")
         if where:
-            refs = extract_expr_names(where) & names
-            w = max([w, *[windows.get(r, 1) for r in refs]])
+            if ops.has_op_call(where):
+                w = max(w, ops.infer_window(where, windows))
+            else:
+                refs = extract_expr_names(where) & names
+                w = max([w, *[windows.get(r, 1) for r in refs]])
         windows[name] = w
     max_window = max(windows.values(), default=1)
 
@@ -207,7 +210,10 @@ def _eval_spec_on(df: pd.DataFrame, spec: dict) -> pd.Series:
         values = evaluate_expr(df, spec["expr"])
     where = spec.get("where")
     if where:
-        values = values.where(df.eval(where))
+        if ops.has_op_call(where):
+            values = values.where(ops.eval_op_expr(df, where).astype(bool))
+        else:
+            values = values.where(df.eval(where))
     return values
 
 
