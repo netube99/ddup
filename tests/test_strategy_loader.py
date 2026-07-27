@@ -286,3 +286,85 @@ class TestBuildStrategy:
         assert (from_dict.FACTOR_NODES["mom20"]["expr"]
                 == from_yaml.FACTOR_NODES["mom20"]["expr"])
         assert len(from_dict.FACTOR_SPECS) == len(from_yaml.FACTOR_SPECS)
+
+
+# ── factor_universe 加载测试 ──
+
+
+_FACTOR_UNIVERSE_YAML = """\
+strategy: strategies.examples.topk_momentum:TopKMomentum
+filter_rules:
+  factor_universe: ["000300.SH", "000905.SH"]
+"""
+
+
+class _OwnFactorUniverseStrategy(TopKMomentum):
+    """自定义 get_factor_universe 的策略：loader 不应覆盖。"""
+
+    def get_factor_universe(self, provider, start, end):
+        return ["000001.SZ"]
+
+
+class TestFactorUniverseLoading:
+    _SNAPSHOTS = {"20240531": {"000001.SZ", "600036.SH"},
+                  "20240628": {"600036.SH", "300750.SZ"}}
+
+    def test_factor_universe_is_known_key(self, tmp_path):
+        strategy = load_strategy(_write(tmp_path, _FACTOR_UNIVERSE_YAML))
+        assert strategy.FILTER_RULES["factor_universe"] == ["000300.SH", "000905.SH"]
+
+    def test_default_get_factor_universe_generated(self, tmp_path):
+        """配置 factor_universe 且策略未自定义 → loader 生成区间并集。"""
+        strategy = load_strategy(_write(tmp_path, _FACTOR_UNIVERSE_YAML))
+        universe = strategy.get_factor_universe(
+            _stub_provider(self._SNAPSHOTS), "20240603", "20240630")
+        assert universe == ["000001.SZ", "300750.SZ", "600036.SH"]
+
+    def test_own_get_factor_universe_not_overridden(self, tmp_path):
+        path = _write(tmp_path, _FACTOR_UNIVERSE_YAML.replace(
+            "strategies.examples.topk_momentum:TopKMomentum",
+            "tests.test_strategy_loader:_OwnFactorUniverseStrategy",
+        ))
+        strategy = load_strategy(path)
+        assert strategy.get_factor_universe(
+            _stub_provider(self._SNAPSHOTS), "20240603", "20240630") == ["000001.SZ"]
+
+    def test_no_factor_universe_falls_back_none(self, tmp_path):
+        """未配置 factor_universe → get_factor_universe 保持基类默认 None。"""
+        strategy = load_strategy(EXAMPLE_YAML)
+        assert strategy.get_factor_universe(
+            _stub_provider({}), "20240603", "20240630") is None
+
+    def test_empty_snapshots_fall_back_none(self, tmp_path):
+        """无成分数据时 get_factor_universe 返回 None（回退交易域）。"""
+        strategy = load_strategy(_write(tmp_path, _FACTOR_UNIVERSE_YAML))
+        assert strategy.get_factor_universe(
+            _stub_provider({}), "20240603", "20240630") is None
+
+    def test_missing_method_soft_fallback(self, tmp_path, caplog):
+        """backend 未提供 get_index_members：告警一次，返回 None。"""
+        strategy = load_strategy(_write(tmp_path, _FACTOR_UNIVERSE_YAML))
+        provider = SimpleNamespace(backend=SimpleNamespace())
+        assert strategy.get_factor_universe(provider, "20240603", "20240630") is None
+        assert strategy.get_factor_universe(provider, "20240603", "20240630") is None
+        assert caplog.text.count("因子计算域不生效") == 1
+
+
+class TestBuildStrategyFactorUniverse:
+    def test_build_strategy_with_factor_universe(self):
+        """filter_rules 含 factor_universe 时正确挂接 get_factor_universe。"""
+        strategy = build_strategy(
+            TopKMomentum,
+            config={},
+            filter_rules={"factor_universe": ["000300.SH"]},
+        )
+        assert strategy.FILTER_RULES["factor_universe"] == ["000300.SH"]
+        # 无 backend 时 get_factor_universe 返回 None（软回退）
+        provider = SimpleNamespace(backend=SimpleNamespace())
+        assert strategy.get_factor_universe(provider, "20240603", "20240630") is None
+
+    def test_build_strategy_factor_universe_absent(self):
+        """未传 factor_universe → get_factor_universe 为 None。"""
+        strategy = build_strategy(TopKMomentum, config={})
+        assert strategy.get_factor_universe(
+            _stub_provider({}), "20240603", "20240630") is None

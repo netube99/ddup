@@ -148,6 +148,9 @@ class _BoomStrategy:
     def get_universe(self, provider, start, end):
         return None
 
+    def get_factor_universe(self, provider, start, end):
+        return None
+
     def select(self, bars, snapshot, provider):
         raise RuntimeError("boom")
 

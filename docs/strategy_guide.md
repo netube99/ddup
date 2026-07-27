@@ -60,6 +60,7 @@ filter_rules:                                        # 可选：StockFilter 规�
   min_price: 3.0                                     # 最低股价
   exclude_loss: true                                 # 排亏损（需 pe_ttm 列，列裁剪触发）
   index_universe: ["000300.SH", "000905.SH"]         # 指数成分白名单，多指数取并集
+  factor_universe: ["000300.SH", "000905.SH", "000852.SH"]  # 可选：因子计算域，不配则沿用 index_universe
 
 conditions:                                          # 可选：声明式条件单
   stop_loss_pct: 0.08                                # 止损：成本价 × (1 - pct)，值 ∈ (0,1)
@@ -330,12 +331,142 @@ type 名未注册时引擎在 `_compute_pending` 阶段立即抛 `ValueError`，
 | `min_price` | float | 0.0 | 最低收盘价。0 = 不限制 |
 | `exclude_loss` | bool | true | 排亏损（pe_ttm ≤ 0）。依赖 pe_ttm 列：列裁剪下只有显式声明此规则为 true（即 `exclude_loss: true`）才会 preload 该列。列缺失时告警一次，该规则不生效 |
 | `index_universe` | list[str] | [] | 指数成分白名单（入场闸）。需要 backend 提供 `get_index_members`，缺失同软回退。多指数取并集，成分按月频快照取最近一期 ≤ 当日。**持仓被调出指数不强制卖出** |
+| `factor_universe` | list[str] | [] | **因子计算域**（新增）。配置后引擎按此范围加载数据并物化因子，再裁切到 `index_universe` 分发给 `select()`。与 `index_universe` 对称——`index_universe` 决定"你能买谁"，`factor_universe` 决定"你跟谁比"。不配置时沿用 `index_universe`。需要 backend 提供 `get_index_members`，缺失同软回退 |
 
 **软回退 vs fail-fast**：过滤规则的鸭子类型依赖（ST 表、行业、指数成分等）缺失时
 告警一次（`logger.warning`），该条规则不生效，策略继续运行。
 这些数据不是所有数据源都提供，所以用软回退。
 伪列引用（`idx_ret` / `industry` / `log_mktcap`）缺失时则 preload 直接报错——
 因为策略明确依赖，缺失说明配置错误。
+
+### factor_universe：因子计算域与交易域分离
+
+`factor_universe` 允许在比交易范围更宽的股票池上计算因子值（rank、zscore 等截面算子），而实际买卖仍限制在 `index_universe` 内。一句话解释：
+
+> `index_universe` 决定你能买谁，`factor_universe` 决定你跟谁比。
+
+**典型场景**：策略只在 CSI 300 内交易，但需要全市场排名才能选出真正领先的标的。
+
+```yaml
+filter_rules:
+  index_universe: ["000300.SH"]                                      # 交易域：只买卖 CSI 300
+  factor_universe: ["000300.SH", "000905.SH", "000852.SH"]           # 计算域：因子在三指数范围内排名
+```
+
+引擎流程：
+
+1. `get_factor_universe()` 返回计算域的指数成分区间并集（月频快照取并集，粗裁剪）
+2. 主面板按计算域加载数据 → 因子物化（宽域口径）
+3. 主面板裁切到交易域（`get_universe()` 返回值）→ `bars_by_date` 构建
+4. 每日 `select()` 收到的 bars 仍是交易域，但因子列的值反映宽域排名
+
+程序化用法：
+
+```python
+from btcore.strategy_loader import build_strategy
+
+strategy = build_strategy(
+    TopKMomentum,
+    config={"initial_capital": 1_000_000, "top_k": 5},
+    factor_specs=[{"name": "mom_z", "weight": 1.0}],
+    filter_rules={
+        "index_universe": ["000300.SH"],
+        "factor_universe": ["000300.SH", "000905.SH", "000852.SH"],
+    },
+)
+```
+
+**注意事项**：
+- `factor_universe` 不配置或为空时，沿用 `index_universe`（向后兼容）
+- `factor_universe` 扩大时内存按比例增加，全市场约是 CSI 300 的 16 倍
+- 坍缩算子（`mean`、`group_mean`）始终在广度面板（全市场）上计算，不受 `factor_universe` 影响
+- 策略自定义 `get_factor_universe()` 方法后，loader 不会覆盖（与 `get_universe` 保护逻辑一致）
+
+#### 与 index_universe 的协作关系
+
+两者相互独立，但通常 `factor_universe` 是 `index_universe` 的超集：
+
+```
+全市场
+  └── factor_universe（因子计算域，如 CSI 300 + CSI 500 + CSI 1000）
+        └── index_universe（交易域，如 CSI 300）
+```
+
+关系表：
+
+| factor_universe | index_universe | 效果 |
+|---|---|---|
+| 未配置 | 未配置 | 全市场计算 + 全市场交易（当前默认） |
+| 未配置 | `["000300.SH"]` | CSI 300 内计算 + CSI 300 内交易（当前 `index_universe` 行为） |
+| `["000300.SH", "000905.SH"]` | `["000300.SH"]` | **宽域计算 + 窄域交易**（核心场景） |
+| 全市场指数列表 | `["000300.SH"]` | 全市场口径排名 + CSI 300 内选股 |
+
+如果只配了 `factor_universe` 但不配 `index_universe`，交易域为全市场——此时因子在 `factor_universe` 范围计算，但所有股票均可交易。这个场景通常不是设计意图（不如直接不配 `factor_universe`）。
+
+#### 自定义 get_factor_universe
+
+与 `get_universe` 一样，策略子类可以覆盖 `get_factor_universe()` 实现更复杂的逻辑（如根据市场状态动态切换计算域）：
+
+```python
+class AdaptiveStrategy(TopKMomentum):
+    def get_factor_universe(self, provider, start, end):
+        # 牛市用全市场，熊市用 CSI 300
+        if self._is_bull_market(provider, start):
+            return None  # 全市场
+        return provider.backend.get_index_universe(["000300.SH"], start, end)
+```
+
+loader 不会覆盖自定义方法（通过 `type(strategy).get_factor_universe is not Strategy.get_factor_universe` 检测）。
+
+#### 在因子遍历研究中使用
+
+结合 `build_strategy` 程序化接口，可以固定 `factor_universe` 作为公共计算基线，然后对不同因子组合做回测对比：
+
+```python
+from btcore.strategy_loader import build_strategy
+from strategies.examples.topk_momentum import TopKMomentum
+
+SHARED_CONFIG = {"initial_capital": 1_000_000, "top_k": 5}
+SHARED_FILTERS = {
+    "index_universe": ["000300.SH"],
+    "factor_universe": ["000300.SH", "000905.SH", "000852.SH"],
+}
+
+factor_grid = [
+    [{"name": "mom20", "weight": 1.0}],
+    [{"name": "mom20", "weight": 0.7}, {"name": "vol_z", "weight": 0.3}],
+    [{"name": "ep_z", "weight": 0.6}, {"name": "rev5", "weight": 0.4}],
+]
+
+for i, specs in enumerate(factor_grid):
+    strategy = build_strategy(
+        TopKMomentum,
+        config=dict(SHARED_CONFIG),
+        factor_specs=specs,
+        filter_rules=dict(SHARED_FILTERS),
+    )
+    engine = Engine(strategy, provider, db_path=f"result_{i}.db")
+    engine.run("20240101", "20240630")
+```
+
+所有策略共享同一套 `factor_universe` 作为排名基线，因子对比结果更具可比性。
+
+#### 与 StockFilter 逐日过滤的关系
+
+`factor_universe` 和 `index_universe` 的「全区间并集」模式是粗裁剪（减少 SQL 加载量），**不是精确的逐日过滤**。每日精确的指数成分过滤仍由 `StockFilter.filter()` 在 `select()` 内按 `index_universe` 月频快照完成。
+
+因此流程图实际上是：
+
+```
+1. get_factor_universe()      → 宽域粗裁剪（全区间并集）
+2. 主面板加载宽域数据
+3. materialize()               → 因子在宽域上物化
+4. 裁切到 get_universe()      → 交易域粗裁剪（全区间并集）
+5. bars_by_date 构建
+6. select() 内 StockFilter    → 逐日精确过滤（index_universe 当月快照）
+```
+
+`factor_universe` 不参与第 6 步——它只影响第 1-4 步的数据加载和因子计算范围。
 
 ---
 

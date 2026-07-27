@@ -29,6 +29,9 @@ class FillRecorder:
     def get_universe(self, provider, start, end):
         return None
 
+    def get_factor_universe(self, provider, start, end):
+        return None
+
     def on_fills(self, trades, provider):
         self.events.append("fills")
         self.fills_log.append(list(trades))
@@ -121,6 +124,9 @@ class NoHookStrategy:
         pass
 
     def get_universe(self, provider, start, end):
+        return None
+
+    def get_factor_universe(self, provider, start, end):
         return None
 
     def select(self, bars, snapshot, provider):

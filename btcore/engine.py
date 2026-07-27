@@ -158,14 +158,17 @@ class Engine:
             if not calendar:
                 raise ValueError("日历为空")
 
-            symbols = self.strategy.get_universe(self.provider, start, end)
+            factor_symbols = self.strategy.get_factor_universe(self.provider, start, end)
+            trade_symbols = self.strategy.get_universe(self.provider, start, end)
+            # factor_universe 未配置时 factor_symbols 为 None，沿用 trade_symbols
+            load_symbols = factor_symbols if factor_symbols is not None else trade_symbols
             fplan = self._build_factor_plan()
             warmup_days = fplan["main_days"] if fplan else 365
             preload_start = (
                 pd.Timestamp(calendar[0]) - pd.Timedelta(days=warmup_days)
             ).strftime("%Y%m%d")
             bars_df = self.provider.get_engine_bars(
-                symbols, calendar[-1],
+                load_symbols, calendar[-1],
                 lookback_start=preload_start,
                 columns=required_bar_columns(self.strategy, fplan),
             )
@@ -180,6 +183,15 @@ class Engine:
                 factor_plan.materialize(
                     bars_df, breadth_df, fplan, self.strategy.FACTOR_NODES
                 )
+            # 若 factor_universe 比 trading universe 更宽，裁切到交易域
+            if factor_symbols is not None and trade_symbols is not None:
+                trade_set = set(trade_symbols)
+                mask = bars_df.index.get_level_values("symbol").isin(trade_set)
+                bars_df = bars_df[mask]
+                if bars_df.empty:
+                    raise ValueError(
+                        "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
+                    )
             self.bars_df = bars_df
             self.bars_by_date = {
                 d: group.droplevel("trade_date")

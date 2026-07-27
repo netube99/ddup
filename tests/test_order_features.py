@@ -27,6 +27,9 @@ class _BaseStrategy:
     def get_universe(self, provider, start, end):
         return [SYM]
 
+    def get_factor_universe(self, provider, start, end):
+        return None
+
     def on_start(self, provider, first_date, end_date=None):
         pass
 

@@ -54,6 +54,18 @@ class Strategy(ABC):
         """
         return None
 
+    def get_factor_universe(
+        self, provider, start: str, end: str
+    ) -> list[str] | None:
+        """返回因子计算所需的股票列表。None 表示沿用 get_universe() 的交易域。
+
+        引擎在 preload 阶段调用，用于决定因子物化的数据范围。
+        基类默认返回 None（factor universe = trading universe）。
+        若 strategy_loader 检测到 filter_rules.factor_universe 配置项，
+        会自动覆盖此方法（类似 index_universe → get_universe 的生成模式）。
+        """
+        return None
+
     @abstractmethod
     def on_start(
         self, provider, first_date: str, end_date: str | None = None

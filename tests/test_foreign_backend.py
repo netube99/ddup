@@ -197,6 +197,9 @@ class SentimentStrategy:
     def get_universe(self, provider, start, end):
         return None
 
+    def get_factor_universe(self, provider, start, end):
+        return None
+
     def on_start(self, provider, first_date, end_date=None):
         pass
 
