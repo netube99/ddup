@@ -463,6 +463,82 @@ result = engine.run("20240101", "20240630")
 print(result["statistics"])
 ```
 
+也可以用 `build_strategy()` 程序化构造策略，无需 YAML 文件——
+适用于遍历因子组合、参数扫描等研究场景：
+
+```python
+from btcore.strategy_loader import build_strategy
+from strategies.examples.topk_momentum import TopKMomentum
+
+strategy = build_strategy(
+    TopKMomentum,
+    config={"initial_capital": 1_000_000, "max_positions": 10, "top_k": 5,
+            "conditions": {"stop_loss_pct": 0.06}},
+    factor_specs=[
+        {"name": "mom20", "weight": 1.0, "ascending": False},
+        {"name": "vol_z", "weight": 0.5},
+    ],
+    filter_rules={"exclude_st": True, "min_price": 3.0},
+    schedule={"frequency": "weekly", "weekday": 1},
+)
+```
+
+两种路径走同一套校验逻辑，构造出的策略实例完全等价。
+
+#### 遍历因子组合
+
+研究中最常见的场景：基于同一个策略模板，遍历多组因子跑回测对比。
+
+**混合模式（推荐）**：从 YAML 提取基础配置，只覆盖因子规格：
+
+```python
+from btcore.strategy_loader import load_strategy, build_strategy
+
+# 加载基础策略，提取共享的 config / filter_rules / schedule
+base = load_strategy("strategies/examples/topk_momentum/config.yaml")
+base_config = base.config
+base_filters = base.FILTER_RULES
+strategy_cls = type(base)
+
+factor_grid = [
+    [{"name": "mom20", "weight": 1.0, "ascending": False}],
+    [{"name": "mom20", "weight": 0.7}, {"name": "vol_z", "weight": 0.3}],
+    [{"name": "ep_z", "weight": 0.6}, {"name": "rev5", "weight": 0.4}],
+]
+
+for i, specs in enumerate(factor_grid):
+    strategy = build_strategy(
+        strategy_cls,
+        config=dict(base_config),
+        factor_specs=specs,
+        filter_rules=dict(base_filters),
+    )
+    engine = Engine(strategy, provider, db_path=f"result_grid{i}.db")
+    engine.run("20240101", "20240630")
+```
+
+**完全程序化模式**：不依赖任何 YAML，全部用 dict 构造：
+
+```python
+from btcore.strategy_loader import build_strategy
+from strategies.examples.topk_momentum import TopKMomentum
+
+SHARED_CONFIG = {"initial_capital": 1_000_000, "max_positions": 10, "top_k": 5}
+SHARED_FILTERS = {"exclude_st": True, "min_price": 3.0}
+
+for specs in factor_grid:
+    strategy = build_strategy(
+        TopKMomentum,
+        config=dict(SHARED_CONFIG),
+        factor_specs=specs,
+        filter_rules=dict(SHARED_FILTERS),
+    )
+    engine = Engine(strategy, provider)
+    engine.run("20240101", "20240630")
+```
+
+注意 `dict(base_config)` 拷贝：每次构建独立 config 副本，避免多次 run 间串改。
+
 `Engine.__init__` 参数：
 - `strategy`：Strategy 实例
 - `provider`：DataProvider 实例，包装了数据后端

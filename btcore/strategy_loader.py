@@ -1,16 +1,20 @@
-"""YAML 策略加载器。
+"""策略构造层 — YAML 文件加载 与 程序化构建。
 
-把声明式 YAML 翻译成 Strategy 子类实例：
+两种等价的策略构造路径：
+
+1. YAML 文件 → load_strategy(path)
+2. Python dict → build_strategy(cls, config, ...)
+
+两者共享同一套校验与构建逻辑：
   - factor_specs 只引用因子库里的名字（factor: name）；加载时解析为
     {name, weight, ascending}，并把传递引用闭包挂到实例 FACTOR_NODES
     （引擎 preload 据此规划数据供给并把因子物化为列）
   - factor_specs / filter_rules 经 __init__ 传为实例属性（不做类变量 mutation）
-  - conditions 合并进 config["conditions"]，由策略侧 ConditionBuilder 消费
-  - risk_rules 合并进 config["risk_rules"]，由引擎强制执行（组合级风控）
+  - conditions / risk_rules 在 YAML 中是顶层键，合并进 config
+    （程序化路径直接写入 config 即可）
   - schedule 声明调仓频率（daily|weekly|monthly），由 strategy_tools 包装 select
 
-买卖/调仓逻辑不在本层——YAML 里的 strategy 键指向用户自己的 Strategy 子类。
-"""
+买卖/调仓逻辑不在本层——YAML 里的 strategy 键指向用户自己的 Strategy 子类。"""
 
 import importlib
 import logging
@@ -35,8 +39,63 @@ _KNOWN_FILTER_KEYS = {
 _CONDITION_KEYS = {"stop_loss_pct", "take_profit_pct", "trailing_pct"}
 
 
+def build_strategy(
+    cls: type[Strategy],
+    config: dict,
+    *,
+    factor_specs: list[dict] | None = None,
+    filter_rules: dict | None = None,
+    schedule: dict | None = None,
+    factor_library: str | dict | None = None,
+) -> Strategy:
+    """用 Python dict 构造策略实例（无需 YAML 文件）。
+
+    Args:
+        cls: Strategy 子类。
+        config: 策略配置（initial_capital / max_positions 及策略自定义键）。
+            conditions / risk_rules 直接写入 config 中对应键。
+        factor_specs: [{name, weight?, ascending?}]，名称引用 factor_library 里的因子。
+            不传时使用类的 FACTOR_SPECS 默认值。
+        filter_rules: {exclude_st?, min_price?, index_universe?, ...}。
+        schedule: {frequency, weekday?, monthday?}，不传则每日调仓。
+        factor_library: 因子库文件路径或预加载的 dict；缺省用 factors/library.yaml。
+
+    Returns:
+        完整的 Strategy 实例（含 FACTOR_SPECS / FACTOR_NODES / FILTER_RULES）。
+    """
+    # 加载因子库：str → load_library；dict → 直接用；None → 默认路径
+    if factor_library is None:
+        library = load_library()
+    elif isinstance(factor_library, dict):
+        library = factor_library
+    else:
+        library = load_library(factor_library)
+
+    specs = _resolve_factor_specs(factor_specs or [], library)
+    if specs:
+        strategy_nodes = resolve_closure([s["name"] for s in specs], library)
+    else:
+        strategy_nodes = None
+
+    rules = _validate_filter_rules(filter_rules or {})
+
+    strategy = cls(config=config, factor_specs=specs, filter_rules=rules)
+    if strategy_nodes:
+        strategy.FACTOR_NODES = strategy_nodes
+    _attach_index_universe(strategy, rules)
+
+    if schedule is not None:
+        strategy = wrap_strategy(strategy, parse_schedule(schedule))
+
+    return strategy
+
+
 def load_strategy(path: str) -> Strategy:
-    """加载 YAML 策略文件，返回 Strategy 实例。"""
+    """加载 YAML 策略文件，返回 Strategy 实例。
+
+    本函数是 build_strategy 的 YAML 适配器：解析文件后提取参数并委托给
+    build_strategy，两者构造出的策略实例行为完全等价。
+    """
     with open(path, encoding="utf-8") as f:
         doc = yaml.safe_load(f)
     if not isinstance(doc, dict):
@@ -49,18 +108,12 @@ def load_strategy(path: str) -> Strategy:
     lib_path = doc.get("factor_library")
     if lib_path and not Path(lib_path).is_absolute():
         lib_path = str(Path(path).parent / lib_path)
-    library = load_library(lib_path)
+    factor_library: str | None = lib_path if lib_path else None
 
-    factor_specs = _resolve_factor_specs(doc.get("factor_specs") or [], library)
-    if factor_specs:
-        # 因子闭包挂到实例：引擎 preload 据此规划两路供给并物化因子列
-        strategy_nodes = resolve_closure(
-            [s["name"] for s in factor_specs], library
-        )
-    else:
-        strategy_nodes = None
-    filter_rules = _validate_filter_rules(doc.get("filter_rules") or {})
+    factor_specs = doc.get("factor_specs")
+    filter_rules = doc.get("filter_rules")
 
+    # conditions / risk_rules 在 YAML 中是顶层键，合并进 config
     conditions = doc.get("conditions")
     if conditions:
         config["conditions"] = _validate_conditions(conditions)
@@ -69,17 +122,16 @@ def load_strategy(path: str) -> Strategy:
     if risk_rules:
         config["risk_rules"] = validate_risk_rules(risk_rules)
 
-    strategy = cls(config=config, factor_specs=factor_specs,
-                   filter_rules=filter_rules)
-    if strategy_nodes:
-        strategy.FACTOR_NODES = strategy_nodes
-    _attach_index_universe(strategy, filter_rules)
-
     schedule = doc.get("schedule")
-    if schedule is not None:
-        strategy = wrap_strategy(strategy, parse_schedule(schedule))
 
-    return strategy
+    return build_strategy(
+        cls,
+        config,
+        factor_specs=factor_specs,
+        filter_rules=filter_rules,
+        schedule=schedule,
+        factor_library=factor_library,
+    )
 
 
 def _attach_index_universe(strategy: Strategy, filter_rules: dict) -> None:
@@ -138,7 +190,11 @@ def _resolve_factor_specs(specs: list, library: dict) -> list[dict]:
         if not isinstance(spec, dict):
             raise ValueError(f"factor_specs[{i}] 必须是 mapping: {spec!r}")
         try:
-            resolved.append(resolve_spec(dict(spec), library))
+            raw = dict(spec)
+            # 程序化路径直接传 name；YAML 路径传 factor。统一转为 factor 键交给 resolve_spec。
+            if "name" in raw and "factor" not in raw:
+                raw["factor"] = raw.pop("name")
+            resolved.append(resolve_spec(raw, library))
         except ValueError as exc:
             raise ValueError(f"factor_specs[{i}]: {exc}") from exc
     return resolved

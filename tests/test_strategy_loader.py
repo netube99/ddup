@@ -1,10 +1,11 @@
-"""btcore.strategy_loader 测试：YAML → Strategy 实例的加载与校验。"""
+"""btcore.strategy_loader 测试：YAML → Strategy 实例的加载与校验，
+以及程序化 build_strategy 接口。"""
 
 from types import SimpleNamespace
 
 import pytest
 
-from btcore.strategy_loader import load_strategy
+from btcore.strategy_loader import build_strategy, load_strategy
 from strategies.examples.topk_momentum import TopKMomentum
 
 EXAMPLE_YAML = "strategies/examples/topk_momentum/config.yaml"
@@ -183,3 +184,105 @@ class TestIndexUniverseLoading:
         assert strategy.get_universe(provider, "20240603", "20240630") is None
         assert strategy.get_universe(provider, "20240603", "20240630") is None
         assert caplog.text.count("白名单规则不生效") == 1
+
+
+# ── build_strategy 程序化接口测试 ──
+
+
+class TestBuildStrategy:
+    def test_minimal(self):
+        """仅 cls + config，无 factor/filter/schedule。"""
+        strategy = build_strategy(TopKMomentum, config={"top_k": 3})
+        assert isinstance(strategy, TopKMomentum)
+        assert strategy.config["top_k"] == 3
+        assert strategy.FACTOR_SPECS == []
+        assert strategy.FACTOR_NODES is None
+        assert strategy.FILTER_RULES == {}
+
+    def test_full(self):
+        """含 factor_specs / filter_rules / schedule。"""
+        strategy = build_strategy(
+            TopKMomentum,
+            config={"initial_capital": 500000, "top_k": 5,
+                    "conditions": {"stop_loss_pct": 0.05}},
+            factor_specs=[
+                {"name": "mom20", "weight": 1.0, "ascending": False},
+                {"name": "low_turnover", "weight": 0.5, "ascending": True},
+            ],
+            filter_rules={"exclude_st": True, "min_price": 5.0},
+            schedule={"frequency": "weekly", "weekday": 3},
+        )
+        assert strategy.config["top_k"] == 5
+        assert strategy.config["conditions"]["stop_loss_pct"] == 0.05
+        assert len(strategy.FACTOR_SPECS) == 2
+        by_name = {s["name"]: s for s in strategy.FACTOR_SPECS}
+        assert by_name["mom20"]["weight"] == 1.0
+        assert by_name["mom20"]["ascending"] is False
+        assert by_name["low_turnover"]["ascending"] is True  # 库默认
+        assert strategy.FACTOR_NODES["mom20"]["expr"] == "roc(close_hfq, 20)"
+        assert strategy.FILTER_RULES["exclude_st"] is True
+
+    def test_custom_library(self, tmp_path):
+        """使用自定义因子库 dict。"""
+        lib = {"my_factor": {"expr": "close_hfq / pre_close", "ascending": True}}
+        strategy = build_strategy(
+            TopKMomentum,
+            config={},
+            factor_specs=[{"name": "my_factor", "weight": 2.0}],
+            factor_library=lib,
+        )
+        spec = strategy.FACTOR_SPECS[0]
+        assert spec["name"] == "my_factor"
+        assert spec["weight"] == 2.0
+        assert strategy.FACTOR_NODES["my_factor"]["expr"] == "close_hfq / pre_close"
+
+    def test_unknown_factor(self):
+        """factor_specs 引用不存在的因子应报错。"""
+        with pytest.raises(ValueError, match="未知因子"):
+            build_strategy(
+                TopKMomentum,
+                config={},
+                factor_specs=[{"name": "nope"}],
+            )
+
+    def test_specs_are_instance_attrs(self):
+        """不污染类变量（与 YAML 路径等价）。"""
+        s1 = build_strategy(
+            TopKMomentum,
+            config={},
+            factor_specs=[{"name": "mom20", "weight": 1.0}],
+        )
+        s2 = TopKMomentum(config={})
+        assert s1.FACTOR_SPECS != s2.FACTOR_SPECS
+        assert s2.FACTOR_SPECS == []
+        assert TopKMomentum.FILTER_RULES == {}
+
+    def test_equivalent_to_yaml(self):
+        """build_strategy 与 load_strategy 构造的策略在关键属性上等价。"""
+        from_yaml = load_strategy(EXAMPLE_YAML)
+        from_dict = build_strategy(
+            TopKMomentum,
+            config={
+                "initial_capital": 1000000, "max_positions": 10, "top_k": 5,
+                "cooldown_days": 3, "commission_rate": 0.0002,
+                "stamp_tax_rate": 0.0005, "slippage_ticks": 2,
+                "execution_price": "open",
+                "conditions": {"stop_loss_pct": 0.06,
+                                "take_profit_pct": 0.25,
+                                "trailing_pct": 0.08},
+            },
+            factor_specs=[
+                {"name": "mom20", "weight": 1.0, "ascending": False},
+                {"name": "low_turnover", "weight": 0.5, "ascending": True},
+            ],
+            filter_rules={
+                "exclude_st": True, "exclude_new_stock": True,
+                "exclude_loss": True, "exclude_boards": ["BJ"],
+                "min_price": 3.0,
+            },
+        )
+        assert from_dict.config["top_k"] == from_yaml.config["top_k"]
+        assert from_dict.FILTER_RULES == from_yaml.FILTER_RULES
+        assert (from_dict.FACTOR_NODES["mom20"]["expr"]
+                == from_yaml.FACTOR_NODES["mom20"]["expr"])
+        assert len(from_dict.FACTOR_SPECS) == len(from_yaml.FACTOR_SPECS)
