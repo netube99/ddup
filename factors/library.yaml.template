@@ -1,0 +1,43 @@
+# 因子库模板 — 复制为 library.yaml 后使用
+# cp factors/library.yaml.template factors/library.yaml
+#
+# 说明：因子定义集中在 factors/library.yaml，策略与研究两侧按名字消费
+# 同一份定义。此模板包含示例因子，你可在此基础上添加自有因子。
+# library.yaml 已在 .gitignore 中排除，不会提交到版本库。
+#
+# 详细文档：docs/factor_library.md
+
+factors:
+  # ── 基础示例（逐行表达式 + 算子）──
+  mom20:
+    expr: "roc(close_hfq, 20)"
+    description: "20日动量（后复权）"
+  bias20:
+    expr: "close_hfq / ma(close_hfq, 20) - 1"
+    description: "20日乖离率"
+  low_turnover:
+    expr: "turnover_rate"
+    description: "换手率"
+  value:
+    expr: "dv_ttm / pb"
+    where: "pb > 0"
+    description: "股息率/市净率（截面组合示例）"
+
+  # ── 截面保形算子（zscore / group_mean，候选池口径）──
+  mom_z:
+    expr: "zscore(mom20)"
+    description: "截面标准化动量"
+  industry_mom:
+    expr: "group_mean(mom20, industry)"
+    description: "行业平均动量（全市场聚合，map 回个股）"
+
+  # ── 截面坍缩算子（mean，同日广播）──
+  pct_above_ma20:
+    expr: "mean(close_hfq >= ma(close_hfq, 20))"
+    description: "站上MA20的股票占比（市场广度，坍缩口径）"
+
+  # ── 事件型数据示例（limit_list_d 表；未上榜日 = NaN）──
+  seal_strength:
+    expr: "fd_amount / (circ_mv * 10000)"
+    where: "fd_amount > 0"
+    description: "涨停封单金额/流通市值（封板强度，仅封板日有值）"

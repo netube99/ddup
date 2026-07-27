@@ -4,6 +4,20 @@
 
 ---
 
+## 快速开始
+
+从模板复制 `library.yaml`：
+
+```bash
+cp factors/library.yaml.template factors/library.yaml
+```
+
+模板包含一组示例因子（动量/乖离率/换手率/价值/截面标准化/行业聚合/事件型），
+可直接用于策略开发和学习。在此文件上添加、修改自有因子即可；
+`library.yaml` 已在 `.gitignore` 中排除，不会被提交到版本库。
+
+---
+
 ## 模型：面板上的计算 DAG
 
 所有因子都是 `(trade_date, symbol)` 双索引面板上的计算节点。

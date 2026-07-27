@@ -8,6 +8,7 @@ results/
 market.db
 tushare_db
 adapters/tushare.py
+factors/library.yaml
 !tests/fixtures/*.parquet
 .coverage
 
