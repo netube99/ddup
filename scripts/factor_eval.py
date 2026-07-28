@@ -134,16 +134,16 @@ def main() -> int:
     # 补齐 _ensure_derived_fields 所需的列
     raw_cols |= {"open", "high", "low", "close", "adj_factor", "pre_close"}
     # 伪列（industry / log_mktcap / idx_ret）不向 backend 请求，后续由引擎附着
-    request_columns = sorted(raw_cols - factor_plan.PSEUDO_COLUMNS)
+    request_columns = factor_plan.expand_columns(raw_cols)
     print(f"请求列: {len(request_columns)} 列")
 
     # 查询行情面板
     bars_df = backend.query_bars(
         symbols, args.start, args.end, columns=request_columns,
     )
-    backend.close()
 
     if bars_df.empty:
+        backend.close()
         print("错误：区间内无行情数据", file=sys.stderr)
         return 1
 
@@ -158,6 +158,8 @@ def main() -> int:
     }
     if any(pseudo_needs.values()):
         ensure_pseudo_columns(bars_df, pseudo_needs, "main", backend=backend)
+
+    backend.close()
 
     # 计算因子值
     print(f"计算因子: {', '.join(factor_names)} ...")

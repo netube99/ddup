@@ -8,9 +8,9 @@ logger = logging.getLogger(__name__)
 class Strategy(ABC):
     """策略抽象基类。
 
-    引擎只通过钩子与策略交互：on_start（启动初始化）/ select（每日选股下单）/
-    calc_conditions（条件单生成）/ get_universe（股票池裁剪），以及可选的
-    on_fills（每日成交回报通知）。
+    引擎只通过钩子与策略交互：on_start（启动初始化）/ on_fills（每日成交回报，
+    可选）/ on_tick（每日状态维护，可选）/ select（每日选股下单）/
+    calc_conditions（条件单生成）/ get_universe（股票池裁剪）。
 
     FACTOR_SPECS 与 FILTER_RULES 是声明式配置；子类可以在类级别定义默认值，
     也可以在构造时通过 ``factor_specs`` / ``filter_rules`` 传入实例级覆盖。
@@ -80,6 +80,24 @@ class Strategy(ABC):
         回测首日前的预跑也会以空列表调用一次。
         用于维护策略自身状态（止损冷却、trailing 锚点重置等），
         同样一份 trades 也可在 select 里经 snapshot.trades 读取。
+        """
+
+    def on_tick(self, bars, snapshot, provider) -> None:
+        """可选钩子：每日调用（无论是否调仓日），用于维护策略内部状态。
+
+        引擎在 on_fills 之后、select 之前调用。schedule 包装器不会拦截此钩子
+        ——即使非调仓日 select 被跳过，on_tick 仍每日运行。策略可在此更新：
+          - 冷却期递减
+          - 市场状态机推进
+          - 持仓逐仓最高价跟踪
+          - 自定义 ConditionBuilder 状态维护
+
+        Args:
+            bars: 当日截面 dict-of-dicts（symbol → {open, high, low, close, ...}）
+            snapshot: 当日账户快照 Snapshot（含 holdings / trades / cash / total_value）
+            provider: DataProvider 实例
+
+        基类默认空操作，不破坏现有策略。
         """
 
     @abstractmethod

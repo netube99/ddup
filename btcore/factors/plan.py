@@ -26,6 +26,30 @@ from btcore.factors.library import spec_names
 # 伪列：引擎派生/附着，不向 backend 请求
 PSEUDO_COLUMNS = frozenset({"idx_ret", "log_mktcap", "industry"})
 
+# 派生列：引擎在 _ensure_derived_fields 中从基础列计算，不向 backend 请求
+DERIVED_BASES: dict[str, frozenset[str]] = {
+    "open_hfq": frozenset({"open", "adj_factor"}),
+    "high_hfq": frozenset({"high", "adj_factor"}),
+    "low_hfq": frozenset({"low", "adj_factor"}),
+    "close_hfq": frozenset({"close", "adj_factor"}),
+    "pct_chg": frozenset({"close", "pre_close"}),
+}
+
+
+def expand_columns(columns) -> list[str]:
+    """请求列展开：派生列替换为基础列，伪列丢弃。
+
+    引擎 preload 与 scripts/factor_eval.py 共用，确保 query_bars
+    只请求 backend 能提供的列。
+    """
+    out: set[str] = set()
+    for col in columns:
+        if col in DERIVED_BASES:
+            out |= DERIVED_BASES[col]
+        elif col not in PSEUDO_COLUMNS:
+            out.add(col)
+    return sorted(out)
+
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）
 def _to_calendar_days(trading_rows: int) -> int:
     return int(trading_rows * 1.5) + 10

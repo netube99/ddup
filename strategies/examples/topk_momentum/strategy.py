@@ -3,6 +3,7 @@
 
 从 simple_rotation 基础之上增加了：
   - on_fills 钩子（感知成交 → 冷却期管理）
+  - on_tick 钩子（每日冷却期递减 + 条件单状态修剪）
   - buy_weights 自定义买入金额分配
   - calc_conditions 中 holding_days 自适应调参
   - REQUIRED_FIELDS 列裁剪声明
@@ -67,6 +68,26 @@ class TopKMomentum(Strategy):
                 cd = self._cooldown_days * 2 if t.trigger == "STOP_LOSS" else self._cooldown_days
                 self._cooldown[t.symbol] = int(t.date) + cd
 
+    def on_tick(self, bars, snapshot, provider) -> None:
+        """每日状态维护（绕过 schedule 包装器，非调仓日也运行）。
+
+        - 冷却期递减
+        - ConditionBuilder 持仓修剪
+        """
+        if not bars:
+            return
+
+        # ── 冷却期递减 ──
+        date_str = next(iter(bars.values())).get("trade_date", "")
+        date_int = int(date_str) if date_str else 0
+        expired = [s for s, d in self._cooldown.items() if d <= date_int]
+        for s in expired:
+            del self._cooldown[s]
+
+        # ── 清理条件单状态（已平仓标的的 trailing high 锚点）──
+        current = set(snapshot.holdings.keys())
+        self._cond.prune(current)
+
     def select(self, bars, account_snapshot, provider) -> dict:
         """每日核心决策。
 
@@ -80,12 +101,7 @@ class TopKMomentum(Strategy):
         if not bars:
             return {"buy": [], "sell": []}
 
-        # ── 冷却期递减 ──
         date_str = next(iter(bars.values())).get("trade_date", "")
-        date_int = int(date_str) if date_str else 0
-        expired = [s for s, d in self._cooldown.items() if d <= date_int]
-        for s in expired:
-            del self._cooldown[s]
 
         # ── 截面过滤 ──
         filtered = self._filter.filter(bars, date_str)
@@ -101,9 +117,6 @@ class TopKMomentum(Strategy):
         sorted_score = score.sort_values(ascending=False)
         target = set(sorted_score.head(self._top_k).index)
         current = set(account_snapshot.holdings.keys())
-
-        # ── 清理条件单状态（已平仓标的的 trailing high 锚点）──
-        self._cond.prune(current)
 
         buy_list = sorted(target - current)
         sell_list = sorted(current - target)

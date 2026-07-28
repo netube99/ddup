@@ -90,7 +90,13 @@ def compute_factors(
     df: pd.DataFrame,
     library: dict | None = None,
 ) -> pd.DataFrame:
-    """批量计算，返回每列一个因子的 DataFrame。"""
+    """批量计算，返回每列一个因子的 DataFrame。
+
+    df 必须包含所有因子依赖的基础列和伪列（industry / log_mktcap / idx_ret）。
+    伪列不由此函数附着——调用方需先通过 btcore.engine.ensure_pseudo_columns
+    或等价方式准备。纯逐行表达式可接受当日截面；含 ts 算子的表达式需要
+    MultiIndex (trade_date, symbol) 面板。
+    """
     lib = library if library is not None else load_library()
     work = df.copy()
     memo: dict[str, pd.Series] = {}

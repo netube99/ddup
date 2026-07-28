@@ -1,10 +1,11 @@
-"""前视防护门面 — 引擎和策略只通过本层获取 bar 数据。
+"""前视防护门面 — 引擎和策略只通过本层获取 bar 与基准数据。
 
-两个入口:
-  get_engine_bars      — 含当日, 引擎撮合用
-  get_historical_bars  — 不含当日, 策略/因子用
+三个入口:
+  get_engine_bars        — 含当日, 引擎撮合用
+  get_historical_bars    — 不含当日, 策略/因子用
+  get_benchmark_returns  — 基准指数日收益序列, 受前视保护
 
-其他数据 (ST、行业、基准等) 通过 .backend 直接访问,
+其他数据 (ST、行业、指数成分等) 通过 .backend 直接访问,
 方法由用户在自己的后端类上自行定义, 鸭子类型调用, 不涉及前视防护。
 """
 
@@ -26,6 +27,7 @@ class DataProvider:
 
     def __init__(self, backend: DataBackend):
         self.backend = backend
+        self.benchmark: str | None = None  # 由 Engine 设置，策略无需感知基准代码
         self._prev_day_cache: dict[str, str | None] = {}
         self._bars_df: pd.DataFrame | None = None
         self._as_of_date: str | None = None
@@ -87,6 +89,41 @@ class DataProvider:
 
     def get_dividends_on_date(self, date_str: str) -> dict:
         return self.backend.get_dividends_on_date(date_str)
+
+    # ── 基准指数 ──
+
+    def get_benchmark_returns(
+        self, end_date: str, lookback_days: int = 252,
+    ) -> pd.Series | None:
+        """返回基准指数日收益序列（后复权收盘价的 pct_change），受前视保护。
+
+        end_date: 查询锚点日（YYYYMMDD）。回测中会钳制到当前模拟日。
+        lookback_days: 回溯天数，默认 252（约一年）。
+
+        返回: index 为 YYYYMMDD 字符串的日收益 Series（小数，非百分比）；
+              未配置 benchmark / 后端无 get_benchmark_bars / 无数据时返回 None。
+
+        前视保护: 数据截止于 end_date 的前一交易日，策略拿不到当日基准收益。
+        """
+        if not self.benchmark:
+            return None
+        bench_fn = getattr(self.backend, "get_benchmark_bars", None)
+        if not callable(bench_fn):
+            return None
+        if self._as_of_date is not None:
+            end_date = min(end_date, self._as_of_date)
+        prev = self._prev_trading_day(end_date)
+        if prev is None:
+            return None
+        lookback_start = (
+            date.fromisoformat(end_date) - timedelta(days=lookback_days)
+        ).strftime("%Y%m%d")
+        bench = bench_fn(self.benchmark, lookback_start, prev)
+        if bench is None or bench.empty:
+            return None
+        ret = bench["hfq_close"].pct_change()
+        ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
+        return ret.dropna()
 
     # ── 内部 ──
 

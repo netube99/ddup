@@ -4,6 +4,8 @@
 
 ddup 覆盖从数据接入、因子定义、策略表达到回测执行、绩效分析和 HTML 报告生成的完整工作流。策略与因子均以声明式配置（YAML + Python 子类）描述，引擎负责调度、撮合、风控与结果持久化。支持因子 IC 评估、多因子滚动 IC/ICIR 合成、分层回测、Brinson 行业归因和交叉验证等研究工具，并提供面向 LLM agent 的程序化 API。
 
+本项目推荐搭配数据库管理软件 [tushare_db](https://github.com/netube99/tushare_db) 一起使用
+
 ## 核心模块
 
 ### 数据接口

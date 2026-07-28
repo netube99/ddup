@@ -1,12 +1,12 @@
 """
-示例 4：状态机策略 — on_fills 状态跟踪 + 市场状态检测 + 多模型投票。
+示例 4：状态机策略 — on_fills 状态跟踪 + on_tick 日频维护 + 多模型投票。
 
 展示的核心能力（最全面）：
   ┌─ on_start:
   │   ├── 注册自定义 handler（DYNAMIC_STOP, TIME_STOP, VOLATILITY_EXIT）
   │   ├── 初始化 3 套子模型因子规格（动量/反转/质量）
   │   ├── 初始化市场状态机（bull/bear/neutral）
-  │   └── 初始化持仓状态字典（穿透 on_fills / select / calc_conditions）
+  │   └── 初始化持仓状态字典（穿透 on_fills / on_tick / select / calc_conditions）
   │
   ├─ on_fills:
   │   ├── 按 trigger 类型差异化处理（条件止损 vs 手动卖出 vs 条件买入）
@@ -15,8 +15,13 @@
   │   ├── 条件买入 → 初始化持仓跟踪（入场价/最高价/入场日）
   │   └── TRAILING_TP 退出 → 精确感知最高价锚点
   │
-  ├─ select:
+  ├─ on_tick（每日运行，绕过 schedule）:
+  │   ├── 冷却期递减
+  │   ├── 逐仓最高价跟踪
   │   ├── 市场广度检测 → 状态机切换（连续 N 日确认）
+  │   └── ConditionBuilder 持仓修剪
+  │
+  ├─ select:
   │   ├── 按市场态动态调整子模型权重
   │   ├── 3 模型独立打分 → 加权合成
   │   ├── buy/sell 名单 + buy_weights + sell_shares
@@ -200,11 +205,18 @@ class StateMachine(Strategy):
                 entry["trigger"] = t.trigger  # 记录买入方式
                 self._holding_state[t.symbol] = entry
 
-    # ── select：核心决策 ──────────────────────────────────────────
+    # ── on_tick：每日状态维护 ──────────────────────────────────────
 
-    def select(self, bars, account_snapshot, provider) -> dict:
+    def on_tick(self, bars, snapshot, provider) -> None:
+        """每日状态维护（绕过 schedule 包装器，非调仓日也运行）。
+
+        - 冷却期递减
+        - 逐仓最高价跟踪
+        - 市场状态机推进
+        - ConditionBuilder 持仓修剪
+        """
         if not bars:
-            return {"buy": [], "sell": []}
+            return
 
         date_str = next(iter(bars.values())).get("trade_date", "")
         date_int = int(date_str) if date_str else 0
@@ -214,10 +226,10 @@ class StateMachine(Strategy):
         for s in expired:
             del self._cooldown_map[s]
 
-        # ── 截面过滤 ──
+        # ── 截面过滤（最高价跟踪 + 市场状态检测共用） ──
         filtered = self._filter.filter(bars, date_str)
         df = bars_to_df(filtered)
-        current = set(account_snapshot.holdings.keys())
+        current = set(snapshot.holdings.keys())
         self._cond.prune(current)
 
         # ── 更新逐仓最高价 ──
@@ -228,9 +240,7 @@ class StateMachine(Strategy):
                 if h > self._holding_state[sym].get("highest_price", 0):
                     self._holding_state[sym]["highest_price"] = h
 
-        # ═══════════════════════════════════
-        # 第1步：市场状态检测
-        # ═══════════════════════════════════
+        # ── 市场状态检测 ──
         try:
             _, breadth_score = eval_factor_specs(df, [
                 {"name": "mkt_breadth20", "weight": 0.6, "ascending": False},
@@ -257,11 +267,27 @@ class StateMachine(Strategy):
             self._regime = "neutral"
 
         if old_regime != self._regime:
-            logger.info("Regime switch: %s → %s (breadth=%.3f)", old_regime, self._regime, breadth)
+            logger.info(
+                "Regime switch: %s → %s (breadth=%.3f)",
+                old_regime, self._regime, breadth,
+            )
         self._regime_stats[self._regime] += 1
 
+    # ── select：核心决策 ──────────────────────────────────────────
+
+    def select(self, bars, account_snapshot, provider) -> dict:
+        if not bars:
+            return {"buy": [], "sell": []}
+
+        date_str = next(iter(bars.values())).get("trade_date", "")
+
+        # ── 截面过滤 ──
+        filtered = self._filter.filter(bars, date_str)
+        df = bars_to_df(filtered)
+        current = set(account_snapshot.holdings.keys())
+
         # ═══════════════════════════════════
-        # 第2步：3 模型打分 + 市场态加权
+        # 第1步：3 模型打分 + 市场态加权
         # ═══════════════════════════════════
         _, mom_score = eval_factor_specs(df, self._momentum_specs)
         _, rev_score = eval_factor_specs(df, self._reversal_specs)
@@ -280,7 +306,7 @@ class StateMachine(Strategy):
         )
 
         # ═══════════════════════════════════
-        # 第3步：选股 + 调仓
+        # 第2步：选股 + 调仓
         # ═══════════════════════════════════
         effective_top_k = max(2, int(self._top_k * self._position_mult[self._regime]))
         total_score = total_score[~total_score.index.isin(self._cooldown_map)]

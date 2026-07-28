@@ -24,27 +24,6 @@ REQUIRED_BAR_COLUMNS = (
     "up_limit", "down_limit",
 )
 
-# 引擎精确派生列 → 派生所需基础列（请求列裁剪时展开，派生列本身不请求）
-_DERIVED_BASES = {
-    "open_hfq": {"open", "adj_factor"},
-    "high_hfq": {"high", "adj_factor"},
-    "low_hfq": {"low", "adj_factor"},
-    "close_hfq": {"close", "adj_factor"},
-    "pct_chg": {"close", "pre_close"},
-}
-
-
-def _expand_request(columns) -> list[str]:
-    """请求列展开：派生列换成基础列；伪列（idx_ret/log_mktcap/industry）不请求。"""
-    out: set[str] = set()
-    for col in columns:
-        if col in _DERIVED_BASES:
-            out |= _DERIVED_BASES[col]
-        elif col not in factor_plan.PSEUDO_COLUMNS:
-            out.add(col)
-    return sorted(out)
-
-
 def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
     """静态推导主面板请求列（preload 列裁剪）。
 
@@ -60,7 +39,7 @@ def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
     )
     if fplan:
         cols |= fplan["main_columns"]
-    return _expand_request(cols)
+    return factor_plan.expand_columns(cols)
 
 
 class Engine:
@@ -103,6 +82,8 @@ class Engine:
             bench_code = idx_universe[0] if len(idx_universe) == 1 else "000300.SH"
         # 空字符串 / None 表示无基准（即使后端提供 get_benchmark_bars 也不取）
         self.benchmark: str | None = bench_code or None
+        if self.provider is not None:
+            self.provider.benchmark = self.benchmark
         self.quiet_skips = bool(config.get("quiet_skips", False))
         self.order_volume_ratio = config.get("order_volume_ratio")
         execution_price = config.get("execution_price", "open")
@@ -302,7 +283,7 @@ class Engine:
         breadth_df = self.provider.get_engine_bars(
             None, calendar[-1],
             lookback_start=start,
-            columns=_expand_request(fplan["breadth_columns"]),
+            columns=factor_plan.expand_columns(fplan["breadth_columns"]),
         )
         breadth_df.sort_index(inplace=True)
         _ensure_derived_fields(breadth_df)
@@ -486,6 +467,11 @@ class Engine:
             trades=fills,
             total_value=self.account.total_value,
         )
+        # on_tick 是可选钩子：每日运行（绕过 schedule 包装器），在 select 之前更新策略内部状态
+        on_tick = getattr(self.strategy, "on_tick", None)
+        if callable(on_tick):
+            on_tick(bars_dict, snapshot, self.provider)
+
         actions = self.strategy.select(bars_dict, snapshot, self.provider)
 
         # 组合级风控: 熔断态强制只卖不买（次日强平, trigger=RISK）;
