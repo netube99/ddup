@@ -140,10 +140,6 @@ class MockDataBackend(DataBackend):
 
     # ── ST 标记 ──
 
-    def get_st_symbols(self, trade_date: str) -> set[str]:
-        mask = (self._st["trade_date"] <= trade_date) & (self._st["type"] == "ST")
-        return set(self._st.loc[mask, "ts_code"].unique())
-
     def get_st_map(self, from_date: str) -> dict[str, set[str]]:
         mask = (self._st["trade_date"] >= from_date) & (self._st["type"] == "ST")
         subset = self._st.loc[mask].sort_values("trade_date")

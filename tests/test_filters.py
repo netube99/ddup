@@ -15,9 +15,6 @@ class StubBackend:
         return {c: self._industry_map[c] for c in ts_codes
                 if c in self._industry_map}
 
-    def get_st_symbols(self, trade_date):
-        return set()
-
     def get_st_map(self, from_date):
         return dict(self._st_map)
 

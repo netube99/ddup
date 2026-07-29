@@ -78,7 +78,6 @@ def _q(name: str) -> str:
 # 鸭子类型扩展方法名 → 编译后角色节名；已填的空在实例上动态装配同名方法
 _EXTRAS = {
     "get_benchmark_bars": "benchmark",
-    "get_st_symbols": "st",
     "get_st_map": "st",
     "get_stock_industries": "industry",
     "get_recent_listings": "listings",
@@ -248,19 +247,6 @@ class GenericSQLBackend(DataBackend):
         merged["trade_date"] = pd.to_datetime(merged["trade_date"])
         merged.set_index("trade_date", inplace=True)
         return merged[["hfq_close"]]
-
-    def _impl_get_st_symbols(self, trade_date: str) -> set[str]:
-        """当日 ST 名单（ST 表是日频快照：当日有记录 = 当日 ST）。"""
-        sec = self._c["sections"]["st"]
-        _, dcol = self._keys(sec["table"])
-        frag, fparams = self._filter_sql(sec["table"])
-        where = f" AND {frag}" if frag else ""
-        rows = self._conn.execute(
-            f"SELECT DISTINCT {_q(sec['symbol'])} FROM {_q(sec['table'])}"
-            f" WHERE {_q(dcol)} = ?{where}",
-            (trade_date, *fparams),
-        ).fetchall()
-        return {r[0] for r in rows}
 
     def _impl_get_st_map(self, from_date: str) -> dict[str, set[str]]:
         sec = self._c["sections"]["st"]

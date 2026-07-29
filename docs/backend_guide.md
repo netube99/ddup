@@ -196,15 +196,6 @@ def get_index_members(
     """
     ...
 
-# 策略便利方法 —— 引擎不调用，给策略 select() 里用的
-
-def get_st_symbols(self, trade_date: str) -> set[str]:
-    """返回当日处于 ST 状态的股票代码集合。
-    引擎不调用此方法，供策略 select() 内按需查询。
-    """
-    ...
-```
-
 ### 3.3 完整示例
 
 `tests/test_foreign_backend.py` 中的 `ForeignBackend` 是一个完整的手写实现示例：
@@ -302,7 +293,7 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 "st_symbol": "stock_st.ts_code",
 ```
 
-启用能力：`exclude_st` 过滤（策略 `filter_rules` 中声明后自动过滤 ST 股）、`get_st_symbols()`、`get_st_map()`。
+启用能力：`exclude_st` 过滤（策略 `filter_rules` 中声明后自动过滤 ST 股）、`get_st_map()`。
 
 **数据要求**：ST 标记表是日频快照——某股票在某日有记录 = 该日处于 ST 状态。tushare 的 `stock_st` 表需通过 `tables` 节过滤 `"type": "ST"`。
 

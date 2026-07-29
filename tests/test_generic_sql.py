@@ -239,7 +239,7 @@ def test_filter_only_on_role_tables(db_path):
 
 def test_extras_absent_when_unconfigured(db_path):
     b = GenericSQLBackend(MINIMAL_FORM, db_path)
-    for m in ("get_benchmark_bars", "get_st_symbols", "get_st_map",
+    for m in ("get_benchmark_bars", "get_st_map",
               "get_stock_industries", "get_recent_listings", "get_index_members"):
         assert getattr(b, m, None) is None
         assert not hasattr(b, m)
@@ -247,7 +247,7 @@ def test_extras_absent_when_unconfigured(db_path):
 
 
 def test_extras_present_when_configured(backend):
-    for m in ("get_benchmark_bars", "get_st_symbols", "get_st_map",
+    for m in ("get_benchmark_bars", "get_st_map",
               "get_stock_industries", "get_recent_listings", "get_index_members"):
         assert callable(getattr(backend, m))
 
@@ -342,10 +342,7 @@ def test_get_dividends(backend):
 
 
 def test_st(backend):
-    """ST 表是日频快照：get_st_symbols 返回当日名单，摘帽次日即不在名单。"""
-    assert backend.get_st_symbols("20240101") == {"000001.SZ"}
-    assert backend.get_st_symbols("20240103") == set()
-    assert backend.get_st_symbols("20240105") == {"600000.SH"}
+    """ST 表是日频快照：get_st_map 返回日频名单，摘帽次日即不在。"""
     assert backend.get_st_map("20240102") == {"20240105": {"600000.SH"}}
 
 

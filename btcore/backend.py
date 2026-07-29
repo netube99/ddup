@@ -32,9 +32,6 @@ B) 手写实现（非 SQL 数据源：内存、API、parquet、CSV 等）
 │   get_stock_industries    行业分类 → 行业风控、industry 分组、行业过滤        │
 │   get_recent_listings     近期新股 → exclude_new_stock 过滤                  │
 │   get_index_members       指数成分 → index_universe / factor_universe        │
-│                                                                              │
-│ 策略便利方法（引擎不调用，给策略 select() 里用的）                            │
-│   get_st_symbols          当日 ST 名单 → 策略按需查询单日 ST                  │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 引擎通过 getattr(backend, "方法名", None) 检测能力是否存在，不存在时相关
@@ -142,10 +139,6 @@ class DataBackend(ABC):
     #         columns: ["hfq_close"]（后复权收盘价）
     #         无数据返回 None。
     #     """
-    #     ...
-    #
-    # def get_st_symbols(self, trade_date: str) -> set[str]:
-    #     """返回当日处于 ST 状态的股票代码集合（策略便利方法，引擎不调用）。"""
     #     ...
     #
     # def get_st_map(self, from_date: str) -> dict[str, set[str]]:
