@@ -3,7 +3,8 @@
 A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理。
 
 > 用户可编辑的目录：`adapters/`（后端实现）、`factors/`（因子定义）、
-> `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。详见 `docs/user_guide.md`。
+> `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。
+> 详见 `docs/backend_guide.md`、`docs/factor_library.md`、`docs/strategy_guide.md`。
 
 ---
 
@@ -32,6 +33,9 @@ python scripts/compare.py result.db --html compare.html
 # 因子 IC 评估 / 分层回测 / 相关性矩阵
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 
+# 回测结果交叉验证（交易行为、风控触发、磨损合理性检查）
+python scripts/cross_validate.py result.db --strategy name --run-id 1
+
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
 ```
@@ -44,7 +48,10 @@ python scripts/dump_fixtures.py
 btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策略加载器/工具）
               不要随意修改
 adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
-research/   — 研究工具（因子评估、归因、HTML 报告与多 run 对比）
+research/   — 研究工具库（纯 importable 模块，不含 CLI；因子评估、归因、
+              HTML 报告生成、多因子合成）
+scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、
+              性能基准、fixtures 生成、反破坏检查）
 factors/    — 用户因子定义（library.yaml，可编辑）
 strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 ```
