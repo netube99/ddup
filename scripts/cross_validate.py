@@ -8,7 +8,7 @@ Cross-Validation — 回测结果交叉验证。
 4. 小资金专项检查（交易磨损占比合理性）
 
 用法：
-  .venv/bin/python research/cross_validate.py result.db --strategy smart_money
+  .venv/bin/python scripts/cross_validate.py result.db --strategy smart_money
 """
 
 import argparse
