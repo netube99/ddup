@@ -4,7 +4,8 @@ A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理。
 
 > 用户可编辑的目录：`adapters/`（后端实现）、`factors/`（因子定义）、
 > `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。
-> 详见 `docs/backend_guide.md`、`docs/factor_library.md`、`docs/strategy_guide.md`。
+> 详见 `docs/backend_guide.md`、`docs/factor_library.md`、`docs/strategy_guide.md`、
+> `docs/cli_and_research.md`。
 
 ---
 
@@ -153,7 +154,9 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 因子 DAG 模型与算子 | `btcore/factors/ops.py` | `docs/factor_library.md` |
 | 因子物化规划与两路供给 | `btcore/factors/plan.py` | `docs/factor_library.md` |
 | 物化公共子表达式消除（CSE） | `btcore/factors/cse.py` | `docs/factor_library.md` |
-| 多因子合成（滚动 IC/ICIR 加权） | `research/composite.py` | `docs/factor_library.md` |
+| 多因子合成（滚动 IC/ICIR 加权） | `research/composite.py` | `docs/cli_and_research.md` |
+| 因子评估（IC/分层/相关性） | `research/factor_eval.py` | `docs/cli_and_research.md` |
+| Brinson 行业归因 | `research/attribution.py` | `docs/cli_and_research.md` |
 | 策略 YAML 加载 | `btcore/strategy_loader.py` | `docs/strategy_guide.md` |
 | select 返回协议与冲突校验 | `btcore/engine.py:_compute_pending` | `docs/strategy_guide.md` |
 | 填表法后端 | `btcore/generic_sql.py` | `docs/backend_guide.md` |
@@ -163,7 +166,8 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 滑点模型（tick=0.01） | `btcore/slippage.py` | `docs/strategy_guide.md` |
 | 成本函数（可配置费率） | `btcore/costs.py` | `docs/strategy_guide.md` |
 | 多 run 结果库 schema | `btcore/database.py` | `docs/strategy_guide.md` |
-| 单文件 HTML 报告与多 run 对比（内联 SVG） | `research/report.py` | `docs/strategy_guide.md` |
+| 单文件 HTML 报告与多 run 对比（内联 SVG） | `research/report.py` | `docs/cli_and_research.md` |
+| 回测 CLI（run/report/compare/交叉验证） | `scripts/` | `docs/cli_and_research.md` |
 | 涨跌停价格推算（ROUND_HALF_UP） | `btcore/limits.py` | — |
 | 撮合入口（价格校验/成交量cap等） | `btcore/match/core.py` | — |
 | 列裁剪推导 | `btcore/engine.py:required_bar_columns` | `docs/strategy_guide.md` |
