@@ -13,6 +13,10 @@ ddup 引擎通过 `DataBackend` 抽象层消费数据，用户有两种接入方
 
 ## 1. 快速开始
 
+本项目推荐搭配数据库管理软件 [tushare_db](https://github.com/netube99/tushare_db) 一起使用，开发过程已原生适配基于该工具创建维护的数据库，理论上适配环节只需修改 SQLite 库路径即可完成适配，且引擎内部对某些数据的依赖基于 tushare.pro 原生的表组织形式，匹配第三方数据库可能会出现预期之外的问题
+
+**注意：tushare.pro 积分等级需要满足 `2000` 才能获取到满足引擎运行的必须数据要求，其中 stock_st 接口要求账户满足积分等级 `3000`，缺少 stock_st 表引擎无法正确筛选ST股**
+
 ```bash
 # 1. 复制模板
 cp adapters/tushare.py.template adapters/my_backend.py
@@ -65,11 +69,11 @@ MY_FORM = {
 
     # ══ 引擎辅助能力 — 不填 = 该能力关闭（§6）══
     "st_symbol":       "stock_st.ts_code",
-    "industry_name":   "ind_class.l1_name",
+    "industry_name":   "index_member_all.l1_name",
     "listing_date":    "stock_basic.list_date",
     "index_code":      "index_weight.index_code",
     "index_member":    "index_weight.con_code",
-    "benchmark_close":      "idx_daily.close",
+    "benchmark_close":      "index_daily.close",
     "benchmark_adj_factor": "fund_adj.adj_factor",  # 可选
     "benchmark_code":  "000300.SH",  # 默认基准代码（取值，非位置）
 
@@ -335,7 +339,7 @@ def get_index_members(
 ### 6.5 基准行情：`benchmark_close` + `benchmark_adj_factor` + `benchmark_code`
 
 ```python
-"benchmark_close":      "idx_daily.close",
+"benchmark_close":      "index_daily.close",
 "benchmark_adj_factor": "fund_adj.adj_factor",  # 可选
 "benchmark_code":       "000300.SH",
 ```
@@ -371,183 +375,34 @@ def get_index_members(
 
 ### 7.1 扩展字段按数据来源分类
 
-以下覆盖 `adapters/tushare.py` 中预填的全部扩展字段，按 tushare 积分门槛分组。**2000 积分档位**可获取日频行情、基本面、资金流、筹码分布、融资融券；高积分档位或自建数据可补充更多。
+以下四类覆盖 2000 积分下最常用的扩展数据，每类列出模板中预填的代表性字段。需要更多字段时，参考 tushare 官方文档或 `tushare_db/api_index.json` 中对应 API 的 `output_params`，按同样格式追加即可。
 
-> **5000 积分用户**：如果已接入 `stk_factor_pro` 表，可直接将 OHLCV 和 `adj_factor`、`pre_close` 统一指向该表（如 `"open": "stk_factor_pro.open"`），省去分表对齐。引擎不关心字段来自几张表——直接各填各的即可。
-
----
-
-**日频行情**（`daily` 表，2000 积分）：
-
-| 字段 | 含义 |
-|------|------|
-| `amount` | 成交额（引擎不消费，策略按需声明） |
-
----
-
-**日频基本面与估值**（`daily_basic` 表，2000 积分）：
+**日频基本面**（`daily_basic` 表，2000 积分）：
 
 | 字段 | 含义 |
 |------|------|
 | `turnover_rate` | 换手率（自由流通股本口径，%） |
-| `turnover_rate_f` | 换手率（总股本口径，%） |
-| `volume_ratio` | 量比 |
-| `pe` | 市盈率（静态） |
 | `pe_ttm` | 市盈率（TTM） |
 | `pb` | 市净率 |
-| `ps` | 市销率（静态） |
-| `ps_ttm` | 市销率（TTM） |
-| `dv_ratio` | 股息率（静态，%） |
-| `dv_ttm` | 股息率（TTM，%） |
-| `total_share` | 总股本（万股） |
-| `float_share` | 流通股本（万股） |
-| `free_share` | 自由流通股本（万股） |
 | `total_mv` | 总市值（万元） |
-| `circ_mv` | 流通市值（万元） |
 
----
-
-**日频技术指标**：两种获取方式，按积分档位选择。
-
-**方式一（推荐）：引擎算子实时计算。** 无需额外数据——ddup 的因子库提供 `roc`（动量）、`ts_mean`（均线）、`ts_std`（波动率）等时序算子，可直接在因子表达式中使用。例如 `roc(close_hfq, 20)` 等价于 20 日动量，`ts_mean(close_hfq, 20)` 等价于 20 日均线。详见 `docs/factor_library.md`。
-
-**方式二：`stk_factor_pro` 表直接读取（5000 积分）。** 该表包含 tushare 预计算的 60+ 技术指标（`_bfq` 后缀为不复权口径），与 OHLCV 在同一张表，声明为零额外 JOIN 开销。5000 积分用户可直接在 `extra_fields` 中引用：
-
-| 分类 | 字段 |
-|------|------|
-| 均线 | `ma_5` `ma_10` `ma_20` `ma_30` `ma_60` `ma_90` `ma_250` |
-| EMA | `ema_5` `ema_10` `ema_20` `ema_30` `ema_60` `ema_90` `ema_250` |
-| MACD | `macd_dif` `macd_dea` `macd` |
-| RSI | `rsi_6` `rsi_12` `rsi_24` |
-| KDJ | `kdj_k` `kdj_d` `kdj_j` |
-| BOLL | `boll_upper` `boll_mid` `boll_lower` |
-| BIAS | `bias1` `bias2` `bias3` |
-| 其他 | `cci` `atr` `obv` `vr` `wr` `wr1` `mfi` `asi` `asit` |
-| DMI | `dmi_pdi` `dmi_mdi` `dmi_adx` `dmi_adxr` |
-| 其他2 | `cr` `psy` `psyma` `brar_ar` `brar_br` `dfma_dif` `dfma_difma` `dpo` `madpo` `emv` `maemv` |
-| EXPMA | `expma_12` `expma_50` |
-| MTM | `mtm` `mtmma` |
-| ROC | `roc_ta` `maroc` |
-| TRIX | `trix` `trma` |
-| MASS | `mass` `ma_mass` |
-| KTN | `ktn_upper` `ktn_mid` `ktn_lower` |
-| TAQ | `taq_up` `taq_mid` `taq_down` |
-| BBI | `bbi` |
-| XSII | `xsii_td1` `xsii_td2` `xsii_td3` `xsii_td4` |
-
----
-
-**资金流向**（moneyflow 表，2000 积分）：
+**资金流向**（`moneyflow` 表，2000 积分）：
 
 | 字段 | 含义 |
 |------|------|
-| `buy_sm_vol` ~ `sell_sm_amount` | 小单买卖量/额 |
-| `buy_md_vol` ~ `sell_md_amount` | 中单买卖量/额 |
-| `buy_lg_vol` ~ `sell_lg_amount` | 大单买卖量/额 |
-| `buy_elg_vol` ~ `sell_elg_amount` | 超大单买卖量/额 |
-| `net_mf_vol` | 净流向量 |
-| `net_mf_amount` | 净流向额 |
+| `net_mf_amount` | 净流向额（万元） |
 
-**筹码分布**（cyq_perf 表，2000 积分）：
+**筹码分布**（`cyq_perf` 表，需 5000 积分）：
 
 | 字段 | 含义 |
 |------|------|
-| `his_low` `his_high` | 历史最低/最高价 |
-| `cost_5pct` `cost_15pct` `cost_50pct` `cost_85pct` `cost_95pct` | 分位数成本 |
-| `weight_avg` | 加权平均成本 |
 | `winner_rate` | 获利盘比例 |
 
-**融资融券**（margin_detail 表，2000 积分）：
+**融资融券**（`margin_detail` 表，2000 积分）：
 
 | 字段 | 含义 |
 |------|------|
 | `rzye` | 融资余额 |
-| `rqye` | 融券余额 |
-| `rzmre` | 融资买入额 |
-| `rqyl` | 融券余量 |
-| `rzche` | 融资偿还额 |
-| `rqchl` | 融券偿还量 |
-| `rqmcl` | 融券卖出量 |
-| `rzrqye` | 融资融券余额 |
-
----
-
-以下为事件型或高积分数据。**2000 积分用户不需要填**——不填的字段在策略中不可用，引擎不会报错。
-
-**涨跌停明细**（limit_list_d 表，事件型，2019-11 起）：
-
-| 字段 | 含义 |
-|------|------|
-| `limit_flag` | 涨跌停标记：U 涨停 / D 跌停 / Z 炸板 |
-| `fd_amount` | 封单金额 |
-| `open_times` | 涨停打开次数 |
-| `limit_times` | 连板数 |
-
-> 仅在股票涨跌停上榜日有值，其余日期 NaN。
-
-**龙虎榜**（top_list 表，事件型，2018 起）：
-
-| 字段 | 含义 |
-|------|------|
-| `lhb_net_amount` | 龙虎榜净买额 |
-| `lhb_net_rate` | 净买额占总成交比 |
-| `lhb_amount_rate` | 龙虎榜成交额占比 |
-
-> 仅上榜日有值。
-
-**大宗交易**（block_trade 表，事件型，2018 起）：
-
-| 字段 | 含义 |
-|------|------|
-| `bt_price` | 大宗成交价 |
-| `bt_amount` | 大宗交易额 |
-
-> 单日同股票多笔大宗交易时仅第一条参与对齐。
-
-**东财资金流**（moneyflow_dc 表，2023-09 起）：
-
-| 字段 | 含义 |
-|------|------|
-| `dc_net_amount` | 主力净流入额 |
-| `dc_net_rate` | 主力净流入占比 |
-| `dc_elg_rate` | 超大单买入占比 |
-
-> 东财口径算法与 tushare moneyflow 不同，量级和方向可能不一致。
-
-**回购**（repurchase 表，事件型）：
-
-| 字段 | 含义 |
-|------|------|
-| `rep_vol` | 回购股数 |
-| `rep_amount` | 回购金额 |
-
-> 仅在公告日有值。日期列为 `ann_date`，需在 `tables` 节声明 `"repurchase": {"date": "ann_date"}`。
-
-**股东增减持**（stk_holdertrade 表，事件型）：
-
-| 字段 | 含义 |
-|------|------|
-| `insider_chg_vol` | 股东变动股数（绝对值） |
-| `insider_chg_ratio` | 股东变动比例 |
-
-> 日期对齐列同样是 `ann_date`。
-
-**股东人数**（stk_holdernumber 表，季度频）：
-
-| 字段 | 含义 |
-|------|------|
-| `holder_num` | 股东人数 |
-
-> 仅报告期截止日（`end_date`）有值。需在 `tables` 节声明 `"stk_holdernumber": {"date": "end_date"}`。
-
-**bak_daily / bak_basic**（自建或高积分数据源）：
-
-| 表 | 字段 | 含义 |
-|------|------|------|
-| bak_daily | `strength` `attack` `bk_buying` `bk_selling` | 强度/攻击力/买卖量指标 |
-| bak_basic | `eps` `bvps` `rev_yoy` `profit_yoy` `gpr` `npr` `total_assets` `per_undp` | 日频基本面（每股收益/净资产/营收增速等） |
-
-> 这两张表不是标准 tushare 接口，是项目自定义数据源。如无可忽略。
 
 > **财报与基本面数据：跨频率对齐**
 >
