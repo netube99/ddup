@@ -16,7 +16,8 @@ target_value 与 buy/sell 名单的区别：
   - 两者同日不可混用（引擎自动校验）
 
 用法：
-  python scripts/run.py strategies/examples/target_allocator.yaml --start 20240101 --end 20240630
+  python scripts/run.py strategies/examples/target_allocator/config.yaml \
+      --start 20240101 --end 20240630
 """
 import logging
 from typing import Optional

@@ -34,10 +34,17 @@
       ├── VOLATILITY_EXIT（日内振幅 > 7% 退出）
       └── holding_days 自适应调参
 
-依赖的自定义因子库：同目录下的 state_machine_factors.yaml
+依赖的自定义因子库：同目录下的 factors.yaml
+
+特色设计：
+  - 交易域（index_universe: 000300.SH）与因子计算域（factor_universe: 000906.SH）分离：
+    只买卖沪深300成分股，但在中证800上计算截面/坍缩因子（mkt_breadth20 等）
+    → 市场广度信号基于 800 只参照池，比仅看 300 只更准确
+  - benchmark 由 index_universe 自动推导为 000300.SH（无需显式配置）
 
 用法：
-  python scripts/run.py strategies/examples/state_machine.yaml --start 20240101 --end 20240630
+  python scripts/run.py strategies/examples/state_machine/config.yaml \
+      --start 20240101 --end 20240630
 """
 import logging
 from typing import Optional
@@ -325,7 +332,8 @@ class StateMachine(Strategy):
                 for sym in buy_list:
                     buy_weights[sym] = float(raw[sym] / s * self._position_mult[self._regime])
 
-        # ── sell_shares：部分减仓持仓但得分尚可的 ──
+        # ── sell_shares：边界附近的持仓减半而非清仓 ──
+        # 引擎规则：sell_shares 必须是 sell 的子集，表示"卖但不全卖"
         sell_shares = {}
         near_border = set(sorted_score.head(int(self._top_k * 1.3)).index)
         for sym in list(sell_list):
@@ -333,7 +341,6 @@ class StateMachine(Strategy):
                 h = account_snapshot.holdings.get(sym)
                 if h and h.shares >= 200:
                     sell_shares[sym] = h.shares // 2
-                    sell_list.remove(sym)  # 从完全清仓中移除
 
         # ── buy_conditions ──
         buy_conditions = []

@@ -62,6 +62,10 @@ filter_rules:
   exclude_loss: true
   exclude_boards: ["BJ"]
   min_price: 3.0
+  # 交易域 vs 因子计算域分离：只买卖沪深300，但在中证800上算因子
+  # 这样 mkt_breadth20/mkt_up_ratio 等截面/坍缩算子有更宽的参照池，信号更准
+  index_universe: ["000300.SH"]
+  factor_universe: ["000906.SH"]
 
 conditions:
   stop_loss_pct: 0.06

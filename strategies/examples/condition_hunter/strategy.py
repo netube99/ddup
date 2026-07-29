@@ -17,7 +17,8 @@
   - 自定义 handler 必须在 on_start 中注册（进程级全局，不能是类级别）
 
 用法：
-  python scripts/run.py strategies/examples/condition_hunter.yaml --start 20240101 --end 20240630
+  python scripts/run.py strategies/examples/condition_hunter/config.yaml \
+      --start 20240101 --end 20240630
 """
 import logging
 from typing import Optional

@@ -339,6 +339,11 @@ factor_specs:
 
 `exclude_loss` 需显式声明才会触发 preload 加载 `pe_ttm` 列。未声明时即使后端有 `pe_ttm` 数据，引擎也不加载它。
 
+> **可用的指数代码**：默认 tushare 后端（`adapters/tushare.py`）只拉取以下指数的日线和成分股数据，`index_universe`、`factor_universe`、`benchmark` 建议从中选取：
+> `000016.SH` `000300.SH` `000852.SH` `000903.SH` `000905.SH` `000906.SH`
+> `399001.SZ` `399006.SZ` `399303.SZ` `399330.SZ` `399673.SZ` `000985.CSI`
+> 使用其他代码会因后端无数据而导致对应规则不生效。
+
 ### 4.5 `conditions` — 声明式离场条件
 
 ```yaml

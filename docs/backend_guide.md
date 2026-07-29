@@ -76,6 +76,9 @@ MY_FORM = {
     "benchmark_close":      "index_daily.close",
     "benchmark_adj_factor": "fund_adj.adj_factor",  # 可选
     "benchmark_code":  "000300.SH",  # 默认基准代码（取值，非位置）
+    # tushare_db默认只拉取这几个指数的日线和成分股，策略的基准代码建议从中选择
+    #"000016.SH","000300.SH","000852.SH","000903.SH","000905.SH","000906.SH",
+    #"399001.SZ","399006.SZ","399303.SZ","399330.SZ","399673.SZ","000985.CSI"
 
     # ══ 自选扩展字段（§7）══
     "extra_fields": {
