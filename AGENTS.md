@@ -4,8 +4,8 @@ A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理。
 
 > 用户可编辑的目录：`adapters/`（后端实现）、`factors/`（因子定义）、
 > `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。
-> 详见 `docs/backend_guide.md`、`docs/factor_library.md`、`docs/strategy_guide.md`、
-> `docs/cli_and_research.md`。
+> 详见 `docs/index.md`（导航入口）、`docs/backend_guide.md`、`docs/factor_library.md`、
+> `docs/strategy_guide.md`、`docs/cli_and_research.md`。
 
 ---
 
@@ -67,6 +67,20 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - `btcore/` 不得 import `strategies/`、顶层 `factors/`、`adapters/`——单向依赖
 - 顶层 `factors/` 仅可依赖 `btcore.factors`（不得依赖 strategies / research / adapters / scripts）
 - 全局无循环 import
+
+---
+
+## 设计契约（跨模块不变式）
+
+以下规则是引擎设计的基石，任何模块的修改都不能违反。它们不是实现细节，而是架构级约定。
+
+| 契约 | 规则 |
+|------|------|
+| **价格体系** | 撮合、成本、估值使用裸价（`open` / `close` / `high` / `low`）。因子计算、排名使用后复权（`open_hfq` / `close_hfq` 等，公式 `x / adj_factor`）。**不可混用**——裸价做排名会导致除权除息日股价跳空被误判为涨跌信号 |
+| **T+1 锁定** | 买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单跳过该持仓——不会出现当天买入当天止损卖出 |
+| **软回退 vs Fail-Fast** | 可选能力缺失（ST 表、行业表、指数成分表）→ 引擎告警后继续运行，对应规则不生效。明确声明的依赖缺失（因子伪列无后端、必需列缺失、因子名不存在、表单引用不存在）→ 加载或 preload 阶段直接报错，不产生静默错误结果 |
+| **前视屏蔽** | 三重保护：①因子 preload 一次性物化为因果列（滚动窗口与截面聚合仅用 ≤ 当日数据）；②`DataProvider` 所有查询按当前模拟日钳制；③T 日信号 T+1 撮合，条件单 T 日声明 T+1 盘中触发 |
+| **财报数据对齐** | 引擎只消费 `(交易日, 代码)` 日频网格上的列，**不做季度频率推断**。财报类数据须由后端在数据层按公告日（而非报告期）对齐成日频列。跨季度运算（如 YoY）须预先物化为列 |
 
 ---
 

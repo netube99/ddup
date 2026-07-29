@@ -94,6 +94,13 @@ on_start (一次)
 
 `on_fills` 和 `on_tick` 是可选的。`on_tick` 每日运行（即使非调仓日 schedule 包装器拦截了 `select`）；`calc_conditions` 同样每日运行。
 
+> **设计契约（策略作者须知）**
+>
+> 以下两条是引擎运行的公理，任何策略代码都不能绕过：
+>
+> - **价格体系**：撮合、成本、估值使用裸价（`open` / `close`），因子计算、排名使用后复权（`*_hfq`）。混用会导致除权除息产生虚假信号——例如用裸价做排名，除权日股价跳空会被误判为"暴跌"。
+> - **软回退与 Fail-Fast**：可选能力缺失（ST 表、行业表、指数成分表）→ 引擎告警后继续运行，对应规则不生效。明确声明的依赖缺失（因子引用的伪列无后端支持、必需列缺失、因子名不存在）→ 加载或 preload 阶段直接报错，不产生静默错误结果。
+
 ### 2.2 策略作者职责一览
 
 | 职责 | 方式 | 说明 |
@@ -550,6 +557,14 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 - 成交量 cap（`order_volume_ratio`）
 - 现金不足自动缩股（每次减 100 股直到可负担）
 - 缩股后 < 100 股取消该买单
+
+**T+1 与涨跌停边界**（所有买卖路径生效）：
+
+- **T+1 锁定**：买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单自动跳过该持仓——不会出现当天买入当天止损卖出的情况。
+- **涨停不买**：`fill_price >= up_limit` → 跳过该买单。`up_limit` 为 `NaN` 时无法判定涨跌停，买卖双双跳过。
+- **跌停不卖**：`fill_price <= down_limit` → 跳过该卖单。同理 `down_limit` 为 `NaN` 时跳过。
+- **price NaN 跳过**：条件单 `price` 为 `NaN` 或 bar 关键价格缺失时，该订单静默跳过。
+- **last_price 兜底**：bar 的 `close` 缺失但 `up_limit` / `down_limit` 正常时，引擎用上一交易日的收盘价代判涨跌停。
 
 ### 5.6 bar 数据契约
 
@@ -1185,9 +1200,20 @@ engine = Engine(strategy, provider, db_path="result.db")
 result = engine.run("20240101", "20240630")
 # result["account_daily"]   → DataFrame，每日账户快照
 # result["trade_log"]      → DataFrame，所有成交
-# result["statistics"]     → dict，统计指标
+# result["statistics"]     → dict，统计指标（详见下方）
 # result["benchmark_nav"]  → list[float] | None，基准净值序列
 # result["benchmark_code"] → str | None，基准代码
+```
+
+`result["statistics"]` 包含以下关键指标组：
+
+| 指标组 | 包含 | 说明 |
+|--------|------|------|
+| 收益指标 | `total_return`、`annual_return`、`sharpe`、`max_drawdown`、`calmar` | 标准绩效指标 |
+| 交易磨损 | `trading_friction` — 双边磨损率、年化拖累 (bps)、成本占盈利比、无摩擦对照收益 | 衡量交易成本对收益的侵蚀程度 |
+| 持仓复杂度 | `management_complexity` — 单日最大成交笔数、有成交天数占比、单票平均市值 | 评估策略的可执行性（对散户跟单来说，日成交 20 笔的策略不可行） |
+| 卖出来源 | `sell_source` — MANUAL / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / RISK / TARGET 各占卖出金额的比例 | 理解退出行为的构成——是自然轮动还是被风控打出 |
+
 ```
 
 ### 9.4 调试技巧
@@ -1297,6 +1323,55 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 # register_condition_handler(type: str, handler: callable) -> None
 # register_buy_condition_handler(type: str, handler: callable) -> None
 ```
+
+### 10.7 结果库 SQLite Schema
+
+回测结果以 SQLite 数据库落盘，以下为三张核心表的结构。同一 `db_path` 多次 `engine.run()` 按 `run_id` 增量追加，互不覆盖；run 中抛异常时 `status` 改写为 `failed`。
+
+**runs**（每次回测的元信息）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `run_id` | INTEGER PK AUTOINCREMENT | 运行编号 |
+| `created_at` | TEXT | 创建时间戳 |
+| `strategy` | TEXT | 策略类名 |
+| `start_date` / `end_date` | TEXT | 回测区间 (YYYYMMDD) |
+| `initial_capital` | REAL | 初始资金（元） |
+| `config_json` | TEXT | 策略完整配置 JSON |
+| `status` | TEXT | `running` / `completed` / `failed` |
+| `stats_json` | TEXT | 统计指标 JSON |
+
+**account_daily**（逐日账户快照）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `run_id` | INTEGER | 关联 runs |
+| `date` | TEXT | 交易日 (YYYYMMDD) |
+| `cash` | REAL | 可用现金 |
+| `total_value` | REAL | 总资产（现金 + 持仓市值） |
+| `daily_pnl` | REAL | 当日盈亏 |
+| `cumulative_pnl` | REAL | 累计盈亏 |
+| `initial_capital` | REAL | 初始资金 |
+| `n_holdings` | INTEGER | 持仓数 |
+
+**trade_log**（逐笔成交记录）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `run_id` | INTEGER | 关联 runs |
+| `date` | TEXT | 成交日期 (YYYYMMDD) |
+| `symbol` | TEXT | 股票代码 |
+| `side` | TEXT | `BUY` / `SELL` / `DIV`（公司行为） |
+| `trigger` | TEXT | 触发类型（见 §10.4） |
+| `price` | REAL | 成交价（已含滑点） |
+| `shares` | INTEGER | 成交股数 |
+| `turnover` | REAL | 成交金额 |
+| `commission` | REAL | 佣金 |
+| `stamp_tax` | REAL | 印花税（仅卖出） |
+| `transfer_fee` | REAL | 过户费 |
+| `slippage_amount` | REAL | 滑点金额 |
+| `net_amount` | REAL | 净现金流 |
+| `reason` | TEXT | 备注 |
 
 ---
 

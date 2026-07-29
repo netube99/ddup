@@ -269,6 +269,13 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 **`amount`（成交额）非引擎必需**：引擎内部不消费 `amount`，策略如需要，通过 `REQUIRED_FIELDS` 声明后引擎会自动按需加载。如需接 `amount`，填在 `extra_fields` 中（见 §7）。
 
+> **extra_fields 与引擎能力的隐式依赖**
+>
+> 部分 extra_fields 字段对特定引擎能力是必需的。虽然引擎不强制要求这些列，但缺少时对应功能静默失效：
+> - `pe_ttm`：`exclude_loss` 过滤规则依赖（未声明 `pe_ttm` 则过滤静默跳过，不报错也不过滤）
+> - `total_mv`：`log_mktcap` 伪列依赖（未声明则因子表达式中引用 `log_mktcap` 时 preload 直接报错）
+> - `turnover_rate`：部分策略示例（如 topk_momentum）在 `select()` 中命令式访问此列
+
 ### 5.2 交易日历与分红（4 项）
 
 | 空 | 含义 | tushare 映射 | 口径要求 |
@@ -550,6 +557,18 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 > 这两张表不是标准 tushare 接口，是项目自定义数据源。如无可忽略。
 
+> **财报与基本面数据：跨频率对齐**
+>
+> ddup 引擎只消费 `(交易日期, 证券代码)` 日频网格上的列，**不做季度频率推断**。财报类数据（`pe_ttm`、`eps`、`rev_yoy` 等）须在数据层按**公告日**（`ann_date`）而非报告期对齐成日频列。建议建 VIEW 或物化表：
+>
+> ```sql
+> CREATE VIEW v_financials AS
+> SELECT ts_code, ann_date AS trade_date, pe_ttm, eps, rev_yoy, ...
+> FROM financials;
+> ```
+>
+> 然后在表单里引用 VIEW：`"pe_ttm": "v_financials.pe_ttm"`。跨季度运算（如 YoY 增速）也预先算成列——引擎不会自动推断前四个季度的数据来做同比增长。
+
 ### 7.2 特殊表：日期对齐问题
 
 部分 tushare 表的日期列不是 `trade_date`，需要通过 `tables` 节的 `date` 覆盖声明对齐列：
@@ -651,3 +670,17 @@ filter 编译为 `WHERE col1 = ? AND col2 IS NOT NULL`，列名自动加双引�
 - [ ] 事件型表（repurchase / stk_holdertrade / stk_holdernumber）在 `tables` 节声明了正确的 `date` 覆盖
 - [ ] 运行 `python -c "from adapters.my_backend import MyBackend; b = MyBackend()"` 不报错（落库校验通过）
 - [ ] 运行 `python -c "from adapters.my_backend import MyBackend; print(MyBackend().get_calendar('20240101', '20240131')[:5])"` 看到正确日历
+
+---
+
+## 10. 能力缺失行为速查
+
+以下对照表汇总填表法中辅助能力缺失时引擎和策略侧的精确行为。核心分界：**可选能力缺失 → 告警软回退**；**明确声明但不可用 → 直接报错**。
+
+| 缺失项 | 引擎行为 | 策略侧影响 |
+|--------|---------|-----------|
+| ST 标记 `st_symbol` | 告警后继续运行 | `exclude_st: true` 配置时**报错**提示后端不支持 |
+| 行业分类 `industry_name` | 告警后继续运行 | `exclude_industries` 或 `max_industry_pct` 配置时**报错**；`industry` 伪列不可用于因子表达式 |
+| 上市日期 `listing_date` | 静默跳过 | `exclude_new_stock: true` 不生效，引擎不报错 |
+| 指数成分 `index_code` + `index_member` | 告警后继续运行 | `index_universe` 或 `factor_universe` 配置时**报错** |
+| 基准行情 `benchmark_close` | 静默关闭 | 基准对比列为空；`idx_ret` 因子不可用；引擎不报错 |
