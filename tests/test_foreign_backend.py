@@ -271,7 +271,7 @@ def test_non_daily_data_no_protection_needed():
     """非日线数据不需要前视防护, 通过 provider.backend 直接访问。
 
     内部评级是静态数据, 不存在"偷看明天的评级"这个问题。
-    和你的 get_stock_industries、get_st_symbols 一样,
+    和你的 get_stock_industries、get_st_symbols、get_st_map 一样,
     策略调 provider.backend.get_internal_rating() 不需要经过 DataProvider。
     """
     backend = ForeignBackend()
