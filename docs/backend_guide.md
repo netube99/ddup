@@ -94,6 +94,7 @@ MY_FORM = {
 - **所有表名/列名自动加双引号**：物理名撞 SQL 保留字（如 `limit`）的字段可直接对接。
 - **VIEW 与表等价**：表单引用的"表"可以是 VIEW。例如 tushare 的 `daily` 表 `amount` 是千元，可通过 `CREATE VIEW daily_rmb AS SELECT *, amount * 1000 AS amount FROM daily;` 转换后指向 VIEW。
 - **初始化期全量校验**：`__init__` 时表单引用的所有表和列都会做落库校验，拼写错误当场暴露，定位到具体表单条目。
+- **运行期列名校验**：`query_bars` 被请求未在表单中声明的列名时，引擎抛出 `ValueError` 并列出具体未知列名——快速定位 `REQUIRED_FIELDS` 或 `extra_fields` 遗漏。
 
 ---
 
@@ -159,11 +160,11 @@ class MyBackend(DataBackend):
 # 引擎调用 —— 不实现 = 对应功能关闭
 
 def get_benchmark_bars(
-    self, code: str = "000300.SH", start: str = "", end: str = ""
+    self, code: str | None = None, start: str = "", end: str = ""
 ) -> pd.DataFrame | None:
     """基准指数日线数据。
-    返回 index: trade_date (YYYYMMDD 字符串), columns: ["hfq_close"]。
-    无数据返回 None。
+    返回 datetime 索引，columns: ["hfq_close"]。
+    无数据返回 None。code 由调用方显式传入 benchmark 代码。
     """
     ...
 
@@ -256,12 +257,10 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 | `low` | 最低价（元） | daily.low | 裸价 |
 | `close` | 收盘价（元） | daily.close | 裸价 |
 | `vol` | 成交量 | daily.vol | **单位：手**（1 手 = 100 股） |
-| `adj_factor` | 后复权因子 | adj_factor.adj_factor | 除数法：`hfq_close = close / adj_factor` |
+| `adj_factor` | 后复权因子 | adj_factor.adj_factor | 后复权乘数（`hfq_close = close × adj_factor`） |
 | `pre_close` | 昨收价（元） | daily.pre_close | **交易所除权口径**：除权日为 `(前裸收盘 - 现金分红) / (1 + 送转比例)`，非除权日为前裸收盘 |
 | `up_limit` | 涨停价（元） | stk_limit.up_limit | 精确值，不可用 ±10% 近似 |
 | `down_limit` | 跌停价（元） | stk_limit.down_limit | 精确值，不可用 ±10% 近似 |
-
-> **5000 积分用户**：如果已接入 `stk_factor_pro` 表，可直接将 OHLCV 和 `adj_factor`、`pre_close` 统一指向该表（如 `"open": "stk_factor_pro.open"`），省去分表对齐。引擎不关心字段来自几张表——直接各填各的即可。
 
 > **注意**：`up_limit` / `down_limit` 在数据源中常和 OHLCV 不在同一张表（如 tushare 的 `stk_limit`），直接填 `"stk_limit.up_limit"` 即可，引擎自动按 `(交易日, 代码)` 对齐。
 
@@ -307,7 +306,7 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 **数据要求**：ST 标记表是日频快照——某股票在某日有记录 = 该日处于 ST 状态。tushare 的 `stock_st` 表需通过 `tables` 节过滤 `"type": "ST"`。
 
-**不填的影响**：策略中配置了 `exclude_st` 时会报错提示后端不支持。
+**不填的影响**：策略中配置了 `exclude_st` 时引擎告警后静默降级（ST 过滤不生效），策略继续运行。
 
 ### 6.2 行业分类：`industry_name`
 
@@ -317,7 +316,7 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 启用能力：行业风控（`max_industry_pct` 控制单行业最大仓位占比）、`industry` 分组（策略 `groupby` 功能）、行业过滤（`exclude_industry`）。
 
-**不填的影响**：配置了行业风控或行业过滤时会报错提示后端不支持。`industry` 伪列不可用于因子表达式。
+**不填的影响**：`exclude_industries` 配置时引擎告警后静默降级（行业过滤不生效）；`max_industry_pct` 配置时直接报错（`ValueError`）。`industry` 伪列不可用于因子表达式。
 
 ### 6.3 上市日期：`listing_date`
 
@@ -327,7 +326,7 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 启用能力：`exclude_new_stock` 过滤（排除上市不足 N 天的新股，默认 60 天）。
 
-**不填的影响**：新股过滤静默跳过——引擎不报错，但也不会过滤新股。
+**不填的影响**：新股过滤告警后跳过——引擎不报错（有 warning 日志），但也不会过滤新股。
 
 ### 6.4 指数成分：`index_code` + `index_member`
 
@@ -340,7 +339,7 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 
 启用能力：`index_universe`（策略级股票池限定为指数成分）、`factor_universe`（因子计算时限定股票池）。
 
-**不填的影响**：配置了 `index_universe` 或 `factor_universe` 时会报错提示后端不支持。
+**不填的影响**：配置了 `index_universe` 或 `factor_universe` 时引擎告警后静默降级（对应规则不生效）。
 
 ### 6.5 基准行情：`benchmark_close` + `benchmark_adj_factor` + `benchmark_code`
 
@@ -382,6 +381,8 @@ def get_st_symbols(self, trade_date: str) -> set[str]:
 ### 7.1 扩展字段按数据来源分类
 
 以下覆盖 `adapters/tushare.py` 中预填的全部扩展字段，按 tushare 积分门槛分组。**2000 积分档位**可获取日频行情、基本面、资金流、筹码分布、融资融券；高积分档位或自建数据可补充更多。
+
+> **5000 积分用户**：如果已接入 `stk_factor_pro` 表，可直接将 OHLCV 和 `adj_factor`、`pre_close` 统一指向该表（如 `"open": "stk_factor_pro.open"`），省去分表对齐。引擎不关心字段来自几张表——直接各填各的即可。
 
 ---
 
@@ -677,10 +678,10 @@ filter 编译为 `WHERE col1 = ? AND col2 IS NOT NULL`，列名自动加双引�
 
 以下对照表汇总填表法中辅助能力缺失时引擎和策略侧的精确行为。核心分界：**可选能力缺失 → 告警软回退**；**明确声明但不可用 → 直接报错**。
 
-| 缺失项 | 引擎行为 | 策略侧影响 |
-|--------|---------|-----------|
-| ST 标记 `st_symbol` | 告警后继续运行 | `exclude_st: true` 配置时**报错**提示后端不支持 |
-| 行业分类 `industry_name` | 告警后继续运行 | `exclude_industries` 或 `max_industry_pct` 配置时**报错**；`industry` 伪列不可用于因子表达式 |
-| 上市日期 `listing_date` | 静默跳过 | `exclude_new_stock: true` 不生效，引擎不报错 |
-| 指数成分 `index_code` + `index_member` | 告警后继续运行 | `index_universe` 或 `factor_universe` 配置时**报错** |
-| 基准行情 `benchmark_close` | 静默关闭 | 基准对比列为空；`idx_ret` 因子不可用；引擎不报错 |
+| 缺失项 | 引擎行为 | 检测方式 | 策略侧影响 |
+|--------|---------|---------|-----------|
+| ST 标记 `st_symbol` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_st: true` 配置时告警后静默降级（ST 过滤不生效） |
+| 行业分类 `industry_name` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_industries` → 告警后静默降级；`max_industry_pct` → 直接报错；`industry` 伪列不可用 |
+| 上市日期 `listing_date` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_new_stock: true` 不生效，引擎不报错 |
+| 指数成分 `index_code` + `index_member` | 告警后继续运行 | 初始化期 `hasattr` | `index_universe` 或 `factor_universe` 配置时告警后静默降级（对应规则不生效） |
+| 基准行情 `benchmark_close` | 静默关闭 | 初始化期 `hasattr` | 基准对比列为空；`idx_ret` 因子不可用；引擎不报错 |

@@ -119,7 +119,7 @@ python scripts/report.py <结果库.db> [--run-id N] --out report.html
 
 **输出**：单文件 HTML 报告，含净值曲线（内联 SVG）、回撤曲线、月度收益、基准对比、交易磨损、持仓复杂度、往返交易汇总、卖出来源归因、个股盈亏贡献 Top10、成交明细。
 
-老 run（stats_json 为 NULL）现场重算统计指标后生成报告。
+老 run（stats_json 为 NULL 或无此列）先经 schema 迁移补写 stats_json，若无则现场用 `stats.calculate_statistics` 重算后生成报告。
 
 示例：
 
@@ -185,6 +185,8 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 | 交易频率 | 日均 >10 笔告警 |
 | 持仓上限 | 最大持仓数是否超 config.max_positions |
 | 现金非负 | 是否存在负现金日 |
+| 公司行为统计 | 分红/送转等 CORPORATE 触发笔数（INFO 输出） |
+| 卖出分类统计 | 按 trigger 分组统计卖出的次数、平均金额、总盈亏 |
 
 示例：
 
@@ -205,7 +207,7 @@ python scripts/bench_universe_preload.py --start YYYYMMDD --end YYYYMMDD \
 |------|------|
 | `--start` | 开始日期，**必填** |
 | `--end` | 结束日期，**必填** |
-| `--yaml` | 策略 YAML 路径，默认 `strategies/examples/topk_momentum.yaml` |
+| `--yaml` | 策略 YAML 路径，默认 `strategies/examples/topk_momentum/config.yaml` |
 | `--skip-load` | 跳过数据加载层基准 |
 | `--skip-engine` | 跳过端到端基准 |
 
@@ -263,6 +265,7 @@ from research.factor_eval import calc_ic, summarize_ic
 ic, rank_ic = calc_ic(factor_values, forward_returns)
 # ic: 每日 Pearson IC (Series, index=trade_date)
 # rank_ic: 每日 Spearman Rank IC
+# date_col: 日期列名，默认 "trade_date"
 
 pearson_stats = summarize_ic(ic)
 # {"ic_mean": ..., "ic_std": ..., "icir": ..., "ic_positive_ratio": ..., "n_days": ...}
@@ -276,9 +279,11 @@ from research.factor_eval import calc_layered_returns
 
 # n_quantiles: 分档数，默认 5
 # 返回 {q: cumulative_return_series}，q=1 为最低档，q=N 为最高档
+# date_col: 日期列名，默认 "trade_date"
 layers = calc_layered_returns(factor_values, forward_returns, n_quantiles=5)
 
 # 多空收益 = 最高档累计 - 最低档累计
+# 注：当某些分位因数据不足被合并（duplicates="drop"）时，max/min 取实际存在的极端分位
 long_short = layers[max(layers)].iloc[-1] - layers[min(layers)].iloc[-1]
 ```
 
@@ -322,7 +327,7 @@ from research.report import generate_report_from_db
 generate_report_from_db("result.db", "report.html", run_id=1)
 ```
 
-老 run（stats_json 为 NULL）现场用 `stats.calculate_statistics` 重算。
+老 run（stats_json 为 NULL 或无此列）先经 schema 迁移补写 stats_json，若无则现场用 `stats.calculate_statistics` 重算。
 
 ### 4.3 `generate_compare_report`
 
@@ -413,7 +418,6 @@ result = brinson_attribute(
     start="20240601",
     end="20240701",
     index_code="000300.SH",       # 基准指数，默认 "000300.SH"
-    run_id=1,                     # 缺省取最新 run
 )
 
 print(f"配置效应: {result['summary']['allocation_effect']:.4%}")
@@ -451,6 +455,8 @@ print(f"超额收益: {result['summary']['total_excess_return']:.4%}")
             "avg_portfolio_weight": ...,
             "avg_benchmark_weight": ...,
             "active_weight": ...,        # 主动权重 = portfolio - benchmark
+            "portfolio_return": ...,     # 该行业策略累计收益
+            "benchmark_return": ...,     # 该行业基准累计收益
             "allocation_effect": ...,
             "selection_effect": ...,
             "interaction_effect": ...,
@@ -602,7 +608,7 @@ best = combine_factors(factor_df, fwd_ret, method="icir")
 | | `build_compare_table(runs)` | [run dict, ...] | (header, rows) |
 | `research.composite` | `combine_factors(df, fwd, method)` | 因子宽表, 前瞻收益, 方法 | 合成得分 Series |
 | | `evaluate_composite(comp, fwd)` | 合成得分, 前瞻收益 | {ic, rank_ic, layered} |
-| `research.attribution` | `brinson_attribute(db, pdb, start, end)` | 回测DB, 库路径, 日期 | 完整归因 dict |
+| `research.attribution` | `brinson_attribute(db, pdb, start, end, index_code, run_id)` | 回测DB, 库路径, 日期, 基准代码, run_id | 完整归因 dict |
 
 ### 常见参数速查
 

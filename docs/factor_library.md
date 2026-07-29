@@ -336,14 +336,16 @@ factors:
 
 当因子 A 引用因子 B 时，A 所需的历史数据窗口会**自动累加** B 的窗口。
 
+> **两个窗口概念**：`window_cost`（算子本身额外消耗的天数，不含基础列）和 `infer_window`（包含基础列的完整所需行数，= 基础列 1 + 推导的窗口开销）。下例中的数值为 `infer_window` 返回值，因子列的实际 warmup 行数由 `build_factor_plan` 通过 `_to_calendar_days` 转换。
+
 ```
-mom20 = roc(close_hfq, 20)        → 窗口 = 20（需要近 20 日数据）
-mom_z = zscore(mom20)              → 窗口 = 20（截面算子不消耗时间轴）
-vol_20d = std(roc(close_hfq, 1), 20) → 窗口 = 20
-combo = mom20 / vol_20d            → 窗口 = max(20, 20) = 20
+mom20 = roc(close_hfq, 20)        → 窗口 = 21（基础列 1 + TS n=20）
+mom_z = zscore(mom20)              → 窗口 = 21（截面算子不消耗时间轴）
+vol_20d = std(roc(close_hfq, 1), 20) → 窗口 = 21
+combo = mom20 / vol_20d            → 窗口 = max(21, 21) = 21
 ```
 
-TS 算子的窗口开销：`ma(x, n)` 额外消耗 `n-1` 行；`ema(x, n)` 消耗 `3n-1` 行（工程近似）；`corr`/`beta`/`resid_std` 各消耗 `n-1` 行。
+TS 算子的窗口开销：`delay`/`delta`/`roc` 消耗 `n` 行（需要前 n 天基准值）；`ma`/`std`/`sum`/`max`/`min` 各消耗 `n-1` 行；`ema` 消耗 `3n-1` 行（工程近似）；`corr`/`beta`/`resid_std` 各消耗 `n-1` 行。
 
 ### 5.3 环检测
 
@@ -405,7 +407,7 @@ open, high, low, close, vol, pre_close, adj_factor, up_limit, down_limit
 
 - `vol` 单位是手（1 手 = 100 股）
 - `pre_close` 是交易所除权调整口径
-- `adj_factor` 是后复权除数（`close_hfq = close / adj_factor`）
+- `adj_factor` 是后复权乘数（`close_hfq = close × adj_factor`）
 
 ### 7.2 引擎派生列
 
@@ -413,10 +415,10 @@ open, high, low, close, vol, pre_close, adj_factor, up_limit, down_limit
 
 | 派生列 | 公式 | 依赖基础列 |
 |--------|------|------------|
-| `open_hfq` | `open / adj_factor` | open, adj_factor |
-| `high_hfq` | `high / adj_factor` | high, adj_factor |
-| `low_hfq` | `low / adj_factor` | low, adj_factor |
-| `close_hfq` | `close / adj_factor` | close, adj_factor |
+| `open_hfq` | `open × adj_factor` | open, adj_factor |
+| `high_hfq` | `high × adj_factor` | high, adj_factor |
+| `low_hfq` | `low × adj_factor` | low, adj_factor |
+| `close_hfq` | `close × adj_factor` | close, adj_factor |
 | `pct_chg` | `close / pre_close - 1` | close, pre_close |
 
 **建议**：因子表达式中优先使用 `*_hfq` 列（如 `roc(close_hfq, 20)` 而非 `roc(close, 20)`），自动获得后复权口径，不受除权跳变影响。
@@ -556,6 +558,8 @@ python scripts/factor_eval.py mom20 \
 
 ### 9.2 Python API
 
+> 完整的函数签名速查见 §14.5。本节展示典型使用场景的串联方式。
+
 ```python
 from research.factor_eval import calc_ic, calc_layered_returns, summarize_ic, calc_factor_corr
 from btcore.factors.library import compute_factors, load_library
@@ -568,7 +572,7 @@ factor_df = compute_factors(["mom20", "vol_z", "ep_z"], bars_df, library)
 fwd_ret = bars_df["close_hfq"].groupby("symbol").pct_change(5).shift(-5)
 ic, rank_ic = calc_ic(factor_df["mom20"], fwd_ret)
 summary = summarize_ic(ic)
-# → {"ic_mean": 0.034, "icir": 0.54, "ic_positive_ratio": 0.67, "n_days": 118}
+# → {"ic_mean": 0.034, "ic_std": 0.023, "icir": 0.54, "ic_positive_ratio": 0.67, "n_days": 118}
 
 # 分层回测
 layers = calc_layered_returns(factor_df["mom20"], fwd_ret, n_quantiles=5)
@@ -657,10 +661,10 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 
 对于一个典型的中证 500 选股策略（500 候选 vs 5000 全市场，120 天窗口）：
 
-| 面板 | 股票数 | 窗口 | 列数 | 估算规模 |
-|------|--------|------|------|----------|
-| 主面板 | ~500 | ~190 天 | ~20 列 | ~2M 行 |
-| 广度面板 | ~5000 | ~30 天 | ~5 列 | ~0.8M 行 |
+| 面板 | 股票数 | 窗口 | 列数 | 估算单元格数 |
+|------|--------|------|------|------------|
+| 主面板 | ~500 | ~190 天 | ~20 列 | ~1.9M |
+| 广度面板 | ~5000 | ~30 天 | ~5 列 | ~0.75M |
 
 广度面板是瞬时加载——短窗口 + 窄列，物化投影后由引擎释放。
 
@@ -796,6 +800,8 @@ factors:
 ```
 
 **示例 10：超复杂混合因子**
+
+> 示例中的 `pe_ttm`、`buy_lg_amount`、`sell_lg_amount`、`amount` 等列需先在 `adapters/` 后端的 `extra_fields` 中登记。见 `docs/backend_guide.md` §7。
 
 ```yaml
 factors:
@@ -958,10 +964,10 @@ idx_ret, log_mktcap, industry, abs
 
 | 列名 | 公式 |
 |------|------|
-| `open_hfq` | `open / adj_factor` |
-| `high_hfq` | `high / adj_factor` |
-| `low_hfq` | `low / adj_factor` |
-| `close_hfq` | `close / adj_factor` |
+| `open_hfq` | `open × adj_factor` |
+| `high_hfq` | `high × adj_factor` |
+| `low_hfq` | `low × adj_factor` |
+| `close_hfq` | `close × adj_factor` |
 | `pct_chg` | `close / pre_close - 1` |
 
 ### 14.5 Python API 速查
@@ -997,15 +1003,15 @@ calc_layered_returns(factor_values, forward_returns, n_quantiles=5) -> dict[int,
 summarize_ic(ic_series) -> dict
   # → {ic_mean, ic_std, icir, ic_positive_ratio, n_days}
 
-calc_factor_corr(factor_df) -> pd.DataFrame
+calc_factor_corr(factor_df, date_col="trade_date") -> pd.DataFrame
   # → 因子相关性矩阵
 ```
 
 **多因子合成**（`research.composite`）
 
 ```python
-combine_factors(factor_df, forward_returns, method="icir", window=60) -> pd.Series
-  # → 合成得分 Series
+combine_factors(factor_df, forward_returns, method="icir", window=60, min_periods=None) -> pd.Series
+  # → 合成得分 Series。min_periods 默认 None（自动 = max(2, window//2)）
 
 evaluate_composite(composite, forward_returns, n_quantiles=10) -> dict
   # → {ic, rank_ic, layered}

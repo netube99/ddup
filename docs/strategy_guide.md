@@ -43,7 +43,7 @@ from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_spec
 class MyStrategy(Strategy):
     def on_start(self, provider, first_date, end_date=None):
         self._top_k = int(self.config.get("top_k", 5))
-        self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES)
+        self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES, end_date=end_date)
         self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
     def select(self, bars, account_snapshot, provider):
@@ -56,7 +56,7 @@ class MyStrategy(Strategy):
         df = bars_to_df(filtered)
         _, score = eval_factor_specs(df, self.FACTOR_SPECS)
 
-        target = set(score.nlargest(self._top_k).index)
+        target = set(score.sort_values(ascending=False).head(self._top_k).index)
         current = set(account_snapshot.holdings.keys())
 
         return {"buy": sorted(target - current), "sell": sorted(current - target)}
@@ -82,15 +82,19 @@ python scripts/run.py strategies/my_strategy/config.yaml --start 20240101 --end 
 ```
 on_start (一次)
   │
-  └─ [每日循环] ──────────────────────────────────────────┐
-       ├─ on_fills(trades)       ← 感知当日已撮合成交     │
-       ├─ on_tick(bars, snapshot) ← 每日状态维护           │
-       ├─ select(bars, snapshot) → {buy, sell, ...}       │
-       ├─ calc_conditions() × N   ← 每个持仓生成条件单     │
-       ├─ 风控裁剪 (DrawdownBreaker + apply_risk_rules)   │
-       ├─ 条件买单撮合 (T+1 盘中)                          │
-       └─ 手动买卖撮合 (T+1 open/close) ──────────────────┘
+  └─ [每日循环] ─────────────────────────────────────────────┐
+       ├─ 公司行为调整 (分红/送转)                            │
+       ├─ 撮合昨日信号 (手动买卖 + 条件卖出 + 条件买入)       │
+       ├─ NAV 结算                                           │
+       ├─ on_fills(trades)       ← 感知当日已撮合成交        │
+       ├─ on_tick(bars, snapshot) ← 每日状态维护              │
+       ├─ select(bars, snapshot) → {buy, sell, ...}          │
+       ├─ calc_conditions() × N   ← 每个持仓生成条件单        │
+       ├─ 风控裁剪 (DrawdownBreaker + apply_risk_rules)      │
+       └─ 生成明日 pending_actions ──────────────────────────┘
 ```
+
+> `select` 和风控生成的是**下一交易日**将执行的买卖信号，当日不成交——这是 T+1 机制的源头。当日撮合的是前一日 `select` 输出的 pending_actions。
 
 `on_fills` 和 `on_tick` 是可选的。`on_tick` 每日运行（即使非调仓日 schedule 包装器拦截了 `select`）；`calc_conditions` 同样每日运行。
 
@@ -126,6 +130,8 @@ on_start (一次)
 | `StockFilter(backend, start, rules)` | `btcore.filters` | 截面多规则过滤 |
 | `register_condition_handler(type, handler)` | `btcore.match.conditions` | 注册自定义离场条件 |
 | `register_buy_condition_handler(type, handler)` | `btcore.match.conditions` | 注册自定义买入条件 |
+
+> 含完整代码签名的速查表见 §10.6（引擎工具函数一览）。
 
 ---
 
@@ -222,6 +228,9 @@ class MyStrategy(Strategy):
 | `commission` | `float` | 佣金 |
 | `stamp_tax` | `float` | 印花税 |
 | `transfer_fee` | `float` | 过户费 |
+| `slippage_amount` | `float` | 滑点金额 |
+| `net_amount` | `float` | 净现金流 |
+| `reason` | `str` | 备注 |
 
 典型用途：感知条件单止损/止盈退出 → 对标的施加冷却期；记录入场价、最高价等持仓状态；重置 trailing 锚点。
 
@@ -361,6 +370,12 @@ risk_rules:
 schedule:
   frequency: weekly           # daily (默认) | weekly | biweekly | monthly
   weekday: -1                 # 每周最后一个交易日（1 起，负数倒数）
+```
+
+```yaml
+schedule:
+  frequency: biweekly
+  weekday: 1                  # 每两周第一个交易日
 ```
 
 ```yaml
@@ -543,7 +558,7 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 
 **手动买卖**（`buy`/`sell` 名单）：
 - 执行价 = `execution_price` 指定的开盘价或收盘价
-- 等权分配：每只买入 `total_value / max_positions` 资金
+- 等权分配：每只约 `total_value / max_positions` 资金（受可用现金上限截断）
 - 加权分配：有 `buy_weights` 时每只买入 `total_value × weight[symbol]`
 - `sell_shares` 对部分减仓的 symbol 只卖出指定股数，其余持仓保留
 
@@ -558,13 +573,15 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 - 现金不足自动缩股（每次减 100 股直到可负担）
 - 缩股后 < 100 股取消该买单
 
-**T+1 与涨跌停边界**（所有买卖路径生效）：
+**T+1 锁定**（所有买卖路径生效）：
 
-- **T+1 锁定**：买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单自动跳过该持仓——不会出现当天买入当天止损卖出的情况。
+- 买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单自动跳过该持仓——不会出现当天买入当天止损卖出的情况。
+
+**涨跌停边界**（所有买卖路径生效）：
+
 - **涨停不买**：`fill_price >= up_limit` → 跳过该买单。`up_limit` 为 `NaN` 时无法判定涨跌停，买卖双双跳过。
 - **跌停不卖**：`fill_price <= down_limit` → 跳过该卖单。同理 `down_limit` 为 `NaN` 时跳过。
 - **price NaN 跳过**：条件单 `price` 为 `NaN` 或 bar 关键价格缺失时，该订单静默跳过。
-- **last_price 兜底**：bar 的 `close` 缺失但 `up_limit` / `down_limit` 正常时，引擎用上一交易日的收盘价代判涨跌停。
 
 ### 5.6 bar 数据契约
 
@@ -607,7 +624,7 @@ from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_spec
 class SimpleRotation(Strategy):
     def on_start(self, provider, first_date, end_date=None):
         self._top_k = int(self.config.get("top_k", 5))
-        self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES)
+        self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES, end_date=end_date)
         self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
     def select(self, bars, account_snapshot, provider):
@@ -620,7 +637,7 @@ class SimpleRotation(Strategy):
         df = bars_to_df(filtered)
         _, score = eval_factor_specs(df, self.FACTOR_SPECS)
 
-        target = set(score.nlargest(self._top_k).index)
+        target = set(score.sort_values(ascending=False).head(self._top_k).index)
         current = set(account_snapshot.holdings.keys())
         self._cond.prune(current)
 
@@ -685,7 +702,8 @@ class TopKMomentum(Strategy):
         """冷却期递减 + 条件单状态修剪。"""
         if not bars:
             return
-        date_int = int(next(iter(bars.values())).get("trade_date", ""))
+        date_str = next(iter(bars.values())).get("trade_date", "")
+        date_int = int(date_str) if date_str else 0
         expired = [s for s, d in self._cooldown.items() if d <= date_int]
         for s in expired:
             del self._cooldown[s]
@@ -1209,7 +1227,7 @@ result = engine.run("20240101", "20240630")
 
 | 指标组 | 包含 | 说明 |
 |--------|------|------|
-| 收益指标 | `total_return`、`annual_return`、`sharpe`、`max_drawdown`、`calmar` | 标准绩效指标 |
+| 收益指标 | `total_return`、`annualized_return`、`sharpe`、`max_drawdown`、`calmar` | 标准绩效指标 |
 | 交易磨损 | `trading_friction` — 双边磨损率、年化拖累 (bps)、成本占盈利比、无摩擦对照收益 | 衡量交易成本对收益的侵蚀程度 |
 | 持仓复杂度 | `management_complexity` — 单日最大成交笔数、有成交天数占比、单票平均市值 | 评估策略的可执行性（对散户跟单来说，日成交 20 笔的策略不可行） |
 | 卖出来源 | `sell_source` — MANUAL / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / RISK / TARGET 各占卖出金额的比例 | 理解退出行为的构成——是自然轮动还是被风控打出 |

@@ -69,7 +69,7 @@ def bench_engine(yaml_path: str, start: str, end: str, cropped: bool) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--yaml", default="strategies/examples/topk_momentum.yaml")
+    parser.add_argument("--yaml", default="strategies/examples/topk_momentum/config.yaml")
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--skip-load", action="store_true", help="跳过加载层基准")
