@@ -13,10 +13,10 @@
         "symbol": "ts_code",                # 证券代码列的名字（各表共同的查询键）
         "date":   "trade_date",             # 交易日列的名字（YYYYMMDD 字符串）
         # 以下每个空都填 "表名.字段名"
-        # 数据契约 10 字段 —— 写在哪个表都行，自动按 (日期,代码) 对齐
+        # 数据契约字段 —— 写在哪个表都行，自动按 (日期,代码) 对齐
         "open": "quotes.open",  "high": "quotes.high",
         "low": "quotes.low",    "close": "quotes.close",
-        "vol": "quotes.vol",    "amount": "quotes.amount",
+        "vol": "quotes.vol",
         "adj_factor": "quotes.adj_factor", "pre_close": "quotes.pre_close",
         "up_limit": "limits.up_limit", "down_limit": "limits.down_limit",
         # 交易日历与分红
@@ -36,7 +36,7 @@
         "benchmark_code": "510300.SH",      # 默认基准代码（取值，非位置）
 
         # ══ 自选扩展字段（因子/策略要用什么加什么）══
-        "extra_fields": {"turnover_rate": "quotes.turnover_rate"},
+        "extra_fields": {"amount": "quotes.amount", "turnover_rate": "quotes.turnover_rate"},
 
         # ══ 沉底：表的特殊说明（大多数库为空）══
         "tables": {                          # 某张表有特殊之处？在这里给它加一条
@@ -85,9 +85,10 @@ _EXTRAS = {
     "get_index_members": "index_members",
 }
 
-# 数据契约 10 字段（口径见 docs/backend_guide.md）
+# 数据契约字段（口径见 docs/backend_guide.md）
+# amount 归为扩展字段：引擎内部不消费，策略通过 REQUIRED_FIELDS 按需声明
 _CONTRACT_FIELDS = (
-    "open", "high", "low", "close", "vol", "amount",
+    "open", "high", "low", "close", "vol",
     "adj_factor", "pre_close", "up_limit", "down_limit",
 )
 

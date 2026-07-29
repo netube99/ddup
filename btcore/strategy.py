@@ -23,7 +23,7 @@ class Strategy(ABC):
 
     REQUIRED_FIELDS: ClassVar[list[str]] = [
         "open", "high", "low", "close",
-        "vol", "amount", "adj_factor",
+        "vol", "adj_factor",
     ]
 
     FACTOR_SPECS: ClassVar[list[dict]] = []

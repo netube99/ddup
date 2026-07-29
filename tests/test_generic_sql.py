@@ -22,7 +22,6 @@ MINIMAL_FORM = {
     "low": "quotes_b.low",
     "close": "quotes_a.close",
     "vol": "quotes_a.vol",
-    "amount": "quotes_a.amount",
     "adj_factor": "quotes_a.adj_factor",
     "pre_close": "quotes_a.pre_close",
     "up_limit": "quotes_b.up_limit",
@@ -36,6 +35,7 @@ MINIMAL_FORM = {
 FULL_FORM = {
     **MINIMAL_FORM,
     "extra_fields": {
+        "amount": "quotes_a.amount",      # 扩展字段（非契约必需）
         "pe_ttm": "quotes_a.pe_ttm",     # 同表扩展字段
         "score": "aux.score",            # 第三张表
         "score2": "aux2.score2",         # 键列名不一致的表
@@ -415,8 +415,9 @@ def test_view_as_source_table(tmp_path):
 
     form = {"symbol": "ts_code", "date": "trade_date",
             **{f: f"v_bars.{f}" for f in ("open", "high", "low", "close", "vol",
-                                          "amount", "adj_factor", "pre_close",
+                                          "adj_factor", "pre_close",
                                           "up_limit", "down_limit")},
+            "extra_fields": {"amount": "v_bars.amount"},
             "calendar_date": "cal.cal_date",
             "dividend_ex_date": "div.ex_date",
             "dividend_stk_div": "div.stk_div",

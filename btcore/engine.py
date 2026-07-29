@@ -15,10 +15,10 @@ from btcore.slippage import apply_slippage
 logger = logging.getLogger(__name__)
 
 # 数据契约必需列（docs/backend_guide.md）——缺列直接报错，不走语义不精确的兜底
+# amount 不在其中：引擎内部不消费，仅为策略 select() 提供，策略通过 REQUIRED_FIELDS 声明
 REQUIRED_BAR_COLUMNS = (
     "open", "high", "low", "close",
     "vol",          # 单位: 手 (1 手 = 100 股)
-    "amount",
     "adj_factor",
     "pre_close",    # 交易所除权调整口径: 除权日 = (前裸收盘 - 现金分红) / (1 + 送转比例)
     "up_limit", "down_limit",
