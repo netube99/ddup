@@ -132,6 +132,10 @@ def _xs_winsorize(x: pd.Series, p: float) -> pd.Series:
     return x.clip(lower=lo, upper=hi)
 
 
+def _xs_log(x: pd.Series) -> pd.Series:
+    return np.log(x)
+
+
 def _by_date_and(x: pd.Series, g: pd.Series):
     return x.groupby([x.index.get_level_values(_DATE), g], sort=False)
 
@@ -176,7 +180,7 @@ def _xs_group_mean(x: pd.Series, g: pd.Series) -> pd.Series:
 # ── 算子表（固定白名单，非运行时注册表）──
 
 OP_NAMES = frozenset({
-    "abs",
+    "abs", "log",
     "delay", "delta", "roc", "ma", "ema", "std", "sum", "max", "min",
     "corr", "beta", "resid_std",
     "rank", "zscore", "winsorize", "group_rank", "neutralize",
@@ -224,6 +228,7 @@ _OPS: dict[str, _Op] = {
     "resid_std": _Op(_ts_resid_std, 2, 1, "ts", "preserve",
                      window_cost=lambda n: n - 1),
     "abs": _Op(np.abs, 1, 0, "xsec", "preserve"),
+    "log": _Op(_xs_log, 1, 0, "xsec", "preserve"),
     "rank": _Op(_xs_rank, 1, 0, "xsec", "preserve"),
     "zscore": _Op(_xs_zscore, 1, 0, "xsec", "preserve"),
     "winsorize": _Op(_xs_winsorize, 1, 1, "xsec", "preserve",

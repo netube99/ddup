@@ -74,7 +74,7 @@ factors:
 open, high, low, close, vol, amount,
 adj_factor, pre_close, up_limit, down_limit,
 open_hfq, high_hfq, low_hfq, close_hfq, pct_chg,
-idx_ret, log_mktcap, industry, abs
+idx_ret, log_mktcap, industry, abs, log
 ```
 
 ### 2.3 命名惯例建议
@@ -139,8 +139,8 @@ expr: "np.log(close)"
 # 错误：属性访问
 expr: "df.close.mean()"
 
-# 正确：写成算子
-expr: "log(close)"          # 但 log 并未内置——用其他方式表达
+# 正确：使用内置算子
+expr: "log(close)"
 ```
 
 如果 pandas.eval 处理不了的需求，用算子表达式替代（第 4 节）。
@@ -210,6 +210,7 @@ factors:
 | 算子 | 参数 | 含义 |
 |------|------|------|
 | `abs(x)` | (Series) | 绝对值 |
+| `log(x)` | (Series) | 自然对数 |
 | `rank(x)` | (Series) | 截面百分位排名（0~1） |
 | `zscore(x)` | (Series) | 截面标准化（减均值除标准差） |
 | `winsorize(x, p)` | (Series, float) | 截面缩尾，p∈(0,0.5) |
@@ -977,6 +978,7 @@ factors:
 | `beta` | `(x, y, n: int)` | TS | n-1 |
 | `resid_std` | `(x, y, n: int)` | TS | n-1 |
 | `abs` | `(x)` | XSEC 保形 | 0 |
+| `log` | `(x)` | XSEC 保形 | 0 |
 | `rank` | `(x)` | XSEC 保形 | 0 |
 | `zscore` | `(x)` | XSEC 保形 | 0 |
 | `winsorize` | `(x, p: float)` | XSEC 保形 | 0 |
@@ -991,7 +993,7 @@ factors:
 open, high, low, close, vol, amount,
 adj_factor, pre_close, up_limit, down_limit,
 open_hfq, high_hfq, low_hfq, close_hfq, pct_chg,
-idx_ret, log_mktcap, industry, abs
+idx_ret, log_mktcap, industry, abs, log
 ```
 
 ### 14.3 伪列

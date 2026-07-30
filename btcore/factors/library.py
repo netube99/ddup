@@ -29,7 +29,7 @@ _RESERVED_NAMES = frozenset({
     "adj_factor", "pre_close", "up_limit", "down_limit",
     "open_hfq", "high_hfq", "low_hfq", "close_hfq", "pct_chg",
     "idx_ret", "log_mktcap", "industry",
-    "abs",
+    "abs", "log",
 })
 
 
