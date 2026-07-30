@@ -3,9 +3,8 @@
 
 from types import SimpleNamespace
 
-import pytest
-
 import pandas as pd
+import pytest
 
 from btcore.factors.library import resolve_spec
 from btcore.strategy_loader import build_strategy, load_strategy
@@ -195,7 +194,7 @@ class TestIndexUniverseLoading:
 
 class TestBuildStrategy:
     def test_minimal(self):
-        """仅 cls + config，无 factor/filter/schedule。"""
+        """仅 cls + config，无 factor/filter。"""
         strategy = build_strategy(RollingRanker, config={"top_k": 3})
         assert isinstance(strategy, RollingRanker)
         assert strategy.config["top_k"] == 3
@@ -204,7 +203,7 @@ class TestBuildStrategy:
         assert strategy.FILTER_RULES == {}
 
     def test_full(self):
-        """含 factor_specs / filter_rules / schedule。"""
+        """含 factor_specs / filter_rules。"""
         strategy = build_strategy(
             RollingRanker,
             config={"initial_capital": 500000, "top_k": 5,
@@ -214,7 +213,6 @@ class TestBuildStrategy:
                 {"name": "low_turnover", "weight": 0.5, "ascending": True},
             ],
             filter_rules={"exclude_st": True, "min_price": 5.0},
-            schedule={"frequency": "weekly", "weekday": 3},
         )
         assert strategy.config["top_k"] == 5
         assert strategy.config["conditions"]["stop_loss_pct"] == 0.05
@@ -410,7 +408,8 @@ class TestEvalFactorSpecsMaterializeOnly:
 
         # score 仅由 mom20 决定（mkt_breadth20 被跳过）
         # mom20=[0.05,-0.02,0.10,0.03], ascending=False:
-        # B(-0.02)→rank 1→pct 0.25, D(0.03)→rank 2→pct 0.5, A(0.05)→rank 3→pct 0.75, C(0.10)→rank 4→pct 1.0
+        # B(-0.02)→rank1 pct 0.25, D(0.03)→rank2 pct 0.5,
+        # A(0.05)→rank3 pct 0.75, C(0.10)→rank4 pct 1.0
         assert score["A"] == 0.75
         assert score["C"] == 1.0
         assert score["B"] == 0.25

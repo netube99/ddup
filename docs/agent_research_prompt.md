@@ -69,7 +69,7 @@ Round N:
 - 适合：已确认因子有效，优化进出场时机和资金分配
 
 ### L2 — 目标仓位调仓
-- 新增：`target_value` 精确仓位管理 → `risk_rules` 熔断/单票上限 → `schedule` 降频 → `sell_shares` 部分减仓
+- 新增：`target_value` 精确仓位管理 → `risk_rules` 熔断/单票上限 → 时间门控降频 → `sell_shares` 部分减仓
 - 代表：`strategies/examples/target_allocator/`
 - 适合：需要精确资金分配、降低换手率
 
@@ -164,8 +164,8 @@ breadth = compute_breadth("mkt_breadth20", backend, "20240101", "20240630")
 ### 4.1 单变量改变
 每次只改**一个**变量：
 - ✅ 改 `stop_loss_pct`: 0.08 → 无止损
-- ✅ 改 `schedule.frequency`: daily → weekly
-- ❌ 同时改 stop_loss + schedule + top_k
+- ✅ 改 `rebalance_interval`: 1 → 5
+- ❌ 同时改 stop_loss + rebalance_interval + top_k
 
 ### 4.2 极端值测试
 找到有效参数后，测试极端值确认方向：
@@ -411,7 +411,7 @@ R3 AH V2: ret=+45.1% shp=0.96 dd=-18.2% trades=86
 优先级 5：参数精调（sweep 网格）
   □ top_k: sweep [2,3,4,5,6,8]
   □ take_profit: sweep [0.25,0.30,0.35,0.40,0.50]
-  □ schedule: sweep [weekly, biweekly, monthly]
+  □ rebalance_interval: sweep [1, 3, 5, 10, 22]
   □ max_positions vs top_k 交叉网格
   □ stop_loss_pct: sweep [0.05, 0.08, 0.10, 0.12, 0.15]
 
@@ -475,4 +475,4 @@ R3 AH V2: ret=+45.1% shp=0.96 dd=-18.2% trades=86
 | **涨跌停跳过** | 涨停不买（`fill >= up_limit` → skip），跌停不卖（`fill <= down_limit` → skip） |
 | **price=None** | 自定义 handler 必须自行计算触发价，不依赖引擎 |
 | **条件买单日效** | T 日声明 T+1 盘中触发，未触发自动失效。不与 buy 名单冲突 |
-| **`on_tick` 每日运行** | 即使 schedule 拦截了 `select`，`on_tick` 和 `calc_conditions` 仍然每日执行 |
+| **`on_tick` 每日运行** | `on_tick` 和 `calc_conditions` 每日执行，不受策略调仓判断影响 |

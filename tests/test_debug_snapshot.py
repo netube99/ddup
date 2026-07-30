@@ -1,7 +1,6 @@
 """debug_snapshots 功能测试：debug 模式写入快照，非 debug 模式不写。"""
 
 import json
-import sqlite3
 
 from btcore.database import init_backtest_db, write_debug_snapshot
 from btcore.engine import Engine

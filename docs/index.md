@@ -28,7 +28,7 @@ research/        — 研究工具（纯函数 API，不依赖引擎）
 
 ### 声明式优先
 
-因子公式、条件单、风控阈值、调仓频率、数据位置均在 YAML 或配置 dict 中声明。仅买卖逻辑需以 Python 编写——这是策略的实质，无法声明化。
+因子公式、条件单、风控阈值、数据位置均在 YAML 或配置 dict 中声明。仅买卖逻辑需以 Python 编写——这是策略的实质，无法声明化。
 
 ### 鸭子类型能力开关
 
@@ -57,7 +57,6 @@ research/        — 研究工具（纯函数 API，不依赖引擎）
 | 过滤股票（ST/新股/板块/价格） | YAML `filter_rules` | [策略设计指南](./strategy_guide.md) |
 | 设置止损止盈条件单 | YAML `conditions` + ConditionBuilder | [策略设计指南](./strategy_guide.md) |
 | 设置组合风控（熔断/仓位/行业上限） | YAML `risk_rules` | [策略设计指南](./strategy_guide.md) |
-| 控制调仓频率 | YAML `schedule` | [策略设计指南](./strategy_guide.md) |
 | 配置费率与滑点 | YAML `config` 引擎键 | [策略设计指南](./strategy_guide.md) |
 | 条件买入（限价回踩/突破追涨） | select 返回 `buy_conditions` | [策略设计指南](./strategy_guide.md) |
 | 目标仓位精确调仓 | select 返回 `target_value` | [策略设计指南](./strategy_guide.md) |
@@ -86,7 +85,7 @@ research/        — 研究工具（纯函数 API，不依赖引擎）
 
 **第三步：编写策略**
 
-在 `strategies/` 下创建 YAML 与 Python 文件。从 `bare_bones` 示例开始，逐级叠加条件单、风控、调度。详见 [策略设计指南](./strategy_guide.md)。
+在 `strategies/` 下创建 YAML 与 Python 文件。从 `bare_bones` 示例开始，逐级叠加条件单、风控、自管理调仓。详见 [策略设计指南](./strategy_guide.md)。
 
 **第四步：回测迭代**
 

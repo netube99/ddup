@@ -4,7 +4,7 @@
 # 展示能力：
 #   - target_value 返回格式（引擎自动计算买卖差额，trigger="TARGET"）
 #   - sell_shares 部分减仓（近边缘持仓减半而非清仓）
-#   - schedule 周频调仓
+#   - 时间门控自管理调仓（select 每日运行，策略自行判断调仓日）
 #   - risk_rules 全系列 — 熔断 / 单票上限 / 行业上限
 #   - materialize_only 因子（仅物化不参与排名）
 #   - execution_price: "close"（收盘价成交）
@@ -56,11 +56,6 @@ risk_rules:
   max_position_pct: 0.10         # 单票买入金额 ≤ 总资产 10%
   max_industry_pct: 0.30         # 单行业总暴露 ≤ 总资产 30%（只在买入时把关）
 
-# ── 调仓调度 ─────────────────────────────────────────────────────────────
-schedule:
-  frequency: weekly              # 每周调仓一次
-  weekday: -1                    # 每周最后一个交易日
-
 # ── 策略配置 ─────────────────────────────────────────────────────────────
 config:
   max_positions: 15
@@ -68,3 +63,4 @@ config:
   execution_price: "close"       # 以次日收盘价成交（区别于默认 open）
   condition_slippage_ticks: 1   # 条件单独立滑点 0.01 元（默认沿用 slippage_ticks）
   benchmark: "000300.SH"         # 显式指定基准指数（默认从 index_universe 自动推导）
+  rebalance_interval: 5          # 调仓间隔（交易日数），≈ 每周

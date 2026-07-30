@@ -1,7 +1,7 @@
 """
 示例 2: target_allocator — 目标仓位精确管理。
 
-展示 target_value / sell_shares / schedule / risk_rules / materialize_only。
+展示 target_value / sell_shares / 时间门控自管理 / risk_rules / materialize_only。
 
 核心路径：过滤 → 打分 → 选 top_k → 按得分比例分配 target_value
   → 不在 top_k 的持仓 target=0（清仓）
@@ -17,8 +17,9 @@ from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_spec
 
 
 class TargetAllocator(Strategy):
-    """按多因子得分比例分配目标市值，每周调仓。
+    """按多因子得分比例分配目标市值，时间门控调仓。
 
+    select() 每日运行，策略代码自行管理调仓节奏。
     target_value 返回格式下引擎自动计算买卖差额：
       - 目标市值 > 当前市值 → 加仓（trigger="TARGET"）
       - 目标市值 < 当前市值 → 减持
@@ -33,6 +34,8 @@ class TargetAllocator(Strategy):
 
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
         self._top_k = int(self.config.get("top_k", 8))
+        self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
+        self._last_rebalance = 0
         self._filter = StockFilter(
             provider.backend, first_date, self.FILTER_RULES, end_date=end_date
         )
@@ -43,6 +46,16 @@ class TargetAllocator(Strategy):
             return {"buy": [], "sell": [], "target_value": {}}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
+        date_int = int(date_str) if date_str else 0
+
+        # ── 时间门控：非调仓日不操作 ───────────────────────────────────
+        # select 每日运行，策略代码自行判断是否调仓。
+        is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
+        if not is_rebalance_day:
+            return {"buy": [], "sell": [], "target_value": {}}
+
+        self._last_rebalance = date_int
+
         filtered = self._filter.filter(bars, date_str)
 
         df = bars_to_df(filtered)

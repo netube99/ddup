@@ -1,8 +1,8 @@
 """
-示例 5: self_managed_rank — 排名阈值 + 逐仓独立管理（无 schedule）。
+示例 5: self_managed_rank — 排名阈值 + 逐仓独立管理。
 
 展示能力：
-  - 无 schedule：每只持仓独立判断，无固定调仓日
+  - 策略代码自管理换手：每只持仓独立判断，无固定调仓日
   - 卖出条件：排名 > top_k × sell_rank_mult 且持有 ≥ min_hold_days
   - 买入条件：有空位就从排名前列补入
   - on_fills 记录入场日期 / on_tick 清理跟踪状态

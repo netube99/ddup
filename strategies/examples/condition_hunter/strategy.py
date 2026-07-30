@@ -18,7 +18,6 @@ from btcore.match.conditions import (
 from btcore.strategy import Strategy
 from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
 
-
 # ══════════════════════════════════════════════════════════════════════════
 # 自定义条件单 handler — 模块级函数，在 on_start 中注册（进程级全局）
 # ══════════════════════════════════════════════════════════════════════════
@@ -90,7 +89,7 @@ class ConditionHunter(Strategy):
         """每日维护 + 突破信号检测。
 
         如果当前有候选标的的价格突破前日 close 的 102%，提交 BREAKOUT_BUY。
-        这个路径不受 schedule 限制——非调仓日也会运行。
+        on_tick 每日运行，不受 select 中调仓判断影响。
         返回的 buy_conditions 会合并到 select() 返回的 buy_conditions 中。
         """
         # 修剪条件单状态

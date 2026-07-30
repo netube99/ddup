@@ -476,7 +476,7 @@ class Engine:
             trades=fills,
             total_value=self.account.total_value,
         )
-        # on_tick 是可选钩子：每日运行（绕过 schedule 包装器），在 select 之前更新策略内部状态
+        # on_tick 是可选钩子：每日运行，在 select 之前更新策略内部状态
         on_tick = getattr(self.strategy, "on_tick", None)
         on_tick_result = None
         if callable(on_tick):
@@ -484,7 +484,7 @@ class Engine:
 
         actions = self.strategy.select(bars_dict, snapshot, self.provider)
 
-        # 合并 on_tick 返回的 buy_conditions（不受 schedule 限制）
+        # 合并 on_tick 返回的 buy_conditions
         if on_tick_result is not None and on_tick_result.get("buy_conditions"):
             existing_conds = actions.setdefault("buy_conditions", [])
             existing_conds.extend(on_tick_result["buy_conditions"])

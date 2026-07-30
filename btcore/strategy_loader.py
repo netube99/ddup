@@ -12,7 +12,6 @@
   - factor_specs / filter_rules 经 __init__ 传为实例属性（不做类变量 mutation）
   - conditions / risk_rules 在 YAML 中是顶层键，合并进 config
     （程序化路径直接写入 config 即可）
-  - schedule 声明调仓频率（daily|weekly|monthly），由 strategy_tools 包装 select
 
 买卖/调仓逻辑不在本层——YAML 里的 strategy 键指向用户自己的 Strategy 子类。"""
 
@@ -26,7 +25,6 @@ import yaml
 from btcore.factors.library import load_library, resolve_closure, resolve_spec
 from btcore.risk import validate_risk_rules
 from btcore.strategy import Strategy
-from btcore.strategy_tools import parse_schedule, wrap_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,6 @@ def build_strategy(
     *,
     factor_specs: list[dict] | None = None,
     filter_rules: dict | None = None,
-    schedule: dict | None = None,
     factor_library: str | dict | None = None,
 ) -> Strategy:
     """用 Python dict 构造策略实例（无需 YAML 文件）。
@@ -57,7 +54,6 @@ def build_strategy(
         factor_specs: [{name, weight?, ascending?}]，名称引用 factor_library 里的因子。
             不传时使用类的 FACTOR_SPECS 默认值。
         filter_rules: {exclude_st?, min_price?, index_universe?, ...}。
-        schedule: {frequency, weekday?, monthday?}，不传则每日调仓。
         factor_library: 因子库文件路径或预加载的 dict；缺省用 factors/library.yaml。
 
     Returns:
@@ -84,9 +80,6 @@ def build_strategy(
         strategy.FACTOR_NODES = strategy_nodes
     _attach_index_universe(strategy, rules)
     _attach_factor_universe(strategy, rules)
-
-    if schedule is not None:
-        strategy = wrap_strategy(strategy, parse_schedule(schedule))
 
     return strategy
 
@@ -123,14 +116,11 @@ def load_strategy(path: str) -> Strategy:
     if risk_rules:
         config["risk_rules"] = validate_risk_rules(risk_rules)
 
-    schedule = doc.get("schedule")
-
     return build_strategy(
         cls,
         config,
         factor_specs=factor_specs,
         filter_rules=filter_rules,
-        schedule=schedule,
         factor_library=factor_library,
     )
 

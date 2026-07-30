@@ -80,7 +80,6 @@ def test_expand_params_dict_values():
 
 def test_dry_run_flag(tmp_path):
     """--dry-run 输出参数组合但不运行回测。"""
-    import tempfile
 
     # 创建临时 sweep config
     sweep_config = tmp_path / "sweep.yaml"

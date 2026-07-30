@@ -8,7 +8,7 @@
 #   - 交易域与因子计算域分离（index_universe + factor_universe）
 #   - get_universe / get_factor_universe 手动覆盖
 #   - 自定义条件单 handler（DYNAMIC_STOP / TIME_STOP）
-#   - schedule 调仓调度 + on_tick 每日状态推进
+#   - 时间门控调仓 + on_tick 每日状态推进
 #
 # 这是示例系列中最复杂的一级。请按顺序阅读：
 #   1. factors.yaml — 因子 DAG 定义
@@ -87,17 +87,13 @@ risk_rules:
   cooldown_days: 7
   max_position_pct: 0.10
 
-# ── 调仓调度 ─────────────────────────────────────────────────────────────
-schedule:
-  frequency: weekly
-  weekday: -1
-
 # ── 策略配置 ─────────────────────────────────────────────────────────────
 config:
   max_positions: 20
   top_k: 8
   cooldown_days: 3
   mode_confirm_days: 5         # 状态切换需连续确认的天数（自定义键）
+  rebalance_interval: 5         # 调仓间隔（交易日数）
   execution_price: "open"
   commission_rate: 0.0002
   stamp_tax_rate: 0.0005

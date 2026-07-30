@@ -287,7 +287,6 @@ class TestCollapseIntegrity:
 
     def test_validate_materialization_detects_nan(self, caplog):
         """NaN 占比超 5% 时 validate_materialization 返回 warning issue。"""
-        import logging
 
         syms = ["A", "B", "C"]
         dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")

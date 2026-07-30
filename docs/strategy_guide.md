@@ -96,7 +96,7 @@ on_start (一次)
 
 > `select` 和风控生成的是**下一交易日**将执行的买卖信号，当日不成交——这是 T+1 机制的源头。当日撮合的是前一日 `select` 输出的 pending_actions。
 
-`on_fills` 和 `on_tick` 是可选的。`on_tick` 每日运行（即使非调仓日 schedule 包装器拦截了 `select`）；`calc_conditions` 同样每日运行。
+`on_fills` 和 `on_tick` 是可选的。`on_tick` 每日运行；`calc_conditions` 同样每日运行。
 
 > **设计契约（策略作者须知）**
 >
@@ -236,7 +236,7 @@ class MyStrategy(Strategy):
 
 ### 3.6 `on_tick(self, bars, snapshot, provider)` → dict | None
 
-**可选 hook。** 每日调用——**即使非调仓日 schedule 包装器拦截了 `select`，`on_tick` 仍然运行**。在 `on_fills` 之后、`select` 之前调用。
+**可选 hook。** 每日调用——在 `on_fills` 之后、`select` 之前调用。
 
 典型用途：
 - 冷却期递减计数
@@ -307,7 +307,6 @@ REQUIRED_FIELDS: list[str] = ["open", "high", "low", "close", "vol", "adj_factor
 | `filter_rules` | 否 | `dict` | 股票过滤规则 |
 | `conditions` | 否 | `dict` | 声明式离场条件单 |
 | `risk_rules` | 否 | `dict` | 组合风控规则 |
-| `schedule` | 否 | `dict` | 调仓频率调度 |
 | `factor_library` | 否 | `str` | 自定义因子库路径，默认 `factors/library.yaml` |
 
 `conditions` 和 `risk_rules` 由 loader 合并入 `self.config["conditions"]` 和 `self.config["risk_rules"]`。
@@ -392,66 +391,15 @@ risk_rules:
 - `cooldown_days` 到期的下一天重置峰值，允许策略重新出发。出现 `max_drawdown` 时 `cooldown_days` 默认 1。
 - `max_industry_pct` 是"入场闸"而非"持续配平器"——只在买入时把关，持仓自然上涨超出上限不强制减仓。
 
-### 4.7 `schedule` — 调仓调度
+### 4.7 自管理调仓 — 策略代码控制换手节奏
 
-```yaml
-schedule:
-  frequency: weekly           # daily (默认) | weekly | biweekly | monthly
-  weekday: -1                 # 每周最后一个交易日（1 起，负数倒数）
-```
+`select()` 每日运行。调仓节奏完全由策略代码自行控制——策略在 `select()` 中判断今天是否调仓，非调仓日返回空名单即可。
 
-```yaml
-schedule:
-  frequency: biweekly
-  weekday: 1                  # 每两周第一个交易日
-```
+**自管理 vs 引擎拦截**：引擎不再提供声明式调仓调度。策略代码自主决定哪天买、哪天卖、哪天全部轮动、哪天只卖不买——这消除了"一刀切拦截 select"的硬限制，让策略可以实现非对称控制。
 
-```yaml
-schedule:
-  frequency: monthly
-  monthday: 1                 # 每月第一个交易日
-```
-
-- `frequency: daily` — 每个交易日调仓（缺省行为）
-- `frequency: weekly` / `biweekly` — `weekday` 指定周内第 N 个交易日。负数从周尾倒数，超出范围则该周不调仓
-- `frequency: monthly` — `monthday` 指定月内第 N 个交易日。负数同理
-- 非调仓日 `select()` 被包装器拦截返回空名单；`on_tick` 和 `calc_conditions` 不受影响
-
-#### 4.7.1 schedule vs 策略代码管理
-
-`schedule` 本质是引擎在 `on_start` 末尾用 `wrap_strategy` 包装 `select()`，非调仓日直接返回 `{"buy": [], "sell": []}`。它的优势是声明式——三行 YAML 说清楚节奏，日期计算逻辑由引擎统一验证，不会出现各策略各自实现"每月第一个非假日历日"的 bug。
-
-但它有两个硬限制：
-
-1. **一刀切**——非调仓日禁止一切买卖，即使某只持仓当日暴跌 9% 也不能在 `select` 里主动卖出（条件单 `STOP_LOSS` 仍会触发，因为它走 `calc_conditions`）
-2. **只影响 `select`**——无法实现"非调仓日允许卖但不允许买"或"调仓日也只调整部分持仓"这类精细化控制
-
-如果策略需要以下能力，应该**关闭 schedule 并在策略代码中自行管理换手**：
-
-| 需求 | schedule 能做到吗 |
-|------|------------------|
-| 固定频率调仓 | ✓ |
-| 非调仓日只卖不买（止损/减仓） | ✗ — `select` 被完全拦截 |
-| 非调仓日条件买入（突破追涨） | △ — 只能通过 `on_tick` 返回 `buy_conditions`，路线曲折 |
-| 持仓异常波动即时卖出 | ✗ |
-| 每只持仓独立跟踪，各自判断 | ✗ |
-| 市场广度差时跳过本次调仓 | ✗ |
-| 调仓日也只换 1-2 只（非全部轮动） | ✗ |
-
-**推荐原则**：
-
-- **简单轮动策略**用 `schedule`——三行 YAML 省代码，且规则可视化利于审查。示例中 `target_allocator`、`multi_model` 均使用此模式
-- **需要非对称或条件化调仓的策略**关闭 `schedule`，在 `select()` 中自行判断。现有参考实现：
-  - `self_managed_time`（`strategies/examples/self_managed_time/`）——时间门控 + 非对称买卖，调仓日完整轮动、非调仓日只卖不买
-  - `self_managed_rank`（`strategies/examples/self_managed_rank/`）——排名阈值 + 逐仓独立，换手频率由排名变化自然驱动
-
-  注意：`bare_bones` 和 `rolling_ranker` 虽无 schedule，但并未做自管理换手——它们只是省掉了 YAML 声明，`select()` 每日全量运行。不写 schedule 不等于自动获得精细化换手控制，需在代码中显式实现。
-
-关闭 schedule 后在策略代码中维护调仓节奏的典型模式：
+自管理调仓的典型模式——时间门控：
 
 ```python
-# YAML: 不写 schedule 键（或 schedule: {frequency: daily}）
-
 class MyStrategy(Strategy):
     def on_start(self, provider, first_date, end_date=None):
         # ... 其他初始化
@@ -477,7 +425,16 @@ class MyStrategy(Strategy):
         # ... 正常排名、选股、卖出逻辑
 ```
 
-关键差异：`select()` 每日运行，策略代码自主决定哪一天做什么——而非由引擎一刀切拦截。这让你可以实现"卖随时、买定时"这类 schedule 做不到的不对称逻辑。
+两种自管理模式：
+
+| 模式 | 参考实现 | 特点 |
+|------|----------|------|
+| 时间门控 | `self_managed_time`、`target_allocator`、`multi_model` | 固定间隔全量轮动，非调仓日可选紧急卖出 |
+| 排名阈值 | `self_managed_rank` | 每只持仓独立跟踪，排名跌出阈值才卖出，换手由价格变化自然驱动 |
+
+关键差异：`select()` 每日运行，策略代码自主决定哪一天做什么。这让策略可以实现"卖随时、买定时"、"调仓日也只换 1-2 只"、"市场广度差时跳过本次调仓"等精细化控制。
+
+注意：`bare_bones` 和 `rolling_ranker` 虽未做自管理换手——它们 `select()` 每日全量运行等同于 day trading。不实施自管理不等于自动获得精细化换手控制，需在代码中显式实现。
 
 ### 4.8 `factor_library`
 
@@ -640,9 +597,9 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 
 **`max_industry_pct` 裁剪**：买入时检查该股票所在行业的总暴露（持仓市值 + 新买单金额）是否超过上限。超出则丢弃该买单或缩减 target_value。卖出释放的行业余量不在当日回补。
 
-### 5.4 调度器机制
+### 5.4 调仓节奏
 
-`wrap_strategy` 在 `on_start` 末尾用 `provider.get_calendar()` 预计算调仓日集合。非调仓日的 `select` 被替换为返回 `{"buy": [], "sell": []}`。不影响 `on_tick` 和 `calc_conditions`。
+引擎不再提供声明式调仓调度。`select()` 每日运行，策略代码自行管理调仓节奏——在 `select()` 中判断今天是否调仓，非调仓日返回空名单即可。`on_tick` 和 `calc_conditions` 始终每日运行，不受策略内部调仓判断影响。详见 §4.7。
 
 ### 5.5 撮合与执行
 
@@ -763,7 +720,7 @@ conditions:
 
 **关键点**：
 - 三板斧：`StockFilter` 过滤 → `eval_factor_specs` 打分 → `ConditionBuilder` 条件单
-- 无 `on_fills`、无 `buy_weights`、无 `schedule`——每日调仓
+- 无 `on_fills`、无 `buy_weights`——每日调仓
 
 ### 6.2 Level 1：进阶轮动
 
@@ -827,15 +784,15 @@ class RollingRanker(Strategy):
 
 **关键点**：
 - `on_fills` 感知 `Trade.trigger` 区分冷却期强度（STOP_LOSS 冷却翻倍）
-- `on_tick` 每日递减冷却期——绕过 schedule 的拦截
+- `on_tick` 每日递减冷却期——不受 `select` 中调仓判断影响
 - `buy_weights` 按得分比例分配资金，总和 < 1 以保留现金缓冲
 - `calc_conditions` 中 `holding_days` 自适应调参——前 3 天紧止损、30 天后放宽
 
-### 6.2.1 岔路：取消 schedule，自管理换手
+### 6.2.1 岔路：自管理换手
 
 > 完整代码：`strategies/examples/self_managed_time/` · `strategies/examples/self_managed_rank/`
 
-Level 0-1 的策略都没有 `schedule` 声明，`select()` 每日全量运行。这在简单场景下可行，但换手率极高且缺乏精细化控制。两个新示例展示如何关闭 `schedule`，在策略代码中自行管理调仓节奏。详见 §4.7.1 中 schedule vs 策略代码管理的完整对比。
+Level 0-1 的策略 `select()` 每日全量运行。这在简单场景下可行，但换手率极高且缺乏精细化控制。两个示例展示如何在策略代码中自行管理调仓节奏，详见 §4.7。
 
 **模式 A：时间门控 + 非对称买卖**（`self_managed_time`）
 
@@ -860,7 +817,7 @@ class SelfManagedTime(Strategy):
         # ... 正常排名、选股
 ```
 
-**新增能力**：`schedule` 无法实现的非对称控制——买侧按固定间隔，卖侧随时可触发。
+**新增能力**：引擎声明式拦截无法实现的非对称控制——买侧按固定间隔，卖侧随时可触发。
 
 **模式 B：排名阈值 + 逐仓独立**（`self_managed_rank`）
 
@@ -887,7 +844,7 @@ class SelfManagedRank(Strategy):
         # 有空位就从排名前列补入——无固定调仓日
 ```
 
-**新增能力**：换手频率由排名变化速度自然决定，而非固定日历。每只持仓独立跟踪入场日期，各自判断去留——这是 `schedule` 声明式的一刀切模型做不到的。
+**新增能力**：换手频率由排名变化速度自然决定，而非固定日历。每只持仓独立跟踪入场日期，各自判断去留——这是声明式一刀切模型做不到的。
 
 | 对比维度 | 时间门控模式 | 排名阈值模式 |
 |----------|------------|------------|
@@ -900,7 +857,7 @@ class SelfManagedRank(Strategy):
 
 > 完整代码：`strategies/examples/target_allocator/`
 
-**新增能力**：`target_value` 精确仓位管理 + `risk_rules` 组合风控 + `schedule` 周频调仓 + `sell_shares` 部分减仓。
+**新增能力**：`target_value` 精确仓位管理 + `risk_rules` 组合风控 + 时间门控自管理调仓 + `sell_shares` 部分减仓。
 
 **strategy.py** 关键部分：
 
@@ -941,21 +898,19 @@ class TargetAllocator(Strategy):
 **config.yaml**：
 
 ```yaml
-schedule:
-  frequency: weekly
-  weekday: -1
 risk_rules:
   max_drawdown: 0.12
   cooldown_days: 5
   max_position_pct: 0.10
 config:
   execution_price: "close"
+  rebalance_interval: 5
 ```
 
 **关键点**：
 - `target_value` 返回格式——引擎自动计算买卖差额，trigger = `"TARGET"`
 - `sell_shares` 用于近边缘持仓的部分保留（降低换手率）
-- `schedule: weekly` 降低调仓频率
+- `rebalance_interval` 时间门控自管理调仓
 - `risk_rules` 提供熔断 + 单票上限
 - `execution_price: "close"` 以收盘价成交
 
@@ -1056,9 +1011,6 @@ conditions:
 
 ```yaml
 factor_library: factors.yaml    # 同目录自定义因子库
-schedule:
-  frequency: weekly
-  weekday: -1
 factor_specs:                   # 11 个因子（含坍缩算子构建的市场广度因子）
   - factor: mom20_z
     weight: 0.15
@@ -1191,7 +1143,7 @@ class MultiModel(Strategy):
 - 坍缩算子（`mean`）在 `on_tick` 中检测全市场广度，驱动市场状态机——策略利用了引擎的"两路面板供给"机制（广度面板自动聚合后广播回主面板）
 - 3 套因子规格独立打分后用加权平均合成，权重随市场态动态切换
 - `on_fills` 中加权均价更新——正确处理加仓场景
-- `on_tick` 不受 schedule 拦截——市场状态检测每日运行，但 `select` 只在周末调仓
+- `on_tick` 每日运行——市场状态检测每日运行，`select` 按时间门控在调仓日执行多模型投票
 - 4 层条件单：内置三件套 + 2 种自定义，构成完整离场系统
 
 ---
@@ -1239,7 +1191,7 @@ factors:
     description: "行业平均动量（map 回个股）"
 ```
 
-策略在 `on_tick` 中用 `eval_factor_specs` 读取这些因子，驱动市场状态判断。`on_tick` 每日运行使状态检测不受 schedule 限制。
+策略在 `on_tick` 中用 `eval_factor_specs` 读取这些因子，驱动市场状态判断。`on_tick` 每日运行使状态检测不受 `select` 调仓节奏限制。
 
 ### 7.3 冷却期管理
 
@@ -1427,7 +1379,7 @@ Engine 构造时传入 `debug=True`，引擎每日写入一条 `debug_snapshots`
 ### 10.2 YAML 全部键一览
 
 ```
-顶层: name, strategy*, config, factor_specs, filter_rules, conditions, risk_rules, schedule, factor_library
+顶层: name, strategy*, config, factor_specs, filter_rules, conditions, risk_rules, factor_library
 config: initial_capital, max_positions, slippage_ticks, condition_slippage_ticks,
         execution_price, commission_rate, min_commission, stamp_tax_rate,
         transfer_fee_rate, benchmark, quiet_skips, order_volume_ratio
@@ -1436,7 +1388,6 @@ filter_rules: exclude_st, exclude_new_stock, exclude_loss, exclude_boards,
               exclude_industries, min_price, index_universe, factor_universe
 conditions: stop_loss_pct, take_profit_pct, trailing_pct
 risk_rules: max_drawdown, cooldown_days, max_position_pct, max_industry_pct
-schedule: frequency, weekday, monthday
 ```
 
 ### 10.3 条件单类型一览
@@ -1576,9 +1527,9 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 |------|------|---------------|
 | bare_bones | `strategies/examples/bare_bones/` | 最简骨架：StockFilter + eval + ConditionBuilder |
 | rolling_ranker | `strategies/examples/rolling_ranker/` | on_fills + on_tick + buy_weights + 动态参数 |
-| self_managed_time | `strategies/examples/self_managed_time/` | 无 schedule：时间门控 + 非对称买卖 |
-| self_managed_rank | `strategies/examples/self_managed_rank/` | 无 schedule：排名阈值 + 逐仓独立管理 |
-| target_allocator | `strategies/examples/target_allocator/` | target_value + risk_rules + schedule + sell_shares |
+| self_managed_time | `strategies/examples/self_managed_time/` | 时间门控 + 非对称买卖 |
+| self_managed_rank | `strategies/examples/self_managed_rank/` | 排名阈值 + 逐仓独立管理 |
+| target_allocator | `strategies/examples/target_allocator/` | target_value + risk_rules + 时间门控 + sell_shares |
 | condition_hunter | `strategies/examples/condition_hunter/` | buy_conditions + 自定义 handler |
 | multi_model | `strategies/examples/multi_model/` | 全部能力：状态机 + 多模型 + 坍缩因子 + 精确跟踪 |
 

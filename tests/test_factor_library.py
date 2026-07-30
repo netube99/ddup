@@ -137,7 +137,9 @@ class TestCompute:
 class TestResolve:
     def test_resolve_spec(self):
         spec = resolve_spec({"factor": "mom20", "weight": 2.0, "ascending": True})
-        assert spec == {"name": "mom20", "weight": 2.0, "ascending": True, "materialize_only": False}
+        assert spec == {
+            "name": "mom20", "weight": 2.0, "ascending": True, "materialize_only": False
+        }
 
     def test_resolve_spec_rejects_inline_expr(self):
         with pytest.raises(ValueError, match="library.yaml"):

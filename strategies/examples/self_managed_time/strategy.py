@@ -1,9 +1,9 @@
 """
-示例 6: self_managed_time — 时间门控 + 非对称买卖（无 schedule）。
+示例 6: self_managed_time — 时间门控 + 非对称买卖。
 
 展示能力：
-  - 无 schedule：代码自管理调仓间隔
-  - 非调仓日只卖不买（schedule 做不到的非对称控制）
+  - 策略代码自管理调仓间隔
+  - 非调仓日只卖不买（非对称控制）
   - on_fills 成交感知 → 条件单卖出后冷却
   - on_tick 每日状态维护
 
@@ -20,7 +20,7 @@ from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_spec
 class SelfManagedTime(Strategy):
     """时间门控换手：调仓日全量轮动，非调仓日只卖不买。
 
-    schedule 做不到这一点——它一刀切拦截全部 select，
+    声明式一刀切拦截 select 会让买和卖都为空——
     而非调仓日本策略仍然允许紧急卖出。
     """
 
@@ -79,7 +79,6 @@ class SelfManagedTime(Strategy):
         is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
 
         # ── 非调仓日：只检测紧急卖出，不新买 ────────────────────────────
-        # schedule 做不到这一点——它会一刀切拦截 select 让买和卖都为空。
         # 本策略主动控制：卖随时可触发，买只在固定间隔。
         if not is_rebalance_day:
             emergency_sells = []

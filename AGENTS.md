@@ -121,9 +121,9 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 
 **先定多久做一次判断，再选数据粒度。** 决策频率和数据粗细是两层。
 
-- ddup 映射：`schedule` 键 — `daily / weekly / biweekly / monthly`
-- 缺省每日调仓，但应显式声明 `schedule` 作为策略设计的第一个决策点
-- 非调仓日 `select()` 被 `wrap_strategy` 拦截返回空名单，`calc_conditions` 不受影响
+策略在 `select()` 中自行管理调仓节奏（时间门控、排名阈值等模式），而非依赖引擎声明式拦截。`select()` 每日运行，非调仓日返回空名单即可；`calc_conditions` 同样每日运行，不受策略内部调仓判断影响。
+
+参见 `strategies/examples/self_managed_time/`、`self_managed_rank/` 的自管理模式参考实现。
 
 ### 2. 入场条件 — 过滤 + 触发两层
 
@@ -185,7 +185,6 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 填表法后端 | `btcore/generic_sql.py` | `docs/backend_guide.md` |
 | 条件单 dispatch 与自定义注册 | `btcore/match/conditions.py` | `docs/strategy_guide.md` |
 | 组合风控（熔断/仓位/行业上限） | `btcore/risk.py` | `docs/strategy_guide.md` |
-| 调仓调度 | `btcore/strategy_tools.py:wrap_strategy` | `docs/strategy_guide.md` |
 | 滑点模型（tick=0.01） | `btcore/slippage.py` | `docs/strategy_guide.md` |
 | 成本函数（可配置费率） | `btcore/costs.py` | `docs/strategy_guide.md` |
 | 多 run 结果库 schema | `btcore/database.py` | `docs/strategy_guide.md` |
@@ -205,7 +204,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 407 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
+- 398 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、风控规则、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
   统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、

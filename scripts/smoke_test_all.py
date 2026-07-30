@@ -92,10 +92,9 @@ factor_specs:
 # ─── 1.2 on_tick buy_conditions ───
 
 def test_on_tick_buy_conditions():
-    """验证 on_tick 返回的 buy_conditions 在非调仓日被引擎执行。"""
+    """验证 on_tick 返回的 buy_conditions 被引擎每日执行。"""
     from btcore.engine import Engine
     from btcore.strategy import Strategy
-    from btcore.strategy_tools import parse_schedule, wrap_strategy
     from tests.conftest import MockDataBackend
 
     class OnTickTestStrategy(Strategy):
@@ -128,7 +127,6 @@ def test_on_tick_buy_conditions():
 
     backend = MockDataBackend()
     strategy = OnTickTestStrategy(config={"max_positions": 5, "initial_capital": 100000})
-    strategy = wrap_strategy(strategy, parse_schedule({"frequency": "monthly", "monthday": 1}))
     provider = DataProvider(backend)
     provider.benchmark = "000300.SH"
     engine = Engine(

@@ -8,7 +8,7 @@
   - calc_conditions holding_days 自适应 — 新仓紧止损，老仓放宽
   - REQUIRED_FIELDS — 声明策略命令式访问的额外列
 
-下一级 target_allocator 展示 target_value / schedule / risk_rules。
+下一级 target_allocator 展示 target_value / 时间门控自管理 / risk_rules。
 """
 
 from btcore.filters import StockFilter
@@ -57,7 +57,7 @@ class RollingRanker(Strategy):
 
     # ── on_tick: 每日状态维护 ─────────────────────────────────────────────
     def on_tick(self, bars, snapshot, provider) -> None:
-        """每日运行——即使 schedule 包装器拦截了 select，on_tick 也不受影响。
+        """每日运行——策略即使在 select 中自行管理调仓节奏，on_tick 也不受影响。
 
         维护项：
           1. 冷却期到期清理

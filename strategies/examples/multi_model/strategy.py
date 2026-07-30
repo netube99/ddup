@@ -7,18 +7,17 @@
   - 自定义因子库 factor_library
   - 域分离（index_universe / factor_universe + 手动 get_universe 覆盖）
   - 自定义条件单 handler（DYNAMIC_STOP / TIME_STOP）
-  - schedule 调仓 + on_tick 每日状态推进
+  - 时间门控调仓 + on_tick 每日状态推进
   - REQUIRED_FIELDS 声明非因子列
   - materialize_only 因子在 calc_conditions 中使用
 
-下一级 self_managed_rank / self_managed_time 展示无 schedule 的自管理模式。
+下一级 self_managed_rank / self_managed_time 展示自管理换手的两种模式。
 """
 
 from btcore.filters import StockFilter
 from btcore.match.conditions import register_condition_handler
 from btcore.strategy import Strategy
 from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # 自定义条件单 handler
@@ -48,11 +47,14 @@ def _time_stop(holding, cond, bar):
 # ══════════════════════════════════════════════════════════════════════════
 
 class MultiModel(Strategy):
-    """多模型投票 + 市场状态机。
+    """多模型投票 + 市场状态机，时间门控调仓。
 
     三套子模型（动量 / 反转 / 质量）各自对候选池打分，
     最终得分 = 各模型得分 × 市场状态权重 的加权和。
     市场状态由广度指标决定，连续 N 日确认后切换。
+
+    select() 每日运行，策略代码自行管理调仓节奏：
+    on_tick 每日更新状态机，select 在调仓日执行多模型加权投票。
 
     域分离：交易限于沪深300，因子计算域扩展到中证800——
     截面排名和坍缩聚合有更宽的参照池。
@@ -87,8 +89,8 @@ class MultiModel(Strategy):
         """
         if not hasattr(provider.backend, "get_index_members"):
             return None  # 后端不支持 → 全市场
-        from datetime import timedelta
         from datetime import date as dt_date
+        from datetime import timedelta
         lookback = (dt_date.fromisoformat(start) - timedelta(days=45)).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(["000300.SH"], lookback, end)
         if not snapshots:
@@ -105,8 +107,8 @@ class MultiModel(Strategy):
         """
         if not hasattr(provider.backend, "get_index_members"):
             return None
-        from datetime import timedelta
         from datetime import date as dt_date
+        from datetime import timedelta
         lookback = (dt_date.fromisoformat(start) - timedelta(days=45)).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(["000906.SH"], lookback, end)
         if not snapshots:
@@ -122,6 +124,8 @@ class MultiModel(Strategy):
         self._top_k = int(self.config.get("top_k", 8))
         self._cooldown_days = int(self.config.get("cooldown_days", 3))
         self._confirm_days = int(self.config.get("mode_confirm_days", 5))
+        self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
+        self._last_rebalance = 0
 
         self._filter = StockFilter(
             provider.backend, first_date, self.FILTER_RULES, end_date=end_date
@@ -216,12 +220,22 @@ class MultiModel(Strategy):
         # 修剪条件单状态
         self._cond.prune(set(snapshot.holdings.keys()))
 
-    # ── select: 多模型加权投票 ──────────────────────────────────────────
+    # ── select: 多模型加权投票（时间门控） ──────────────────────────────
     def select(self, bars, account_snapshot, provider) -> dict:
         if not bars:
             return {"buy": [], "sell": []}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
+        date_int = int(date_str) if date_str else 0
+
+        # ── 时间门控：非调仓日不操作 ───────────────────────────────────
+        # 状态机在 on_tick 中每日更新，不受调仓节奏影响。
+        is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
+        if not is_rebalance_day:
+            return {"buy": [], "sell": []}
+
+        self._last_rebalance = date_int
+
         filtered = self._filter.filter(bars, date_str)
         df = bars_to_df(filtered)
 

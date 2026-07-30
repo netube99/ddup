@@ -83,10 +83,11 @@ class Strategy(ABC):
         """
 
     def on_tick(self, bars, snapshot, provider) -> dict | None:
-        """可选钩子：每日调用（无论是否调仓日），用于维护策略内部状态。
+        """可选钩子：每日调用，用于维护策略内部状态。
 
-        引擎在 on_fills 之后、select 之前调用。schedule 包装器不会拦截此钩子
-        ——即使非调仓日 select 被跳过，on_tick 仍每日运行。策略可在此更新：
+        引擎在 on_fills 之后、select 之前调用。on_tick 每日运行
+        ——即使策略在 select 中自行管理调仓节奏，on_tick 仍每日运行。
+        策略可在此更新：
           - 冷却期递减
           - 市场状态机推进
           - 持仓逐仓最高价跟踪
