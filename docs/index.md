@@ -86,7 +86,7 @@ research/        — 研究工具（纯函数 API，不依赖引擎）
 
 **第三步：编写策略**
 
-在 `strategies/` 下创建 YAML 与 Python 文件。从 `simple_rotation` 示例开始，逐级叠加条件单、风控、调度。详见 [策略设计指南](./strategy_guide.md)。
+在 `strategies/` 下创建 YAML 与 Python 文件。从 `bare_bones` 示例开始，逐级叠加条件单、风控、调度。详见 [策略设计指南](./strategy_guide.md)。
 
 **第四步：回测迭代**
 

@@ -10,9 +10,9 @@ import pandas as pd
 from btcore.factors.library import resolve_spec
 from btcore.strategy_loader import build_strategy, load_strategy
 from btcore.strategy_tools import eval_factor_specs
-from strategies.examples.topk_momentum import TopKMomentum
+from strategies.examples.rolling_ranker import RollingRanker
 
-EXAMPLE_YAML = "strategies/examples/topk_momentum/config.yaml"
+EXAMPLE_YAML = "strategies/examples/rolling_ranker/config.yaml"
 
 
 def _write(tmp_path, body: str) -> str:
@@ -23,7 +23,7 @@ def _write(tmp_path, body: str) -> str:
 
 def test_load_example_yaml():
     strategy = load_strategy(EXAMPLE_YAML)
-    assert isinstance(strategy, TopKMomentum)
+    assert isinstance(strategy, RollingRanker)
     assert strategy.config["top_k"] == 5
     assert strategy.config["conditions"]["stop_loss_pct"] == 0.06
     assert len(strategy.FACTOR_SPECS) == 2
@@ -44,10 +44,10 @@ def test_factor_specs_resolved_from_library():
 def test_specs_and_rules_are_instance_attrs():
     """FACTOR_SPECS / FILTER_RULES 必须经 __init__ 注入实例，不污染类变量。"""
     s1 = load_strategy(EXAMPLE_YAML)
-    s2 = TopKMomentum(config={})
+    s2 = RollingRanker(config={})
     assert s1.FACTOR_SPECS != s2.FACTOR_SPECS
     assert s2.FACTOR_SPECS == []
-    assert TopKMomentum.FILTER_RULES == {}
+    assert RollingRanker.FILTER_RULES == {}
 
 
 def test_missing_strategy_key(tmp_path):
@@ -71,7 +71,7 @@ def test_not_a_strategy_subclass(tmp_path):
 def test_inline_expr_rejected(tmp_path):
     """factor_specs 只允许引用因子库名字，直写 expr 报错。"""
     path = _write(tmp_path, """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 factor_specs:
   - name: bad
     expr: "close_hfq"
@@ -82,7 +82,7 @@ factor_specs:
 
 def test_unknown_factor_name(tmp_path):
     path = _write(tmp_path, """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 factor_specs:
   - factor: nope
 """)
@@ -97,7 +97,7 @@ def test_custom_factor_library(tmp_path):
         encoding="utf-8",
     )
     path = _write(tmp_path, """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 factor_library: my_lib.yaml
 factor_specs:
   - factor: my_factor
@@ -112,7 +112,7 @@ factor_specs:
 
 def test_unknown_condition_key(tmp_path):
     path = _write(tmp_path, """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 conditions:
   martingale_pct: 0.5
 """)
@@ -122,7 +122,7 @@ conditions:
 
 def test_condition_out_of_range(tmp_path):
     path = _write(tmp_path, """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 conditions:
   stop_loss_pct: 1.5
 """)
@@ -130,7 +130,7 @@ conditions:
         load_strategy(path)
 
 
-class _OwnUniverseStrategy(TopKMomentum):
+class _OwnUniverseStrategy(RollingRanker):
     """自定义 get_universe 的策略：loader 不应覆盖。"""
 
     def get_universe(self, provider, start, end):
@@ -145,7 +145,7 @@ def _stub_provider(snapshots):
 
 
 _INDEX_YAML = """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 filter_rules:
   index_universe: ["000300.SH", "000905.SH"]
 """
@@ -168,7 +168,7 @@ class TestIndexUniverseLoading:
 
     def test_own_get_universe_not_overridden(self, tmp_path):
         path = _write(tmp_path, _INDEX_YAML.replace(
-            "strategies.examples.topk_momentum:TopKMomentum",
+            "strategies.examples.rolling_ranker:RollingRanker",
             "tests.test_strategy_loader:_OwnUniverseStrategy",
         ))
         strategy = load_strategy(path)
@@ -196,8 +196,8 @@ class TestIndexUniverseLoading:
 class TestBuildStrategy:
     def test_minimal(self):
         """仅 cls + config，无 factor/filter/schedule。"""
-        strategy = build_strategy(TopKMomentum, config={"top_k": 3})
-        assert isinstance(strategy, TopKMomentum)
+        strategy = build_strategy(RollingRanker, config={"top_k": 3})
+        assert isinstance(strategy, RollingRanker)
         assert strategy.config["top_k"] == 3
         assert strategy.FACTOR_SPECS == []
         assert strategy.FACTOR_NODES is None
@@ -206,7 +206,7 @@ class TestBuildStrategy:
     def test_full(self):
         """含 factor_specs / filter_rules / schedule。"""
         strategy = build_strategy(
-            TopKMomentum,
+            RollingRanker,
             config={"initial_capital": 500000, "top_k": 5,
                     "conditions": {"stop_loss_pct": 0.05}},
             factor_specs=[
@@ -230,7 +230,7 @@ class TestBuildStrategy:
         """使用自定义因子库 dict。"""
         lib = {"my_factor": {"expr": "close_hfq / pre_close", "ascending": True}}
         strategy = build_strategy(
-            TopKMomentum,
+            RollingRanker,
             config={},
             factor_specs=[{"name": "my_factor", "weight": 2.0}],
             factor_library=lib,
@@ -244,7 +244,7 @@ class TestBuildStrategy:
         """factor_specs 引用不存在的因子应报错。"""
         with pytest.raises(ValueError, match="未知因子"):
             build_strategy(
-                TopKMomentum,
+                RollingRanker,
                 config={},
                 factor_specs=[{"name": "nope"}],
             )
@@ -252,20 +252,20 @@ class TestBuildStrategy:
     def test_specs_are_instance_attrs(self):
         """不污染类变量（与 YAML 路径等价）。"""
         s1 = build_strategy(
-            TopKMomentum,
+            RollingRanker,
             config={},
             factor_specs=[{"name": "mom20", "weight": 1.0}],
         )
-        s2 = TopKMomentum(config={})
+        s2 = RollingRanker(config={})
         assert s1.FACTOR_SPECS != s2.FACTOR_SPECS
         assert s2.FACTOR_SPECS == []
-        assert TopKMomentum.FILTER_RULES == {}
+        assert RollingRanker.FILTER_RULES == {}
 
     def test_equivalent_to_yaml(self):
         """build_strategy 与 load_strategy 构造的策略在关键属性上等价。"""
         from_yaml = load_strategy(EXAMPLE_YAML)
         from_dict = build_strategy(
-            TopKMomentum,
+            RollingRanker,
             config={
                 "initial_capital": 1000000, "max_positions": 10, "top_k": 5,
                 "cooldown_days": 3, "commission_rate": 0.0002,
@@ -308,13 +308,13 @@ class TestBuildStrategy:
 
 
 _FACTOR_UNIVERSE_YAML = """\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 filter_rules:
   factor_universe: ["000300.SH", "000905.SH"]
 """
 
 
-class _OwnFactorUniverseStrategy(TopKMomentum):
+class _OwnFactorUniverseStrategy(RollingRanker):
     """自定义 get_factor_universe 的策略：loader 不应覆盖。"""
 
     def get_factor_universe(self, provider, start, end):
@@ -338,7 +338,7 @@ class TestFactorUniverseLoading:
 
     def test_own_get_factor_universe_not_overridden(self, tmp_path):
         path = _write(tmp_path, _FACTOR_UNIVERSE_YAML.replace(
-            "strategies.examples.topk_momentum:TopKMomentum",
+            "strategies.examples.rolling_ranker:RollingRanker",
             "tests.test_strategy_loader:_OwnFactorUniverseStrategy",
         ))
         strategy = load_strategy(path)
@@ -370,7 +370,7 @@ class TestBuildStrategyFactorUniverse:
     def test_build_strategy_with_factor_universe(self):
         """filter_rules 含 factor_universe 时正确挂接 get_factor_universe。"""
         strategy = build_strategy(
-            TopKMomentum,
+            RollingRanker,
             config={},
             filter_rules={"factor_universe": ["000300.SH"]},
         )
@@ -381,7 +381,7 @@ class TestBuildStrategyFactorUniverse:
 
     def test_build_strategy_factor_universe_absent(self):
         """未传 factor_universe → get_factor_universe 为 None。"""
-        strategy = build_strategy(TopKMomentum, config={})
+        strategy = build_strategy(RollingRanker, config={})
         assert strategy.get_factor_universe(
             _stub_provider({}), "20240603", "20240630") is None
 

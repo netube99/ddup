@@ -19,7 +19,7 @@ from adapters.tushare import TushareBackend
 from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
-from strategies.examples.topk_momentum import TopKMomentum
+from strategies.examples.rolling_ranker import RollingRanker
 
 INDEX_CODES = ["000300.SH", "000905.SH", "000852.SH"]  # 沪深300 / 中证500 / 中证1000
 
@@ -46,7 +46,7 @@ def bench_load(backend: TushareBackend, symbols: list[str] | None, start: str, e
     return len(df), df.index.get_level_values("symbol").nunique(), elapsed, mem_mb
 
 
-class TopKMomentumCropped(TopKMomentum):
+class RollingRankerCropped(RollingRanker):
     """仅覆盖 get_universe：preload 裁剪到指数成分并集。"""
 
     def get_universe(self, provider, start: str, end: str) -> list[str]:
@@ -56,7 +56,7 @@ class TopKMomentumCropped(TopKMomentum):
 def bench_engine(yaml_path: str, start: str, end: str, cropped: bool) -> float:
     strategy = load_strategy(yaml_path)
     if cropped:
-        strategy.__class__ = TopKMomentumCropped
+        strategy.__class__ = RollingRankerCropped
     provider = DataProvider(TushareBackend())
     try:
         engine = Engine(strategy, provider, db_path=None)
@@ -69,7 +69,7 @@ def bench_engine(yaml_path: str, start: str, end: str, cropped: bool) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--yaml", default="strategies/examples/topk_momentum/config.yaml")
+    parser.add_argument("--yaml", default="strategies/examples/rolling_ranker/config.yaml")
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--skip-load", action="store_true", help="跳过加载层基准")

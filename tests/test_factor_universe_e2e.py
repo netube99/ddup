@@ -10,7 +10,7 @@
 from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy_loader import build_strategy
-from strategies.examples.topk_momentum import TopKMomentum
+from strategies.examples.rolling_ranker import RollingRanker
 from tests.conftest import MockDataBackend
 
 START, END = "20240603", "20240607"
@@ -36,7 +36,7 @@ def test_factor_computed_on_wide_traded_on_narrow():
     provider = _wrap_backend_with_index_members(backend, snapshots)
 
     strategy = build_strategy(
-        TopKMomentum,
+        RollingRanker,
         config={"initial_capital": 500000, "top_k": 1},
         factor_specs=[
             {"name": "mom20", "weight": 1.0, "ascending": False},
@@ -62,7 +62,7 @@ def test_no_factor_universe_unchanged():
     provider = DataProvider(backend)
 
     strategy = build_strategy(
-        TopKMomentum,
+        RollingRanker,
         config={"initial_capital": 500000, "top_k": 1},
         factor_specs=[
             {"name": "mom20", "weight": 1.0, "ascending": False},
@@ -86,7 +86,7 @@ def test_factor_universe_crop_empty_raises():
     provider = _wrap_backend_with_index_members(backend, snapshots)
 
     strategy = build_strategy(
-        TopKMomentum,
+        RollingRanker,
         config={"top_k": 1},
         filter_rules={"factor_universe": ["000300.SH"]},
     )

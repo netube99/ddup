@@ -48,7 +48,7 @@ def test_materialize_only():
     from btcore.strategy_loader import load_strategy
 
     config_yaml = """
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 config:
   initial_capital: 100000
   top_k: 5
@@ -162,7 +162,7 @@ def test_collapse_warnings():
     report("2.1 坍缩因子检测", True, f"使用: {factor_name}")
 
     config_yaml = f"""
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 config:
   initial_capital: 100000
   top_k: 5
@@ -494,7 +494,7 @@ def test_sweep():
     """dry-run 模式验证参数扫描。"""
     with tempfile.TemporaryDirectory() as tmpdir:
         sweep_config = {
-            "base": "strategies/examples/topk_momentum/config.yaml",
+            "base": "strategies/examples/rolling_ranker/config.yaml",
             "params": {
                 "max_positions": [3, 5],
                 "top_k": [3, 5],

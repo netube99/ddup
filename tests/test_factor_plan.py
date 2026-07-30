@@ -174,7 +174,7 @@ class TestEngineE2E:
     def _run(self, tmp_path, factor: str) -> Engine:
         yaml_path = tmp_path / "s.yaml"
         yaml_path.write_text(f"""\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 config:
   top_k: 3
   max_positions: 3
@@ -214,7 +214,7 @@ factor_specs:
         )
         yaml_path = tmp_path / "s.yaml"
         yaml_path.write_text("""\
-strategy: strategies.examples.topk_momentum:TopKMomentum
+strategy: strategies.examples.rolling_ranker:RollingRanker
 factor_library: lib.yaml
 config:
   top_k: 3

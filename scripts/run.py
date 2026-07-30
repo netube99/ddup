@@ -1,7 +1,7 @@
 """单策略回测 CLI。
 
 用法:
-    python scripts/run.py strategies/examples/topk_momentum.yaml \
+    python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
         --start 20240101 --end 20240630 [--capital N] [--out result.db] \
         [--report report.html]
 

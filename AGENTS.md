@@ -25,7 +25,7 @@ ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/
 python scripts/check_anticorrupt.py
 
 # 运行 YAML 策略回测（需要真实数据库）
-python scripts/run.py strategies/examples/topk_momentum/config.yaml --start 20240603 --end 20240628
+python scripts/run.py strategies/examples/rolling_ranker/config.yaml --start 20240603 --end 20240628
 
 # 从结果库生成单 run HTML 报告 / 多 run 对比
 python scripts/report.py result.db --out report.html

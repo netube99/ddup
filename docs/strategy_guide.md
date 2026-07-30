@@ -417,6 +417,68 @@ schedule:
 - `frequency: monthly` — `monthday` 指定月内第 N 个交易日。负数同理
 - 非调仓日 `select()` 被包装器拦截返回空名单；`on_tick` 和 `calc_conditions` 不受影响
 
+#### 4.7.1 schedule vs 策略代码管理
+
+`schedule` 本质是引擎在 `on_start` 末尾用 `wrap_strategy` 包装 `select()`，非调仓日直接返回 `{"buy": [], "sell": []}`。它的优势是声明式——三行 YAML 说清楚节奏，日期计算逻辑由引擎统一验证，不会出现各策略各自实现"每月第一个非假日历日"的 bug。
+
+但它有两个硬限制：
+
+1. **一刀切**——非调仓日禁止一切买卖，即使某只持仓当日暴跌 9% 也不能在 `select` 里主动卖出（条件单 `STOP_LOSS` 仍会触发，因为它走 `calc_conditions`）
+2. **只影响 `select`**——无法实现"非调仓日允许卖但不允许买"或"调仓日也只调整部分持仓"这类精细化控制
+
+如果策略需要以下能力，应该**关闭 schedule 并在策略代码中自行管理换手**：
+
+| 需求 | schedule 能做到吗 |
+|------|------------------|
+| 固定频率调仓 | ✓ |
+| 非调仓日只卖不买（止损/减仓） | ✗ — `select` 被完全拦截 |
+| 非调仓日条件买入（突破追涨） | △ — 只能通过 `on_tick` 返回 `buy_conditions`，路线曲折 |
+| 持仓异常波动即时卖出 | ✗ |
+| 每只持仓独立跟踪，各自判断 | ✗ |
+| 市场广度差时跳过本次调仓 | ✗ |
+| 调仓日也只换 1-2 只（非全部轮动） | ✗ |
+
+**推荐原则**：
+
+- **简单轮动策略**用 `schedule`——三行 YAML 省代码，且规则可视化利于审查。示例中 `target_allocator`、`multi_model` 均使用此模式
+- **需要非对称或条件化调仓的策略**关闭 `schedule`，在 `select()` 中自行判断。现有参考实现：
+  - `self_managed_time`（`strategies/examples/self_managed_time/`）——时间门控 + 非对称买卖，调仓日完整轮动、非调仓日只卖不买
+  - `self_managed_rank`（`strategies/examples/self_managed_rank/`）——排名阈值 + 逐仓独立，换手频率由排名变化自然驱动
+
+  注意：`bare_bones` 和 `rolling_ranker` 虽无 schedule，但并未做自管理换手——它们只是省掉了 YAML 声明，`select()` 每日全量运行。不写 schedule 不等于自动获得精细化换手控制，需在代码中显式实现。
+
+关闭 schedule 后在策略代码中维护调仓节奏的典型模式：
+
+```python
+# YAML: 不写 schedule 键（或 schedule: {frequency: daily}）
+
+class MyStrategy(Strategy):
+    def on_start(self, provider, first_date, end_date=None):
+        # ... 其他初始化
+        self._last_rebalance: int = 0
+        self._rebalance_interval = 22  # 约每月
+
+    def select(self, bars, account_snapshot, provider):
+        if not bars:
+            return {"buy": [], "sell": []}
+        date_int = int(next(iter(bars.values())).get("trade_date", ""))
+        current = set(account_snapshot.holdings.keys())
+
+        # 非调仓日：只允许紧急卖出，不新买
+        if date_int - self._last_rebalance < self._rebalance_interval:
+            urgent_sells = [
+                s for s in current
+                if self._needs_urgent_exit(s, bars.get(s, {}))
+            ]
+            return {"buy": [], "sell": urgent_sells}
+
+        # 调仓日：完整轮动
+        self._last_rebalance = date_int
+        # ... 正常排名、选股、卖出逻辑
+```
+
+关键差异：`select()` 每日运行，策略代码自主决定哪一天做什么——而非由引擎一刀切拦截。这让你可以实现"卖随时、买定时"这类 schedule 做不到的不对称逻辑。
+
 ### 4.8 `factor_library`
 
 ```yaml
@@ -638,7 +700,7 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 
 ### 6.1 Level 0：裸因子轮动
 
-> 完整代码：`strategies/examples/simple_rotation/`
+> 完整代码：`strategies/examples/bare_bones/`
 
 **展示能力**：最简策略的完整骨架。
 
@@ -649,7 +711,7 @@ from btcore.filters import StockFilter
 from btcore.strategy import Strategy
 from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
 
-class SimpleRotation(Strategy):
+class BareBones(Strategy):
     def on_start(self, provider, first_date, end_date=None):
         self._top_k = int(self.config.get("top_k", 5))
         self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES, end_date=end_date)
@@ -667,9 +729,11 @@ class SimpleRotation(Strategy):
 
         target = set(score.sort_values(ascending=False).head(self._top_k).index)
         current = set(account_snapshot.holdings.keys())
-        self._cond.prune(current)
 
-        return {"buy": sorted(target - current), "sell": sorted(current - target)}
+        return {
+            "buy": sorted(target - current),
+            "sell": sorted(current - target),
+        }
 
     def calc_conditions(self, symbol, entry_price, bar, holding_days):
         return self._cond.calc(symbol, entry_price, bar, holding_days)
@@ -678,7 +742,7 @@ class SimpleRotation(Strategy):
 **config.yaml**：
 
 ```yaml
-strategy: strategies.examples.simple_rotation:SimpleRotation
+strategy: strategies.examples.bare_bones:BareBones
 config:
   max_positions: 10
   top_k: 5
@@ -700,18 +764,17 @@ conditions:
 **关键点**：
 - 三板斧：`StockFilter` 过滤 → `eval_factor_specs` 打分 → `ConditionBuilder` 条件单
 - 无 `on_fills`、无 `buy_weights`、无 `schedule`——每日调仓
-- `self._cond.prune(current)` 清理已平仓标的的 trailing 状态
 
 ### 6.2 Level 1：进阶轮动
 
-> 完整代码：`strategies/examples/topk_momentum/`
+> 完整代码：`strategies/examples/rolling_ranker/`
 
 **新增能力**：`on_fills` 成交感知 + `on_tick` 每日维护 + `buy_weights` 加权分配 + `holding_days` 动态调参。
 
 **strategy.py** 关键新增：
 
 ```python
-class TopKMomentum(Strategy):
+class RollingRanker(Strategy):
     REQUIRED_FIELDS: list[str] = []  # 无额外列需求
 
     def on_start(self, provider, first_date, end_date=None):
@@ -767,6 +830,71 @@ class TopKMomentum(Strategy):
 - `on_tick` 每日递减冷却期——绕过 schedule 的拦截
 - `buy_weights` 按得分比例分配资金，总和 < 1 以保留现金缓冲
 - `calc_conditions` 中 `holding_days` 自适应调参——前 3 天紧止损、30 天后放宽
+
+### 6.2.1 岔路：取消 schedule，自管理换手
+
+> 完整代码：`strategies/examples/self_managed_time/` · `strategies/examples/self_managed_rank/`
+
+Level 0-1 的策略都没有 `schedule` 声明，`select()` 每日全量运行。这在简单场景下可行，但换手率极高且缺乏精细化控制。两个新示例展示如何关闭 `schedule`，在策略代码中自行管理调仓节奏。详见 §4.7.1 中 schedule vs 策略代码管理的完整对比。
+
+**模式 A：时间门控 + 非对称买卖**（`self_managed_time`）
+
+```python
+class SelfManagedTime(Strategy):
+    def on_start(self, provider, first_date, end_date=None):
+        self._rebalance_interval = int(self.config.get("rebalance_interval", 22))
+        self._last_rebalance: int = 0
+        # ... 其余初始化
+
+    def select(self, bars, account_snapshot, provider):
+        date_int = int(next(iter(bars.values())).get("trade_date", ""))
+        is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
+
+        # 非调仓日：只检查紧急卖出，不新买
+        if not is_rebalance_day:
+            emergency_sells = [s for s in current if self._needs_urgent_exit(s, bars)]
+            return {"buy": [], "sell": emergency_sells}
+
+        # 调仓日：完整轮动
+        self._last_rebalance = date_int
+        # ... 正常排名、选股
+```
+
+**新增能力**：`schedule` 无法实现的非对称控制——买侧按固定间隔，卖侧随时可触发。
+
+**模式 B：排名阈值 + 逐仓独立**（`self_managed_rank`）
+
+```python
+class SelfManagedRank(Strategy):
+    def on_start(self, provider, first_date, end_date=None):
+        self._min_hold_days = int(self.config.get("min_hold_days", 15))
+        self._sell_rank_mult = float(self.config.get("sell_rank_mult", 2.0))
+        self._entry_date: dict[str, int] = {}
+
+    def on_fills(self, trades, provider):
+        for t in trades:
+            if t.side == "BUY":
+                self._entry_date[t.symbol] = int(t.date)
+
+    def select(self, bars, account_snapshot, provider):
+        # 逐仓判断：排名 > top_k × 2 且持有 ≥ 15 天才卖
+        sell_threshold = int(self._top_k * self._sell_rank_mult)
+        sell_list = [
+            s for s in current
+            if rank_of(s) > sell_threshold
+            and (date_int - self._entry_date[s]) >= self._min_hold_days
+        ]
+        # 有空位就从排名前列补入——无固定调仓日
+```
+
+**新增能力**：换手频率由排名变化速度自然决定，而非固定日历。每只持仓独立跟踪入场日期，各自判断去留——这是 `schedule` 声明式的一刀切模型做不到的。
+
+| 对比维度 | 时间门控模式 | 排名阈值模式 |
+|----------|------------|------------|
+| 买侧触发 | 固定间隔 | 有空位即补 |
+| 卖侧触发 | 非调仓日可紧急卖 / 调仓日全量轮动 | 排名掉出阈值 + 持有够久 |
+| 换手频率 | 由 `rebalance_interval` 决定 | 由排名变化速度自然决定 |
+| 适合场景 | 希望保留固定节奏，但允许例外 | 希望完全自适应，最小化换手 |
 
 ### 6.3 Level 2：目标仓位调仓
 
@@ -920,7 +1048,7 @@ conditions:
 
 ### 6.5 Level 4：状态机多模型策略
 
-> 完整代码：`strategies/examples/state_machine/`
+> 完整代码：`strategies/examples/multi_model/`
 
 **新增能力**：自定义因子库 + 市场状态机 + 多模型投票 + 精确持仓状态跟踪 + 全部 hook 协同。
 
@@ -963,14 +1091,13 @@ factors:
 **strategy.py** 核心架构：
 
 ```python
-class StateMachine(Strategy):
+class MultiModel(Strategy):
     REQUIRED_FIELDS: list[str] = ["turnover_rate"]
 
     def on_start(self, provider, first_date, end_date=None):
-        # 注册 3 个自定义 handler
+        # 注册 2 个自定义 handler
         register_condition_handler("DYNAMIC_STOP", _dynamic_stop)
         register_condition_handler("TIME_STOP", _time_stop)
-        register_condition_handler("VOLATILITY_EXIT", _volatility_exit)
 
         # 市场状态机
         self._regime: str = "neutral"           # bull | bear | neutral
@@ -1055,7 +1182,7 @@ class StateMachine(Strategy):
         conds = self._cond.calc(...)                 # 内置三件套
         conds.append({"type": "DYNAMIC_STOP", ...})  # 波动率自适应
         conds.append({"type": "TIME_STOP", "max_days": 60})  # 60 日强制退出
-        conds.append({"type": "VOLATILITY_EXIT", "threshold": 0.07})  # 异常振幅退出
+        # holding_days 动态调参...
         # holding_days 动态调参...
         return conds
 ```
@@ -1065,7 +1192,7 @@ class StateMachine(Strategy):
 - 3 套因子规格独立打分后用加权平均合成，权重随市场态动态切换
 - `on_fills` 中加权均价更新——正确处理加仓场景
 - `on_tick` 不受 schedule 拦截——市场状态检测每日运行，但 `select` 只在周末调仓
-- 4 层条件单：内置三件套 + 3 种自定义，构成完整离场系统
+- 4 层条件单：内置三件套 + 2 种自定义，构成完整离场系统
 
 ---
 
@@ -1447,10 +1574,12 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 
 | 示例 | 文件 | 展示的核心能力 |
 |------|------|---------------|
-| simple_rotation | `strategies/examples/simple_rotation/` | 最简骨架：StockFilter + eval + ConditionBuilder |
-| topk_momentum | `strategies/examples/topk_momentum/` | on_fills + on_tick + buy_weights + 动态参数 |
+| bare_bones | `strategies/examples/bare_bones/` | 最简骨架：StockFilter + eval + ConditionBuilder |
+| rolling_ranker | `strategies/examples/rolling_ranker/` | on_fills + on_tick + buy_weights + 动态参数 |
+| self_managed_time | `strategies/examples/self_managed_time/` | 无 schedule：时间门控 + 非对称买卖 |
+| self_managed_rank | `strategies/examples/self_managed_rank/` | 无 schedule：排名阈值 + 逐仓独立管理 |
 | target_allocator | `strategies/examples/target_allocator/` | target_value + risk_rules + schedule + sell_shares |
 | condition_hunter | `strategies/examples/condition_hunter/` | buy_conditions + 自定义 handler |
-| state_machine | `strategies/examples/state_machine/` | 全部能力：状态机 + 多模型 + 坍缩因子 + 精确跟踪 |
+| multi_model | `strategies/examples/multi_model/` | 全部能力：状态机 + 多模型 + 坍缩因子 + 精确跟踪 |
 
-建议按此顺序阅读代码：先理解 simple_rotation 的基本骨架，再逐级叠加新能力，最后看 state_machine 的全景。
+建议按此顺序阅读代码：先理解 bare_bones 的基本骨架，再逐级叠加新能力，最后看 multi_model 的全景。

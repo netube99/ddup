@@ -271,7 +271,7 @@ def get_index_members(
 > 部分 extra_fields 字段对特定引擎能力是必需的。虽然引擎不强制要求这些列，但缺少时对应功能静默失效：
 > - `pe_ttm`：`exclude_loss` 过滤规则依赖（未声明 `pe_ttm` 则过滤静默跳过，不报错也不过滤）
 > - `total_mv`：`log_mktcap` 伪列依赖（未声明则因子表达式中引用 `log_mktcap` 时 preload 直接报错）
-> - `turnover_rate`：部分策略示例（如 topk_momentum）在 `select()` 中命令式访问此列
+> - `turnover_rate`：部分策略示例（如 rolling_ranker）在 `select()` 中命令式访问此列
 
 ### 5.2 交易日历与分红（4 项）
 

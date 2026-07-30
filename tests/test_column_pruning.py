@@ -5,7 +5,7 @@ import pytest
 from btcore.engine import REQUIRED_BAR_COLUMNS, Engine, required_bar_columns
 from btcore.factors.plan import build_factor_plan
 from btcore.provider import DataProvider
-from strategies.examples.topk_momentum import TopKMomentum
+from strategies.examples.rolling_ranker import RollingRanker
 from tests.conftest import MockDataBackend
 
 _NODES = {
@@ -20,8 +20,8 @@ _SPECS = [
 ]
 
 
-def _strategy(nodes=None, **kw) -> TopKMomentum:
-    s = TopKMomentum(
+def _strategy(nodes=None, **kw) -> RollingRanker:
+    s = RollingRanker(
         config={"top_k": 3, "max_positions": 3, **kw.pop("config", {})},
         factor_specs=kw.pop("factor_specs", list(_SPECS)),
         filter_rules=kw.pop(

@@ -16,7 +16,7 @@ ddup 提供两类用户可编程接口：**CLI 脚本**（`scripts/`，命令行
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 
 # 2. 运行回测
-python scripts/run.py strategies/examples/topk_momentum/config.yaml \
+python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
     --start 20240101 --end 20240630 --out result.db
 
 # 3. 交叉验证：检查交易行为、风控触发、磨损是否合理
@@ -60,7 +60,7 @@ python scripts/run.py <策略YAML> --start YYYYMMDD --end YYYYMMDD \
 
 ```bash
 # 最简调用：内存运行 + 自动报告
-python scripts/run.py strategies/examples/topk_momentum/config.yaml \
+python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
     --start 20240603 --end 20240628
 
 # 落盘结果库，后续可离线生成报告/对比
@@ -191,7 +191,7 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 示例：
 
 ```bash
-python scripts/cross_validate.py result.db --strategy topk_momentum
+python scripts/cross_validate.py result.db --strategy rolling_ranker
 ```
 
 ### 2.6 `sweep.py` — 参数扫描批量回测
@@ -215,7 +215,7 @@ python scripts/sweep.py <sweep_config.yaml> \
 **sweep 配置文件格式**：
 
 ```yaml
-base: strategies/examples/topk_momentum/config.yaml
+base: strategies/examples/rolling_ranker/config.yaml
 params:
   config.top_k: [3, 5, 10]
   config.max_positions: [5, 10]
@@ -288,7 +288,7 @@ python scripts/bench_universe_preload.py --start YYYYMMDD --end YYYYMMDD \
 |------|------|
 | `--start` | 开始日期，**必填** |
 | `--end` | 结束日期，**必填** |
-| `--yaml` | 策略 YAML 路径，默认 `strategies/examples/topk_momentum/config.yaml` |
+| `--yaml` | 策略 YAML 路径，默认 `strategies/examples/rolling_ranker/config.yaml` |
 | `--skip-load` | 跳过数据加载层基准 |
 | `--skip-engine` | 跳过端到端基准 |
 

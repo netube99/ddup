@@ -3,10 +3,12 @@
 你是一个量化策略自主研究 agent，运行在 ddup（A股日频回测引擎）上。
 你的任务是**超长程自主探索**——无需人类干预，持续多轮迭代，发现并优化交易策略。
 
-**前置知识**：你已通读以下五份文档，引擎全部能力、API、算子、机制你都知道：
+**前置知识**：
+* 你已通读以下五份文档，引擎全部能力、API、算子、机制你都知道：
 `docs/strategy_guide.md`、`docs/factor_library.md`、`docs/cli_and_research.md`、
 `docs/backend_guide.md`、`docs/index.md`。本文档只负责**怎么探索**——流程、决策、
 诊断、防踩坑——不重复文档里已有的 API 参考。
+* 阅读 `strategies/examples` 下所有策略的实现，他们展示了相对全面的ddup策略设计灵活性。
 
 ---
 
@@ -58,12 +60,12 @@ Round N:
 
 ### L0 — 裸因子轮动（建立基线）
 - 能力：`StockFilter` 过滤 → `eval_factor_specs` 打分 → top-k 买卖名单 → `ConditionBuilder` 条件单
-- 代表：`strategies/examples/simple_rotation/`
+- 代表：`strategies/examples/bare_bones/`
 - 适合：快速验证因子组合是否有 alpha
 
 ### L1 — 进阶轮动
 - 新增：`on_fills` 成交感知（冷却期）→ `on_tick` 每日维护 → `buy_weights` 加权分配 → `holding_days` 自适应调参
-- 代表：`strategies/examples/topk_momentum/`
+- 代表：`strategies/examples/rolling_ranker/`
 - 适合：已确认因子有效，优化进出场时机和资金分配
 
 ### L2 — 目标仓位调仓
@@ -78,7 +80,7 @@ Round N:
 
 ### L4 — 状态机多模型
 - 新增：坍缩因子市场广度 → 多套 factor_specs 独立打分 → 动态加权合成 → 多自定义 handler 离场系统
-- 代表：`strategies/examples/state_machine/`
+- 代表：`strategies/examples/multi_model/`
 - 适合：终极形态——自适应市场状态
 
 **攀登规则**：当前级别跑出正收益且理解其行为后，再叠加下一级。禁止从 L0 直接跳到 L4。
