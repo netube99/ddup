@@ -1,1 +1,3 @@
-from .strategy import ConditionHunter as ConditionHunter
+from .strategy import ConditionHunter
+
+__all__ = ["ConditionHunter"]

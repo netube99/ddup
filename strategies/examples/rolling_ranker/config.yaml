@@ -1,0 +1,52 @@
+# ===========================================================================
+# 示例 1: rolling_ranker — 进阶因子轮动
+#
+# 在 bare_bones 基础之上新增：
+#   - on_fills 成交感知 → 冷却期管理
+#   - on_tick 每日维护 → 冷却期递减 + 条件单状态修剪
+#   - buy_weights 按得分比例分配资金
+#   - calc_conditions 中 holding_days 自适应调参
+#   - REQUIRED_FIELDS 列裁剪声明
+#   - 费率/滑点覆盖默认值
+#
+# 如果你是第一次看示例，先从 bare_bones 开始。
+# ===========================================================================
+
+name: rolling_ranker
+strategy: strategies.examples.rolling_ranker:RollingRanker
+
+# ── 因子引用 ─────────────────────────────────────────────────────────────
+factor_specs:
+  - factor: mom20
+    weight: 1.0
+    ascending: false
+  - factor: low_turnover
+    weight: 0.5
+    ascending: true
+
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true           # 排除 pe_ttm <= 0 的亏损股
+  exclude_boards: ["BJ"]       # 排除北交所
+  min_price: 3.0
+
+# ── 条件单 ───────────────────────────────────────────────────────────────
+# 策略在 calc_conditions 中委托 ConditionBuilder 翻译这些规则，
+# 并叠加 holding_days 自适应调参。
+conditions:
+  stop_loss_pct: 0.06          # → STOP_LOSS（策略内按持仓天数动态调整）
+  take_profit_pct: 0.25        # → TAKE_PROFIT
+  trailing_pct: 0.08           # → TRAILING_TP（从最高点回撤 8%）
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+config:
+  max_positions: 10
+  top_k: 5
+  cooldown_days: 3             # 自定义键：条件单卖出后冷却天数
+  # 以下为引擎直接消费的可选键（全部有默认值），仅展示覆盖用法
+  commission_rate: 0.0002      # 佣金万二（默认万1.5）
+  stamp_tax_rate: 0.0005       # 印花税万五（默认值，仅卖出收取）
+  slippage_ticks: 2            # 滑点 ±0.02 元（默认 2）
+  execution_price: "open"      # 以次日开盘价成交（默认 open）

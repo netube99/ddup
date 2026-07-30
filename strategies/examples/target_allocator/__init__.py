@@ -1,1 +1,3 @@
-from .strategy import TargetAllocator as TargetAllocator
+from .strategy import TargetAllocator
+
+__all__ = ["TargetAllocator"]

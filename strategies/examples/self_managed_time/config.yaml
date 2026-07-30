@@ -1,0 +1,52 @@
+# ===========================================================================
+# 示例 6: self_managed_time — 时间门控 + 非对称买卖（无 schedule）
+#
+# 展示能力：
+#   - 关闭 YAML schedule，在策略代码中自行管理调仓节奏
+#   - 调仓日完整轮动，非调仓日只卖不买（schedule 做不到的非对称控制）
+#   - on_fills 成交感知 → 冷却期 / on_tick 每日维护
+#
+# 模式 A：时间门控
+#   - self._rebalance_interval 控制调仓间隔
+#   - self._last_rebalance 跟踪上次调仓日
+#   - 非调仓日：仅检测紧急卖出（盘中大跌触发止损）
+#   - 调仓日：完整排名 → 全量轮动
+#
+# 与 bare_bones 的区别：
+#   bare_bones 无 schedule 但每日全量轮动——等同于 day trading。
+#   本策略在非调仓日主动返回空买侧。
+# ===========================================================================
+
+name: self_managed_time
+strategy: strategies.examples.self_managed_time:SelfManagedTime
+
+# ── 因子引用 ─────────────────────────────────────────────────────────────
+factor_specs:
+  - factor: mom20
+    weight: 1.0
+    ascending: false
+
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  min_price: 3.0
+
+# ── 条件单 ───────────────────────────────────────────────────────────────
+conditions:
+  stop_loss_pct: 0.08
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+config:
+  max_positions: 5
+  top_k: 5
+  rebalance_interval: 22           # 约每月（22 个交易日）
+  emergency_sell_threshold: -0.09  # 盘中跌超 9% 紧急卖出
+  commission_rate: 0.0002
+  stamp_tax_rate: 0.0005
+  slippage_ticks: 1
+  execution_price: "open"
+
+# ── 无 schedule 键 ───────────────────────────────────────────────────────
+# 调仓节奏由策略代码维护，非调仓日允许紧急卖出。
+# 详见 strategy_guide.md §4.7.1。

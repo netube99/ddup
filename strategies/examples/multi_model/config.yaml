@@ -1,0 +1,105 @@
+# ===========================================================================
+# 示例 4: multi_model — 多模型投票 + 市场状态机 + 域分离
+#
+# 展示能力：
+#   - 多模型加权投票（动量 / 反转 / 质量 → 按市场状态切换权重）
+#   - 市场状态机（bull / bear / neutral，连续 N 日确认后切换）
+#   - 自定义因子库（factor_library 指向本目录 factors.yaml）
+#   - 交易域与因子计算域分离（index_universe + factor_universe）
+#   - get_universe / get_factor_universe 手动覆盖
+#   - 自定义条件单 handler（DYNAMIC_STOP / TIME_STOP）
+#   - schedule 调仓调度 + on_tick 每日状态推进
+#
+# 这是示例系列中最复杂的一级。请按顺序阅读：
+#   1. factors.yaml — 因子 DAG 定义
+#   2. config.yaml — 本文件，配置全景
+#   3. strategy.py — 策略逻辑
+# ===========================================================================
+
+name: multi_model
+strategy: strategies.examples.multi_model:MultiModel
+
+# ── 自定义因子库 ─────────────────────────────────────────────────────────
+# 指定同目录下的因子定义文件，覆盖全局 factors/library.yaml。
+# 这里定义的因子用于本策略的 factor_specs 引用。
+factor_library: factors.yaml
+
+# ── 因子引用 ─────────────────────────────────────────────────────────────
+# 所有子模型用到的因子都必须在此声明以确保引擎 preload 物化。
+# 本策略在 select() 中按模型独立调用 eval_factor_specs，而非统一合成。
+factor_specs:
+  # 动量模型因子
+  - factor: mom20_z
+    weight: 0.40
+    ascending: false
+  - factor: up_days20
+    weight: 0.30
+    ascending: false
+  - factor: bias5
+    weight: 0.15
+    ascending: true
+  # 反转模型因子
+  - factor: mom5_rev
+    weight: 0.35
+    ascending: true
+  - factor: near_low20
+    weight: 0.35
+    ascending: true
+  # 质量模型因子
+  - factor: vol5_z
+    weight: 0.40
+    ascending: true
+  - factor: channel20
+    weight: 0.30
+    ascending: true
+  - factor: idiosyncratic_vol
+    weight: 0.30
+    ascending: true
+  # 市场广度检测（仅用于状态机，materialize_only 不参与排名）
+  - factor: mkt_breadth20
+    materialize_only: true
+  - factor: mkt_up_ratio
+    materialize_only: true
+
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
+# 交易域 vs 因子计算域分离：
+#   index_universe = 只交易沪深300成分股
+#   factor_universe = 在中证800成分股上计算因子（更宽的口径）
+# 这样截面/坍缩算子有更丰富的参照池，信号更准确。
+filter_rules:
+  exclude_st: true
+  exclude_new_stock: true
+  exclude_loss: true
+  exclude_boards: ["BJ"]
+  min_price: 3.0
+  index_universe: ["000300.SH"]
+  factor_universe: ["000906.SH"]
+
+# ── 条件单 ───────────────────────────────────────────────────────────────
+conditions:
+  stop_loss_pct: 0.06
+  take_profit_pct: 0.25
+  trailing_pct: 0.08
+
+# ── 组合风控 ─────────────────────────────────────────────────────────────
+risk_rules:
+  max_drawdown: 0.15
+  cooldown_days: 7
+  max_position_pct: 0.10
+
+# ── 调仓调度 ─────────────────────────────────────────────────────────────
+schedule:
+  frequency: weekly
+  weekday: -1
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+config:
+  max_positions: 20
+  top_k: 8
+  cooldown_days: 3
+  mode_confirm_days: 5         # 状态切换需连续确认的天数（自定义键）
+  execution_price: "open"
+  commission_rate: 0.0002
+  stamp_tax_rate: 0.0005
+  slippage_ticks: 2
+  condition_slippage_ticks: 1

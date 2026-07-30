@@ -1,27 +1,42 @@
+# ===========================================================================
+# 示例 2: target_allocator — 目标仓位精确管理
+#
+# 展示能力：
+#   - target_value 返回格式（引擎自动计算买卖差额，trigger="TARGET"）
+#   - sell_shares 部分减仓（近边缘持仓减半而非清仓）
+#   - schedule 周频调仓
+#   - risk_rules 全系列 — 熔断 / 单票上限 / 行业上限
+#   - materialize_only 因子（仅物化不参与排名）
+#   - execution_price: "close"（收盘价成交）
+#   - condition_slippage_ticks（条件单独立滑点）
+#   - benchmark 显式覆盖
+#
+# target_value 与 buy/sell 名单的区别：
+#   - buy/sell: 等权买入 top_k，不在 top_k 的清仓
+#   - target_value: 按得分比例分配市值，超配减持、低配加仓
+#   - 两者同日不可混用（引擎自动校验）
+# ===========================================================================
+
 name: target_allocator
 strategy: strategies.examples.target_allocator:TargetAllocator
 
-config:
-  initial_capital: 2000000
-  max_positions: 15
-  top_k: 8
-  execution_price: "close"
-
-schedule:
-  frequency: weekly           # 每周调仓一次
-  weekday: -1                 # 每周最后一个交易日
-
+# ── 因子引用 ─────────────────────────────────────────────────────────────
+# materialize_only 因子仅物化到 bars 列中供 calc_conditions 读取判断，
+# 不参与 eval_factor_specs 的加权得分合成——无需编造假权重来触发物化。
 factor_specs:
   - factor: mom20
-    weight: 0.5
+    weight: 0.50
     ascending: false
   - factor: bias20
-    weight: 0.3
+    weight: 0.30
     ascending: false
   - factor: low_turnover
-    weight: 0.2
+    weight: 0.20
     ascending: true
+  - factor: pct_above_ma20        # 仅用于 calc_conditions 判断市场广度
+    materialize_only: true
 
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
 filter_rules:
   exclude_st: true
   exclude_new_stock: true
@@ -29,12 +44,27 @@ filter_rules:
   exclude_boards: ["BJ"]
   min_price: 5.0
 
+# ── 条件单 ───────────────────────────────────────────────────────────────
 conditions:
   stop_loss_pct: 0.06
   trailing_pct: 0.08
 
-# 组合风控：回撤熔断 + 单票上限
+# ── 组合风控 ─────────────────────────────────────────────────────────────
 risk_rules:
-  max_drawdown: 0.12         # 回撤 ≥12% 触发熔断，清仓 + 冷却
-  cooldown_days: 5           # 冷却 5 日后恢复买入
-  max_position_pct: 0.10     # 单票买入 ≤ 总资产 10%
+  max_drawdown: 0.12             # 回撤 ≥12% 触发熔断，清仓 + 冷却
+  cooldown_days: 5               # 熔断后冷却 5 日
+  max_position_pct: 0.10         # 单票买入金额 ≤ 总资产 10%
+  max_industry_pct: 0.30         # 单行业总暴露 ≤ 总资产 30%（只在买入时把关）
+
+# ── 调仓调度 ─────────────────────────────────────────────────────────────
+schedule:
+  frequency: weekly              # 每周调仓一次
+  weekday: -1                    # 每周最后一个交易日
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+config:
+  max_positions: 15
+  top_k: 8
+  execution_price: "close"       # 以次日收盘价成交（区别于默认 open）
+  condition_slippage_ticks: 1   # 条件单独立滑点 0.01 元（默认沿用 slippage_ticks）
+  benchmark: "000300.SH"         # 显式指定基准指数（默认从 index_universe 自动推导）

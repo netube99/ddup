@@ -1,14 +1,26 @@
+# ===========================================================================
+# 示例 3: condition_hunter — 条件单系统完整展示
+#
+# 展示能力：
+#   - buy_conditions 条件买入（LIMIT_BUY 回踩 / BREAKOUT_BUY 突破）
+#   - 自定义离场 handler（DYNAMIC_STOP 波动率自适应止损）
+#   - 自定义入场 handler（VWAP_BUY 均价买入）
+#   - register_condition_handler / register_buy_condition_handler 注册
+#   - on_tick 返回 buy_conditions（非调仓日提交条件买单）
+#   - order_volume_ratio 成交量约束
+#   - condition_slippage_ticks 条件单独立滑点
+#
+# 关键概念：
+#   - 条件买入在 T 日声明、T+1 日盘中触发、单日有效
+#   - 买侧约束（涨停不买、停牌跳过、成交量 cap、max_positions 上限）自动生效
+#   - 自定义 handler 必须在 on_start 中注册（进程级全局）
+#   - on_tick 返回的 buy_conditions 会合并到 select 的 buy_conditions 中
+# ===========================================================================
+
 name: condition_hunter
 strategy: strategies.examples.condition_hunter:ConditionHunter
 
-config:
-  initial_capital: 1000000
-  max_positions: 12
-  top_k: 5
-  hunt_count: 4              # 条件买入候选数量
-  execution_price: "open"
-  condition_slippage_ticks: 1  # 条件单独立滑点（1 tick = 0.01 元）
-
+# ── 因子引用 ─────────────────────────────────────────────────────────────
 factor_specs:
   - factor: mom20
     weight: 1.0
@@ -20,6 +32,7 @@ factor_specs:
     weight: 0.3
     ascending: true
 
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
 filter_rules:
   exclude_st: true
   exclude_new_stock: true
@@ -27,7 +40,17 @@ filter_rules:
   exclude_boards: ["BJ"]
   min_price: 3.0
 
-# 只启用止盈和移动止盈（标准止损被 DYNAMIC_STOP 替换）
+# ── 条件单 ───────────────────────────────────────────────────────────────
+# 只启用止盈 + 移动止盈——止损被自定义 DYNAMIC_STOP 替代
 conditions:
   take_profit_pct: 0.20
   trailing_pct: 0.08
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+config:
+  max_positions: 12
+  top_k: 5
+  hunt_count: 4                   # 条件买入候选数量（自定义键）
+  execution_price: "open"
+  condition_slippage_ticks: 1     # 条件单独立滑点 0.01 元
+  order_volume_ratio: 0.05        # 单笔订单不超过当日成交量 5%

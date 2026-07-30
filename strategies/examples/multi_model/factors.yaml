@@ -1,0 +1,64 @@
+# 示例 4 (multi_model) 的自定义因子库。
+#
+# 演示因子 DAG 的全部能力：
+#   - TS 算子：roc / ma / std / delay / sum / min / max / resid_std
+#   - XSEC 保形算子：zscore
+#   - XSEC 坍缩算子：mean（全市场聚合后广播回个股）
+#   - 命名引用链：基础因子 → zscore 标准化 → 多模型合成
+#   - 比较 + 布尔运算作为信号基础
+#
+# 策略 YAML 通过 factor_library 键引用本文件，覆盖全局 factors/library.yaml。
+factors:
+  # ── 基础动量 ──
+  mom20:
+    expr: "roc(close_hfq, 20)"
+    description: "20日动量"
+  mom5_rev:
+    expr: "roc(close_hfq, 5)"
+    description: "5日动量（反转信号，ascending=true）"
+  bias5:
+    expr: "close_hfq / ma(close_hfq, 5) - 1"
+    description: "5日乖离率"
+  bias20:
+    expr: "close_hfq / ma(close_hfq, 20) - 1"
+    description: "20日乖离率"
+
+  # ── 波动率 ──
+  vol5:
+    expr: "std(roc(close_hfq, 1), 5)"
+    description: "5日波动率（std 嵌套 roc）"
+
+  # ── 截面标准化 ──
+  mom20_z:
+    expr: "zscore(mom20)"
+    description: "动量截面标准化"
+  bias20_z:
+    expr: "zscore(bias20)"
+    description: "乖离截面标准化"
+  vol5_z:
+    expr: "zscore(vol5)"
+    description: "波动率截面标准化"
+
+  # ── 量价因子 ──
+  up_days20:
+    expr: "sum(close_hfq > delay(close_hfq, 1), 20)"
+    description: "近20日上涨天数（sum + 比较 + delay 组合）"
+  near_low20:
+    expr: "close_hfq / min(low_hfq, 20)"
+    description: "接近20日低点程度（值越小越接近）"
+  channel20:
+    expr: "(max(high_hfq, 20) - min(low_hfq, 20)) / close_hfq"
+    description: "20日通道宽度（max + min 组合）"
+
+  # ── 回归类 ──
+  idiosyncratic_vol:
+    expr: "resid_std(close_hfq, open_hfq, 20)"
+    description: "特质波动率（对开盘价回归取残差标准差）"
+
+  # ── 坍缩类（全市场聚合后广播回个股）──
+  mkt_breadth20:
+    expr: "mean(close_hfq > ma(close_hfq, 20))"
+    description: "站上MA20占比——全市场广度，同日所有股票同值"
+  mkt_up_ratio:
+    expr: "mean(close_hfq > delay(close_hfq, 1))"
+    description: "上涨占比——全市场上涨股票比例"

@@ -1,0 +1,50 @@
+# ===========================================================================
+# 示例 0: bare_bones — 最小可运行策略骨架
+#
+# 展示能力：
+#   - on_start 初始化 StockFilter / ConditionBuilder
+#   - select 每日 buy/sell 名单调仓
+#   - calc_conditions 委托 ConditionBuilder 生成条件单
+#   - eval_factor_specs 读取引擎物化的因子列 → 合成得分
+#
+# 这个文件就是全部配置。看懂这个，配上 strategy.py，就能写自己的策略。
+# ===========================================================================
+
+name: bare_bones
+strategy: strategies.examples.bare_bones:BareBones
+
+# ── 因子引用 ─────────────────────────────────────────────────────────────
+# 每个条目引用 factors/library.yaml 中定义的一个因子名。
+# weight 是合成权重，ascending 控制排序方向。
+factor_specs:
+  - factor: mom20            # 20日动量（后复权口径）
+    weight: 1.0
+    ascending: false          # false = 值越大排名越高（默认）
+  - factor: low_turnover     # 换手率（直接从扩展字段列读取）
+    weight: 0.5
+    ascending: true           # true = 值越小排名越高（低换手异象）
+
+# ── 过滤规则 ─────────────────────────────────────────────────────────────
+# 引擎先过 filter_rules 做截面筛选，Strategy.select() 收到的 bars 里
+# 只剩通过过滤的股票。规则项全部可选，均有默认值。
+filter_rules:
+  exclude_st: true            # 排除 ST
+  exclude_new_stock: true     # 排除上市不足 60 日的新股
+  min_price: 3.0              # 最低收盘价过滤
+
+# ── 声明式条件单 ─────────────────────────────────────────────────────────
+# YAML 声明的 stop_loss_pct / take_profit_pct / trailing_pct 由
+# ConditionBuilder 翻译为对应的条件单 dict。策略只需在 calc_conditions
+# 中一行委托即可。
+conditions:
+  stop_loss_pct: 0.08         # 跌 8% 止损 → STOP_LOSS
+
+# ── 策略配置 ─────────────────────────────────────────────────────────────
+# initial_capital / max_positions 等重点键由引擎直接消费，有默认值。
+# top_k 是自定义键——策略代码通过 self.config.get("top_k") 自行读取。
+config:
+  max_positions: 10
+  top_k: 5
+  quiet_skips: true             # 小资金回测时降低警告频率：涨跌停跳过、
+                                # 成交量不足、现金不足缩股失败等场景的
+                                # WARNING 降级为 DEBUG，终端不再刷屏
