@@ -50,6 +50,7 @@ def main():
     parser.add_argument("--start", required=True, help="回测起始日期 YYYYMMDD")
     parser.add_argument("--end", required=True, help="回测结束日期 YYYYMMDD")
     parser.add_argument("--out", default="sweep_result.db", help="输出数据库")
+    parser.add_argument("--capital", type=float, default=None, help="初始资金（覆盖 YAML config）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印参数组合，不运行")
     args = parser.parse_args()
 
@@ -96,6 +97,8 @@ def main():
                 "--end", args.end,
                 "--out", str(tmp_db),
             ]
+            if args.capital is not None:
+                cmd.extend(["--capital", str(args.capital)])
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -106,7 +109,7 @@ def main():
             try:
                 tmp_conn = sqlite3.connect(str(tmp_db))
                 stats_json = tmp_conn.execute(
-                    "SELECT stats_json FROM runs WHERE id = 1"
+                    "SELECT stats_json FROM runs WHERE run_id = 1"
                 ).fetchone()
                 tmp_conn.close()
 
@@ -132,7 +135,7 @@ def main():
                     out_conn.close()
 
                     total_return = stats.get("total_return", 0)
-                    sharpe = stats.get("sharpe_ratio", 0)
+                    sharpe = stats.get("sharpe", 0)
                     mdd = stats.get("max_drawdown", 0)
                     print(f"  OK: return={total_return:.1%} sharpe={sharpe:.2f} mdd={mdd:.1%}")
             except Exception as e:
@@ -150,7 +153,7 @@ def main():
         for label, stats_json in rows:
             stats = json.loads(stats_json)
             total_return = stats.get("total_return", 0)
-            sharpe = stats.get("sharpe_ratio", 0)
+            sharpe = stats.get("sharpe", 0)
             mdd = stats.get("max_drawdown", 0)
             print(f"{label:<50} {total_return:>7.1%} {sharpe:>7.2f} {mdd:>7.1%}")
     out_conn.close()

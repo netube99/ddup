@@ -387,7 +387,7 @@ class Engine:
                 # 条件买单最后执行: 吃到当日卖出释放的现金
                 entry_trades = match.conditions.entry_conditions(
                     self.account, bars_dict,
-                    self.pending_actions.get("buy_conditions", []),
+                    self.pending_actions.get("buy_conditions") or [],
                     self.max_positions,
                     limits.get_limit_prices, self.costs_fn, apply_slippage,
                     quiet=self.quiet_skips,
@@ -619,7 +619,7 @@ class Engine:
 
         # 涉及 symbol: holdings + buy 目标
         relevant_symbols = set(holdings_detail) | set(pending_actions.get("buy", []))
-        bc_symbols = {c["symbol"] for c in pending_actions.get("buy_conditions", [])}
+        bc_symbols = {c["symbol"] for c in (pending_actions.get("buy_conditions") or [])}
         relevant_symbols |= bc_symbols
 
         bars_subset = {}

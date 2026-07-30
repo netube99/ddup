@@ -171,6 +171,8 @@ def entry_conditions(account, bars: dict, orders: list[dict],
     """条件买入撮合。约束与手动买一致：涨停不买、成交量 cap、现金不足减手数、
     max_positions 硬上限、成交即 T+1 锁定。已持仓标的不重复入场。"""
     _warn = logger.debug if quiet else logger.warning
+    if orders is None:
+        return []
     trades = []
     for order in orders:
         symbol = order["symbol"]
