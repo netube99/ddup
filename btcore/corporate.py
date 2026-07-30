@@ -71,7 +71,7 @@ def _rescale_holding(holding, scale: float):
     holding.entry_price *= scale
     holding.last_price *= scale
     for c in holding.conditions:
-        if "price" in c:
+        if "price" in c and c["price"] is not None:
             c["price"] *= scale
         if "trigger_price" in c:
             c["trigger_price"] *= scale

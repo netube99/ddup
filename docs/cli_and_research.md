@@ -73,7 +73,7 @@ python scripts/run.py strategies/my_strategy/config.yaml \
 ```bash
 python scripts/factor_eval.py <因子列表> \
     --start YYYYMMDD --end YYYYMMDD \
-    [--universe CSI300] [--forward N] [--n-quantiles N]
+    [--universe CSI300] [--forward N] [--decay 1,3,5,10,20] [--n-quantiles N]
 ```
 
 | 参数 | 说明 |
@@ -82,14 +82,17 @@ python scripts/factor_eval.py <因子列表> \
 | `--start` | 开始日期，**必填** |
 | `--end` | 结束日期，**必填** |
 | `--universe` | 股票池，支持简称 `CSI300`/`CSI500`/`CSI1000` 或代码 `000300.SH` 等，默认全市场 |
-| `--forward` | 前瞻收益天数（默认 5，即一周） |
+| `--forward` | 前瞻收益天数（默认 5，即一周）。与 `--decay` 互斥 |
+| `--decay` | 多前瞻期 IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）。与 `--forward` 互斥 |
 | `--n-quantiles` | 分层回测分档数（默认 5） |
 
-**输出**（三部分，终端打印）：
+**输出**：
 
-1. **IC 汇总表** — 每个因子的 Pearson IC 均值、ICIR、胜率、Rank IC
-2. **分层回测** — 每档累计收益 + 多空收益（最高档-最低档）
-3. **因子相关性矩阵** — 截面 Pearson 相关系数均值（≥2 个因子时）
+- **默认模式**（三部分，终端打印）：
+  1. **IC 汇总表** — 每个因子的 Pearson IC 均值、ICIR、胜率、Rank IC
+  2. **分层回测** — 每档累计收益 + 多空收益（最高档-最低档）
+  3. **因子相关性矩阵** — 截面 Pearson 相关系数均值（≥2 个因子时）
+- **`--decay` 模式**：输出每个因子随前瞻期变化的 IC 衰减曲线表格，含 RankIC 趋势总结（↘ 衰减 / ↗ 增强）。分层回测仍使用默认 `--forward=5d`。
 
 示例：
 
@@ -103,6 +106,10 @@ python scripts/factor_eval.py mom20,vol_z,ep_z --start 20240101 --end 20240630 -
 # 月度前瞻 + 10 档分层
 python scripts/factor_eval.py roe_z,gross_margin_z --start 20240101 --end 20240630 \
     --forward 20 --n-quantiles 10
+
+# IC 衰减曲线：观察因子 alpha 随持有期变长的衰减速度
+python scripts/factor_eval.py cci_z,turnover_z \
+    --start 20240101 --end 20240630 --decay 1,3,5,10,20
 ```
 
 ### 2.3 `report.py` — 单 run HTML 报告
@@ -406,6 +413,36 @@ from research.factor_eval import calc_factor_corr
 # 返回因子间平均截面 Pearson 相关矩阵
 corr_matrix = calc_factor_corr(factor_df)
 ```
+
+### 3.4 `calc_ic_decay`
+
+```python
+from research.factor_eval import calc_ic_decay
+
+# factor_values: MultiIndex (trade_date, symbol) 的因子值 Series
+# close_hfq: 同结构的后复权收盘价 Series
+# horizons: 前瞻天数列表，如 [1, 3, 5, 10, 20]
+# 返回 DataFrame，index=horizon，列为各指标
+decay_df = calc_ic_decay(factor_values, close_hfq, [1, 3, 5, 10, 20])
+#          ic_mean  ic_ir  ic_win  rank_ic_mean  rank_ic_ir  rank_ic_win  n_days
+# horizon
+# 1       0.0234  0.452   0.612        0.0198      0.387        0.598     118
+# 3       0.0312  0.601   0.645        0.0276      0.531        0.632     117
+# 5       0.0298  0.573   0.628        0.0251      0.488        0.619     116
+# ...
+```
+
+对每个 horizon 计算 forward returns 并汇总 IC / Rank IC 统计量，输出一张 `horizon × 指标` 的衰减汇总表。用于判断因子 alpha 的衰减速度——IC 随前瞻期拉长是否迅速衰减，以及 Rank IC 的稳定性。
+
+| 返回列 | 含义 |
+|--------|------|
+| `ic_mean` | 该前瞻期的 Pearson IC 均值 |
+| `ic_ir` | IC 信息比率（IC_mean / IC_std） |
+| `ic_win` | IC > 0 的交易日占比 |
+| `rank_ic_mean` | Spearman Rank IC 均值 |
+| `rank_ic_ir` | Rank IC 信息比率 |
+| `rank_ic_win` | Rank IC > 0 的交易日占比 |
+| `n_days` | 有效截面天数 |
 
 ---
 
@@ -763,6 +800,7 @@ best = combine_factors(factor_df, fwd_ret, method="icir")
 | | `summarize_ic(ic)` | IC Series | dict{ic_mean, icir, ...} |
 | | `calc_layered_returns(fv, fwd)` | 因子值, 前瞻收益 | {分位: 累计收益 Series} |
 | | `calc_factor_corr(df)` | 因子宽表 DataFrame | 相关矩阵 DataFrame |
+| | `calc_ic_decay(fv, close, horizons)` | 因子值, 收盘价, 前瞻天数列表 | 衰减汇总 DataFrame (horizon × 指标) |
 | `research.report` | `generate_report(result, path)` | engine.run() 返回, 路径 | 写入 HTML |
 | | `generate_report_from_db(db, path)` | DB 路径, 输出路径 | 写入 HTML |
 | | `generate_compare_report(db, path)` | DB 路径, 输出路径 | 写入 HTML |
@@ -782,7 +820,8 @@ best = combine_factors(factor_df, fwd_ret, method="icir")
 | `--report` | run | HTML 报告路径或 `auto` |
 | `--run-id` | report, cross_validate | 指定 run |
 | `--universe` | factor_eval | CSI300/CSI500/CSI1000 |
-| `--forward` | factor_eval | 前瞻天数，默认 5 |
+| `--forward` | factor_eval | 前瞻天数，默认 5（与 --decay 互斥） |
+| `--decay` | factor_eval | IC 衰减模式，逗号分隔天数如 `1,3,5,10,20` |
 | `--n-quantiles` | factor_eval | 分层数，默认 5 |
 | `--capital` | run, cross_validate | 初始资金 |
 | `window` | composite.combine_factors | IC 滚动窗口，默认 60 |

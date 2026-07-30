@@ -119,6 +119,7 @@ on_start (一次)
 | 声明式 | `REQUIRED_FIELDS: list[str]` | 声明 `select()` 中命令式访问的列 |
 | 声明式 | `FACTOR_SPECS: list[dict]` | 因子引用列表（YAML 或类变量） |
 | 声明式 | `FILTER_RULES: dict` | 过滤规则默认值（YAML 或类变量） |
+| 声明式 | `CONDITION_FACTORS: set[str]` | 条件单/离场逻辑读取的因子名，加载时自动参与交叉冲突校验 |
 
 ### 2.3 引擎提供的工具
 
@@ -148,6 +149,7 @@ class MyStrategy(Strategy):
     FACTOR_SPECS: list[dict] = []
     FACTOR_NODES: dict | None = None   # 由 loader 挂接，用户不设置
     FILTER_RULES: dict = {}
+    CONDITION_FACTORS: set[str] = set()  # calc_conditions 引用的因子（不参与选股评分，仅用于校验）
 ```
 
 构造函数签名 `__init__(self, config, factor_specs=None, filter_rules=None)`。实例化后：
@@ -292,6 +294,33 @@ REQUIRED_FIELDS: list[str] = ["open", "high", "low", "close", "vol", "adj_factor
 - 引擎默认基础列（`open`/`high`/`low`/`close`/`vol`/`adj_factor` 永不裁剪）
 
 例如策略的 `select()` 中访问了 `bar["turnover_rate"]` 或 `bar["pe_ttm"]`，必须在此声明。
+
+### 3.10 类变量 `CONDITION_FACTORS`
+
+```python
+CONDITION_FACTORS: set[str] = set()
+```
+
+可选声明。当策略的 `calc_conditions()` 或自定义条件单 handler 读取了某些因子列来做离场判断（如 MACD 金叉死叉、均线排列、BBI 等），但**不希望这些因子参与 `eval_factor_specs` 的评分排名**时，把这些因子名放进此集合。
+
+引擎在加载策略时自动执行三项交叉校验：
+
+| 检查 | 触发条件 | 行为 |
+|------|---------|------|
+| scoring ∩ materialize_only | 同一因子同时标记为评分和仅物化 | WARNING — 可能是配置笔误 |
+| scoring ∩ CONDITION_FACTORS | 评分因子被同时声明为条件因子 | WARNING — 买入可能因同一因子回落而被卖出 |
+| CONDITION_FACTORS 未登记 | 声明的条件因子不在 factor_specs 中 | WARNING — 引擎不会物化该列，bar 读取为 None |
+
+子类覆盖为 `None` 等同于空集，跳过所有检查。默认空集 `set()` 仅意味着"未声明"，同样跳过检查。
+
+典型用法（参考 `TrendGuard` 策略）：
+
+```python
+class TrendGuard(Strategy):
+    # macd_golden / close_vs_bbi / ema_bullish / pdi_mdi 仅在 calc_conditions
+    # 的趋势走坏 handler 中读取，不应影响月度轮动的因子排名
+    CONDITION_FACTORS = {"macd_golden", "close_vs_bbi", "ema_bullish", "pdi_mdi"}
+```
 
 ---
 
