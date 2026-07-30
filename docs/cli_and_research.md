@@ -194,7 +194,88 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 python scripts/cross_validate.py result.db --strategy topk_momentum
 ```
 
-### 2.6 `bench_universe_preload.py` — 性能基准
+### 2.6 `sweep.py` — 参数扫描批量回测
+
+基于 YAML 路径语法展开参数空间，批量运行回测并汇总结果到 SQLite 数据库。
+
+```bash
+python scripts/sweep.py <sweep_config.yaml> \
+    --start YYYYMMDD --end YYYYMMDD \
+    [--out sweep_result.db] [--dry-run]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `sweep_config` | sweep 配置文件路径，位置参数，**必填** |
+| `--start` | 回测起始日期，**必填** |
+| `--end` | 回测结束日期，**必填** |
+| `--out` | 汇总输出数据库路径，默认 `sweep_result.db` |
+| `--dry-run` | 仅打印参数组合，不实际运行回测 |
+
+**sweep 配置文件格式**：
+
+```yaml
+base: strategies/examples/topk_momentum/config.yaml
+params:
+  config.top_k: [3, 5, 10]
+  config.max_positions: [5, 10]
+```
+
+- `base`：基础策略 YAML 路径
+- `params`：以 `.` 分隔的 YAML 嵌套路径为键，参数值列表为值；所有参数取笛卡尔积
+
+**输出**：每组参数组合调用 `run.py` 执行，结果汇总到 `sweep_results` 表（`id, label, params_json, stats_json`）。终端按收益/Sharpe/最大回撤列对齐输出汇总表。
+
+示例：
+
+```bash
+# 预览参数组合
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --dry-run
+
+# 执行扫描
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
+
+# 脚本内复用参数展开逻辑
+from scripts.sweep import expand_params
+combos = expand_params({"top_k": [3, 5], "max_positions": [5, 10]})
+# → [(label, {"top_k": 3, "max_positions": 5}), ...]
+```
+
+### 2.7 `replay.py` — 交易决策回放
+
+从 debug 模式产出的 `debug_snapshots` 表回放回测每日决策上下文，用于定位特定标的在某交易日的买卖依据。
+
+```bash
+python scripts/replay.py <result.db> \
+    [--run-id N] [--symbol SYMBOL] [--date YYYYMMDD] [--list-symbols]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `db` | 结果库路径，位置参数，**必填** |
+| `--run-id` | 指定 run_id，默认 1 |
+| `--symbol` | 过滤股票代码 |
+| `--date` | 过滤日期 YYYYMMDD |
+| `--list-symbols` | 按日期列出有快照的标的（不输出详细上下文） |
+
+**输出**：按日期分组输出当日账户状态（现金、总资产、持仓数）、风控状态、pending 买卖名单与条件单、每个持仓的股数/入场价/持仓天数/最新价/因子列值。
+
+**前提条件**：回测时需启用 debug 模式（`Engine(strategy, provider, debug=True)`）才会写入 `debug_snapshots` 表；需要落盘结果库（`db_path` 不为 `:memory:`）。
+
+示例：
+
+```bash
+# 列出某日的快照标的
+python scripts/replay.py result.db --date 20240605 --list-symbols
+
+# 回放某只股票的全部交易决策
+python scripts/replay.py result.db --symbol 000001.SZ
+
+# 定位特定日期的完整上下文
+python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
+```
+
+### 2.8 `bench_universe_preload.py` — 性能基准
 
 对比全市场 preload 与指数成分并集 preload 的性能差异。适用于 tuning `get_universe` 策略。
 
@@ -219,7 +300,7 @@ python scripts/bench_universe_preload.py --start YYYYMMDD --end YYYYMMDD \
 python scripts/bench_universe_preload.py --start 20240603 --end 20250630
 ```
 
-### 2.7 `dump_fixtures.py` — Fixtures 生成
+### 2.9 `dump_fixtures.py` — Fixtures 生成
 
 从真实数据库重新生成测试 fixtures（`tests/fixtures/*.parquet`）。数据库有更新或结构调整时使用。
 
@@ -229,7 +310,36 @@ python scripts/dump_fixtures.py
 
 无参数，输出到 `tests/fixtures/`，生成 `bars.parquet`、`dividends.parquet`、`st.parquet`、`limits.parquet`、`components.parquet`、`benchmark_bars.parquet`、`trade_cal.parquet` 及辅助表 `moneyflow.parquet` / `cyq_perf.parquet` / `margin_detail.parquet`。
 
-### 2.8 `check_anticorrupt.py` — 反破坏检查
+### 2.10 `dump_brinson_data.py` — Brinson 归因数据导出
+
+从 tushare provider 数据库一次性导出 Brinson 归因所需的 parquet 文件，后续可离线调用 `brinson_attribute_from_files()` 进行归因分析。
+
+```bash
+python scripts/dump_brinson_data.py <provider_db> [--out brinson_data]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `provider_db` | tushare provider 数据库路径，位置参数，**必填** |
+| `--out` | 输出目录，默认 `brinson_data` |
+
+**输出文件**：
+
+| 文件 | 内容 | 结构 |
+|------|------|------|
+| `industry_map.parquet` | 股票→行业映射 | `ts_code, l1_name` |
+| `sw_returns.parquet` | 申万行业日收益 | `index=trade_date, columns=行业名, values=小数` |
+| `benchmark_weights.parquet` | 基准行业权重 | `index=trade_date, columns=行业名, values=0~1` |
+
+输出文件直接作为 `brinson_attribute_from_files()` 的输入。bars 数据需从回测数据库或行情数据库单独导出（至少含 `trade_date, symbol, close, pct_chg`）。
+
+示例：
+
+```bash
+python scripts/dump_brinson_data.py /path/to/tushare.db --out brinson_data
+```
+
+### 2.11 `check_anticorrupt.py` — 反破坏检查
 
 提交前必须通过的架构约束检查，防止被移除的设计模式重新引入。
 
@@ -474,6 +584,39 @@ print(f"超额收益: {result['summary']['total_excess_return']:.4%}")
 }
 ```
 
+### 6.4 从本地文件归因
+
+如果不希望每次归因都连接外部数据库，可以先用 `scripts/dump_brinson_data.py` 导出
+parquet 文件，然后用 `brinson_attribute_from_files()` 离线运行：
+
+```python
+from research.attribution import brinson_attribute_from_files
+
+result = brinson_attribute_from_files(
+    result_db="backtest_output/run.db",
+    industry_map="brinson_data/industry_map.parquet",
+    sw_returns="brinson_data/sw_returns.parquet",
+    benchmark_weights="brinson_data/benchmark_weights.parquet",
+    bars="brinson_data/bars.parquet",
+    run_id=1,
+    benchmark_code="000300.SH",
+)
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `result_db` | str | 回测结果数据库路径 |
+| `industry_map` | str | 行业映射 parquet，columns: `ts_code, l1_name` |
+| `sw_returns` | str | 申万行业日收益 parquet，index=date, columns=行业名 |
+| `benchmark_weights` | str | 基准行业权重 parquet，index=date, columns=行业名 |
+| `bars` | str | 个股 bars parquet，MultiIndex `(trade_date, symbol)`，含 `close, pct_chg` |
+| `run_id` | int | 回测 run_id，默认 1 |
+| `benchmark_code` | str | 基准指数代码，默认 `"000300.SH"` |
+
+返回值结构与 `brinson_attribute()` 相同。如果任何 parquet 文件不存在，抛出
+`FileNotFoundError`。使用前先用 `scripts/dump_brinson_data.py` 准备数据，再自行从回测
+数据库导出 bars parquet（至少含 `trade_date, symbol, close, pct_chg` 列）。
+
 ---
 
 ## 7. 典型工作流
@@ -502,6 +645,22 @@ python scripts/report.py results/v1.db --out results/v1_report.html
 ```
 
 ### 7.2 参数扫描与多 run 对比
+
+**方法一：sweep.py 一键扫描**（推荐，适用于按参数值列表展开的场景）
+
+```yaml
+# sweep.yaml
+base: strategies/my_strategy/config.yaml
+params:
+  config.top_k: [5, 10, 20]
+  config.max_positions: [5, 10]
+```
+
+```bash
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
+```
+
+**方法二：手动多次 run.py**（适用于策略文件不同的场景）
 
 ```bash
 # 多个参数组合共享同一个结果库（多次 run 默认追加新 run_id）
@@ -589,7 +748,10 @@ best = combine_factors(factor_df, fwd_ret, method="icir")
 | `python scripts/report.py <db> --out report.html` | 单 run 报告 |
 | `python scripts/compare.py <db> [--html compare.html]` | 多 run 对比 |
 | `python scripts/cross_validate.py <db>` | 交叉验证 |
+| `python scripts/sweep.py <sweep.yaml> --start DATE --end DATE` | 参数扫描批量回测 |
+| `python scripts/replay.py <db> [--symbol SYM] [--date DATE]` | 交易决策回放 |
 | `python scripts/bench_universe_preload.py --start DATE --end DATE` | 性能基准 |
+| `python scripts/dump_brinson_data.py <provider_db>` | 导出 Brinson 归因数据 |
 | `python scripts/dump_fixtures.py` | 更新测试 fixtures |
 | `python scripts/check_anticorrupt.py` | 架构约束检查 |
 
@@ -609,6 +771,7 @@ best = combine_factors(factor_df, fwd_ret, method="icir")
 | `research.composite` | `combine_factors(df, fwd, method)` | 因子宽表, 前瞻收益, 方法 | 合成得分 Series |
 | | `evaluate_composite(comp, fwd)` | 合成得分, 前瞻收益 | {ic, rank_ic, layered} |
 | `research.attribution` | `brinson_attribute(db, pdb, start, end, index_code, run_id)` | 回测DB, 库路径, 日期, 基准代码, run_id | 完整归因 dict |
+| | `brinson_attribute_from_files(result_db, industry_map, ...)` | 结果DB路径, 4个parquet路径, run_id | 完整归因 dict |
 
 ### 常见参数速查
 

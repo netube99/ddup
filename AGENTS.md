@@ -37,6 +37,15 @@ python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 # 回测结果交叉验证（交易行为、风控触发、磨损合理性检查）
 python scripts/cross_validate.py result.db --strategy name --run-id 1
 
+# 参数扫描批量回测（YAML 路径语法展开参数空间）
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out sweep.db
+
+# 交易决策回放（按 symbol/日期定位调试上下文）
+python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
+
+# Brinson 归因数据导出（一次性导出 parquet，后续离线归因）
+python scripts/dump_brinson_data.py /path/to/tushare.db --out brinson_data
+
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
 ```
@@ -181,7 +190,9 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 成本函数（可配置费率） | `btcore/costs.py` | `docs/strategy_guide.md` |
 | 多 run 结果库 schema | `btcore/database.py` | `docs/strategy_guide.md` |
 | 单文件 HTML 报告与多 run 对比（内联 SVG） | `research/report.py` | `docs/cli_and_research.md` |
-| 回测 CLI（run/report/compare/交叉验证） | `scripts/` | `docs/cli_and_research.md` |
+| 回测 CLI（run/report/compare/交叉验证/sweep/replay） | `scripts/` | `docs/cli_and_research.md` |
+| debug 快照与交易回放 | `btcore/database.py`, `scripts/replay.py` | `docs/strategy_guide.md`, `docs/cli_and_research.md` |
+| 坍缩因子流式计算（compute_breadth） | `btcore/factors/library.py` | `docs/factor_library.md` |
 | 涨跌停价格推算（ROUND_HALF_UP） | `btcore/limits.py` | — |
 | 撮合入口（价格校验/成交量cap等） | `btcore/match/core.py` | — |
 | 列裁剪推导 | `btcore/engine.py:required_bar_columns` | `docs/strategy_guide.md` |
@@ -194,10 +205,11 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 355 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
+- 407 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、scheduler、fill-notification、
   列裁剪、风控规则、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
-  统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移等
+  统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、
+  debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证等
 
 ---
 

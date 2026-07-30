@@ -64,8 +64,12 @@ research/        — 研究工具（纯函数 API，不依赖引擎）
 | 因子 IC/分层/相关性评估 | CLI + `research/factor_eval.py` | [因子库指南](./factor_library.md) |
 | 绩效归因（Brinson） | `research/attribution.py` | [CLI 与研究工具](./cli_and_research.md) |
 | 运行回测（CLI） | `scripts/run.py` | [CLI 与研究工具](./cli_and_research.md) |
+| 参数扫描批量回测 | `scripts/sweep.py` | [CLI 与研究工具](./cli_and_research.md) |
 | 生成 HTML 报告 | `scripts/report.py` | [CLI 与研究工具](./cli_and_research.md) |
 | 多 run 参数对比 | `scripts/compare.py` | [CLI 与研究工具](./cli_and_research.md) |
+| 交易决策回放调试 | `scripts/replay.py` | [CLI 与研究工具](./cli_and_research.md) |
+| Brinson 本地文件归因 | `research/attribution.py` | [CLI 与研究工具](./cli_and_research.md) |
+| debug 模式诊断 | `Engine(debug=True)` | [策略设计指南](./strategy_guide.md) |
 | 程序式 API（Python） | `Engine(strategy, provider).run()` | [策略设计指南](./strategy_guide.md) |
 
 ---

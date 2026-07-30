@@ -689,6 +689,16 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 
 主面板上的保形节点在候选池口径上计算。**用户无需手动管理**——`build_factor_plan` + `materialize` 是纯函数，引擎在 preload 阶段自动执行。
 
+物化完成后引擎自动调用 `validate_materialization()` 检查坍缩因子的列存在性与 NaN 占比：
+NaN 占比 >5% 时输出告警日志，返回 issues 列表供外部消费。
+
+```python
+from btcore.factors.plan import validate_materialization
+
+issues = validate_materialization(bars_df, factor_plan)
+# → [{"level": "warning", "message": "坍缩因子 'mkt_breadth20' NaN 占比 12.3% ..."}, ...]
+```
+
 ### 10.3 数据量对比
 
 对于一个典型的中证 500 选股策略（500 候选 vs 5000 全市场，120 天窗口）：
@@ -1015,6 +1025,11 @@ compute_factor(name, df, library=None) -> pd.Series
 
 compute_factors(names, df, library=None) -> pd.DataFrame
   # 批量计算因子值，返回每列一个因子的 DataFrame
+
+compute_breadth(factor_name, backend, start, end, library=None, chunk_days=60) -> pd.Series
+  # 流式计算坍缩因子为日频 Series。仅接受坍缩算子（mean/group_mean 等）定义的因子，
+  # 对保形因子抛出 ValueError。内部按 chunk_days 分片加载全市场数据，O(chunk) 内存。
+  # 返回 index=trade_date 的 Series，每个值代表当日全市场口径的坍缩标量（如 0.35=35%）。
 
 resolve_spec(spec, library=None) -> dict
   # 解析 factor_specs 条目

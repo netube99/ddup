@@ -1241,7 +1241,7 @@ from btcore.strategy_loader import load_strategy
 
 strategy = load_strategy("strategies/my_strategy/config.yaml")
 provider = DataProvider(backend)
-engine = Engine(strategy, provider, db_path="result.db")
+engine = Engine(strategy, provider, db_path="result.db", debug=False)
 
 result = engine.run("20240101", "20240630")
 # result["account_daily"]   → DataFrame，每日账户快照
@@ -1262,11 +1262,25 @@ result = engine.run("20240101", "20240630")
 
 ```
 
-### 9.4 调试技巧
+### 9.4 Debug 模式
+
+Engine 构造时传入 `debug=True`，引擎每日写入一条 `debug_snapshots` 记录到结果库，包含：
+
+- `account`：当日现金、总资产、持仓数
+- `pending`：当日买卖名单与条件买单
+- `risk_forced`：是否触发风控强平
+- `holdings_detail`：每只持仓的股数、入场价、入场日期、持仓天数
+- `bars_subset`：涉及标的的当日行情截面（含因子列值）
+
+需要落盘结果库（`db_path` 不为 `:memory:`）。配合 `scripts/replay.py` 可按 symbol/日期
+回放完整决策上下文，定位"某天为什么买/卖了某只股票"。
+
+### 9.5 调试技巧
 
 - `logging` 模块：设置 `logger = logging.getLogger(__name__)` 输出调试信息
 - 检查 `snapshot.trades` 在 `select()` 中获取当日成交（与 `on_fills` 收到的同一份数据）
 - `provider.get_historical_bars()` 可在 `select()` 中查询历史数据（前视保护自动生效）
+- `scripts/replay.py` 按 symbol/日期回放 debug 快照，定位特定决策的行情与因子上下文
 
 ---
 
@@ -1386,6 +1400,14 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 | `config_json` | TEXT | 策略完整配置 JSON |
 | `status` | TEXT | `running` / `completed` / `failed` |
 | `stats_json` | TEXT | 统计指标 JSON |
+
+**debug_snapshots**（debug 模式每日决策快照，仅 `Engine(debug=True)` 时写入）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `run_id` | INTEGER | 关联 runs |
+| `date` | TEXT | 交易日 (YYYYMMDD) |
+| `snapshot_json` | TEXT | JSON：account/pending/holdings_detail/bars_subset/risk_forced |
 
 **account_daily**（逐日账户快照）：
 
