@@ -2,6 +2,7 @@
 
 import pytest
 
+from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy import Strategy
 from btcore.strategy_loader import load_strategy
@@ -98,3 +99,61 @@ def test_rebalance_dates_monthly():
     cal = ["20240530", "20240531", "20240603", "20240604"]
     rule = {"frequency": "monthly", "monthday": 1}
     assert _rebalance_dates(cal, rule) == {"20240530", "20240603"}
+
+
+# ── on_tick buy_conditions 集成测试 ──
+
+
+class OnTickBuyCondStrategy(Strategy):
+    """on_tick 返回 buy_conditions 的测试策略，配合 monthly schedule 使用。"""
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config or {}, **kwargs)
+        self._bought = False
+
+    def on_start(self, provider, first_date, end_date=None):
+        pass
+
+    def select(self, bars, snapshot, provider):
+        return {"buy": [], "sell": []}
+
+    def calc_conditions(self, symbol, entry_price, bar, holding_days):
+        return []
+
+    def on_tick(self, bars, snapshot, provider):
+        if self._bought:
+            return None
+        return {
+            "buy_conditions": [{
+                "symbol": "000001.SZ",
+                "type": "LIMIT_BUY",
+                "price": 99999.0,
+                "value": 50000.0,
+            }],
+        }
+
+    def on_fills(self, trades, provider):
+        for t in trades:
+            if t.side == "BUY":
+                self._bought = True
+
+
+def test_on_tick_buy_conditions_monthly_schedule(tmp_path):
+    """on_tick buy_conditions 在非调仓日也被合并到 pending_actions 并执行。"""
+    strategy = _load_scheduled(
+        tmp_path,
+        "schedule:\n  frequency: monthly\n  monthday: 1\n"
+        "strategy: tests.test_scheduler:OnTickBuyCondStrategy",
+    )
+    provider = DataProvider(MockDataBackend())
+    engine = Engine(strategy, provider, initial_capital=1_000_000)
+
+    result = engine.run("20240603", "20240607")
+    trade_log = result["trade_log"]
+
+    # 验证 on_tick 的 buy_conditions 被撮合执行
+    limit_buys = trade_log[trade_log["trigger"] == "LIMIT_BUY"]
+    assert len(limit_buys) == 1
+    # 执行日应为 20240604（6 月第 2 个交易日，非调仓日）
+    assert str(limit_buys.iloc[0]["date"]) == "20240604"
+    assert "000001.SZ" in engine.account.holdings

@@ -487,6 +487,38 @@ config:
 | `factor` | str | 是 | 因子库中的因子名 |
 | `weight` | float | 否 | 合成权重，默认 1.0 |
 | `ascending` | bool | 否 | 是否升序排名（小值排前面），默认 false |
+| `materialize_only` | bool | 否 | 仅物化不参与得分合成，默认 false |
+
+#### 8.1.1 `materialize_only` — 仅物化不评分
+
+`materialize_only: true` 告诉 `eval_factor_specs` 跳过该条目的评分合成——因子列仍物化到
+`factor_df` 中供 `calc_conditions()` 判断信号时读取，但不参与百分比排名和加权平均。
+
+适用场景：策略内部有复杂的因子组合逻辑（如在 `calc_conditions()` 中按市场广度决定
+止损阈值），需要某个因子列可用，但不想让它在 `select()` 的 top-k 排名中产生影响。
+声明为 `materialize_only` 即可——无需编造假权重来触发物化。
+
+```yaml
+factor_specs:
+  - factor: mom_z
+    weight: 0.6
+  - factor: vol_z
+    weight: 0.4
+    ascending: true
+  # mkt_breadth20 仅用于 calc_conditions 判断市场情绪，不参与选股得分
+  - factor: mkt_breadth20
+    materialize_only: true
+```
+
+程序化构建等价写法：
+
+```python
+factor_specs=[
+    {"name": "mom_z", "weight": 0.6},
+    {"name": "vol_z", "weight": 0.4, "ascending": True},
+    {"name": "mkt_breadth20", "materialize_only": True},
+]
+```
 
 ### 8.2 程序化构建
 
@@ -525,7 +557,7 @@ class MyStrategy(Strategy):
 
 | 类变量 | 类型 | 含义 |
 |--------|------|------|
-| `FACTOR_SPECS` | `list[dict]` | 因子引用列表，`[{name, weight, ascending}]` |
+| `FACTOR_SPECS` | `list[dict]` | 因子引用列表，`[{name, weight, ascending, materialize_only}]` |
 | `FACTOR_NODES` | `dict \| None` | 因子闭包，由 loader 挂接，用户不要手动设置 |
 | `REQUIRED_FIELDS` | `list[str]` | 策略 `select()` 中命令式访问的额外列（因子列之外） |
 

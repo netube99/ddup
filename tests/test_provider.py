@@ -48,3 +48,26 @@ def test_sql_fallback_without_attach():
     assert not hist.empty
     dates = hist.index.get_level_values("trade_date")
     assert dates.max() < "20240610"
+
+
+def test_benchmark_trend_with_data():
+    """get_benchmark_trend 返回正确的累计收益。"""
+    backend = MockDataBackend()
+    provider = DataProvider(backend)
+    provider.benchmark = "000300.SH"
+
+    trend = provider.get_benchmark_trend("20240701", window=30)
+
+    assert trend is not None
+    assert isinstance(trend, float)
+    assert -1.0 <= trend <= 1.0
+
+
+def test_benchmark_trend_no_benchmark():
+    """未配置 benchmark 时 get_benchmark_trend 返回 None。"""
+    provider = DataProvider(MockDataBackend())
+    # benchmark 未设置
+
+    result = provider.get_benchmark_trend("20240701", window=30)
+
+    assert result is None

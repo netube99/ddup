@@ -87,7 +87,7 @@ on_start (一次)
        ├─ 撮合昨日信号 (手动买卖 + 条件卖出 + 条件买入)       │
        ├─ NAV 结算                                           │
        ├─ on_fills(trades)       ← 感知当日已撮合成交        │
-       ├─ on_tick(bars, snapshot) ← 每日状态维护              │
+       ├─ on_tick(bars, snapshot) ← 每日状态维护 + buy_conditions  │
        ├─ select(bars, snapshot) → {buy, sell, ...}          │
        ├─ calc_conditions() × N   ← 每个持仓生成条件单        │
        ├─ 风控裁剪 (DrawdownBreaker + apply_risk_rules)      │
@@ -113,7 +113,7 @@ on_start (一次)
 | 必须实现 | `select(bars, snapshot, provider)` → dict | 每日买卖决策 |
 | 必须实现 | `calc_conditions(symbol, entry_price, bar, holding_days)` → list[dict] | 每个持仓每日的条件单 |
 | 可选实现 | `on_fills(trades, provider)` | 感知成交 → 冷却期、状态跟踪 |
-| 可选实现 | `on_tick(bars, snapshot, provider)` | 每日状态维护（市场检测、冷却递减） |
+| 可选实现 | `on_tick(bars, snapshot, provider)` → dict \| None | 每日状态维护 + 非调仓日条件买单 |
 | 可选覆盖 | `get_universe(provider, start, end)` → list[str] \| None | 自定义交易域 |
 | 可选覆盖 | `get_factor_universe(provider, start, end)` → list[str] \| None | 自定义因子计算域 |
 | 声明式 | `REQUIRED_FIELDS: list[str]` | 声明 `select()` 中命令式访问的列 |
@@ -234,7 +234,7 @@ class MyStrategy(Strategy):
 
 典型用途：感知条件单止损/止盈退出 → 对标的施加冷却期；记录入场价、最高价等持仓状态；重置 trailing 锚点。
 
-### 3.6 `on_tick(self, bars, snapshot, provider)`
+### 3.6 `on_tick(self, bars, snapshot, provider)` → dict | None
 
 **可选 hook。** 每日调用——**即使非调仓日 schedule 包装器拦截了 `select`，`on_tick` 仍然运行**。在 `on_fills` 之后、`select` 之前调用。
 
@@ -244,6 +244,29 @@ class MyStrategy(Strategy):
 - 逐仓最高价跟踪
 - `ConditionBuilder.prune()` 清理已平仓标的的 trailing 状态
 - 任何需要每日更新的策略内部状态
+
+**返回值（v2 新增）：** 可返回 `{"buy_conditions": [{symbol, type, price, value|shares}]}`，引擎会将其合并到 `select()` 返回的 `buy_conditions` 中。这使得策略可以在非调仓日提交条件买单（例如突破买入），突破 1-2 日的调仓窗口限制。基类默认返回 `None`。
+
+```python
+def on_tick(self, bars, snapshot, provider):
+    """冷却递减 + 非调仓日突破买入。"""
+    # ... 冷却递减、状态维护 ...
+
+    # 非调仓日检测突破信号，提交条件买单
+    orders = []
+    for symbol in self._watchlist:
+        bar = bars.get(symbol)
+        if bar and bar["high"] >= self._breakout_prices.get(symbol, float("inf")):
+            orders.append({
+                "symbol": symbol,
+                "type": "BREAKOUT_BUY",
+                "price": self._breakout_prices[symbol],
+                "value": self._position_size,
+            })
+    if orders:
+        return {"buy_conditions": orders}
+    return None
+```
 
 ### 3.7 `get_universe(self, provider, start, end) → list[str] | None`
 

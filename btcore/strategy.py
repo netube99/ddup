@@ -82,7 +82,7 @@ class Strategy(ABC):
         同样一份 trades 也可在 select 里经 snapshot.trades 读取。
         """
 
-    def on_tick(self, bars, snapshot, provider) -> None:
+    def on_tick(self, bars, snapshot, provider) -> dict | None:
         """可选钩子：每日调用（无论是否调仓日），用于维护策略内部状态。
 
         引擎在 on_fills 之后、select 之前调用。schedule 包装器不会拦截此钩子
@@ -91,14 +91,19 @@ class Strategy(ABC):
           - 市场状态机推进
           - 持仓逐仓最高价跟踪
           - 自定义 ConditionBuilder 状态维护
+          - 返回 buy_conditions 以在非调仓日提交新的条件买单
 
         Args:
             bars: 当日截面 dict-of-dicts（symbol → {open, high, low, close, ...}）
             snapshot: 当日账户快照 Snapshot（含 holdings / trades / cash / total_value）
             provider: DataProvider 实例
 
-        基类默认空操作，不破坏现有策略。
+        Returns:
+            None 或 {"buy_conditions": [{symbol, trigger, price?, ...}, ...]}。
+            返回的 buy_conditions 会合并到引擎的 pending_actions 中，与 select()
+            返回的 buy_conditions 等价处理。基类默认返回 None。
         """
+        return None
 
     @abstractmethod
     def select(self, bars, account_snapshot, provider) -> dict:

@@ -1,5 +1,7 @@
 """btcore.factors.plan 测试：供给计划推导 + 两阶段物化 + 因果性 + 引擎 e2e。"""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -228,3 +230,140 @@ factor_specs:
         last = engine.bars_df.index.get_level_values("trade_date").max()
         day = engine.bars_df.loc[last, "idx_beta"]
         assert day.notna().any()
+
+
+class TestCollapseIntegrity:
+    """2.1 / 2.2: NaN 告警与物化后验证。"""
+
+    def test_project_logs_missing_dates(self, caplog):
+        """广度面板日期少于主面板时 _project 应告警。"""
+        import logging
+
+        syms = ["A", "B", "C"]
+        main_dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        breadth_dates = pd.date_range("2024-01-05", periods=5).strftime("%Y%m%d")
+
+        main_idx = pd.MultiIndex.from_product(
+            [main_dates, syms], names=["trade_date", "symbol"]
+        )
+        breadth_idx = pd.MultiIndex.from_product(
+            [breadth_dates, syms], names=["trade_date", "symbol"]
+        )
+        main_df = pd.DataFrame({"close_hfq": 1.0}, index=main_idx)
+        breadth_df = pd.DataFrame({"close_hfq": 2.0}, index=breadth_idx)
+        breadth_df["test_collapse"] = 42.0
+
+        p = plan.build_factor_plan(
+            {"test_collapse": {"expr": "mean(close_hfq)"}}, ["test_collapse"]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="btcore.factors.plan"):
+            plan.materialize(main_df, breadth_df, p, {"test_collapse": {"expr": "mean(close_hfq)"}})
+
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("坍缩因子" in m and "无值" in m for m in warnings), \
+            f"Expected NaN warning, got: {warnings}"
+
+    def test_validate_materialization_no_issues(self):
+        """正常物化无 NaN 时 validate_materialization 返回空列表。"""
+        syms = ["A", "B", "C"]
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        idx = pd.MultiIndex.from_product(
+            [dates, syms], names=["trade_date", "symbol"]
+        )
+
+        main_df = pd.DataFrame({"close_hfq": 1.0}, index=idx)
+        breadth_df = pd.DataFrame({"close_hfq": 2.0}, index=idx)
+        breadth_df["test_collapse"] = 42.0
+
+        p = plan.build_factor_plan(
+            {"test_collapse": {"expr": "mean(close_hfq)"}}, ["test_collapse"]
+        )
+        plan.materialize(main_df, breadth_df, p,
+                         {"test_collapse": {"expr": "mean(close_hfq)"}})
+
+        issues = plan.validate_materialization(main_df, p)
+        assert issues == [], f"Expected no issues, got: {issues}"
+
+    def test_validate_materialization_detects_nan(self, caplog):
+        """NaN 占比超 5% 时 validate_materialization 返回 warning issue。"""
+        import logging
+
+        syms = ["A", "B", "C"]
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+
+        # 广度面板只有部分日期有值（末尾日期），投影后主面板早日期为 NaN
+        main_idx = pd.MultiIndex.from_product(
+            [dates, syms], names=["trade_date", "symbol"]
+        )
+        breadth_dates = dates[-3:]  # 只有最后 3 天有数据
+        breadth_idx = pd.MultiIndex.from_product(
+            [breadth_dates, syms], names=["trade_date", "symbol"]
+        )
+
+        main_df = pd.DataFrame({"close_hfq": 1.0}, index=main_idx)
+        breadth_df = pd.DataFrame({"close_hfq": 2.0}, index=breadth_idx)
+        breadth_df["test_collapse"] = 42.0
+
+        p = plan.build_factor_plan(
+            {"test_collapse": {"expr": "mean(close_hfq)"}}, ["test_collapse"]
+        )
+        plan.materialize(main_df, breadth_df, p,
+                         {"test_collapse": {"expr": "mean(close_hfq)"}})
+
+        # NaN 占比 = 7/10 = 70% > 5%
+        issues = plan.validate_materialization(main_df, p)
+        assert len(issues) > 0, "Expected issues for high NaN ratio"
+        assert any("NaN" in i["message"] for i in issues)
+        assert all(i["level"] == "warning" for i in issues)
+
+
+class TestValidateMaterialization:
+    """validate_materialization() 的单元测试。"""
+
+    def test_normal_returns_empty(self):
+        """正常物化不产生 issues（足够长的时间序列使 NaN 占比低于 5%）。"""
+        dates = pd.date_range("2024-01-01", periods=500).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
+        plan.materialize(main, breadth, p, _NODES)
+        issues = plan.validate_materialization(main, p)
+        assert len(issues) == 0
+
+    def test_nan_detected(self):
+        """含高 NaN 占比的坍缩因子被检出。"""
+        dates = pd.date_range("2024-01-01", periods=40).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
+        plan.materialize(main, breadth, p, _NODES)
+        # 人为制造大量 NaN
+        main.loc[main.index[:200], "pct_above_ma20"] = np.nan
+        issues = plan.validate_materialization(main, p)
+        assert len(issues) > 0
+        assert any("NaN" in issue["message"] for issue in issues)
+
+
+class TestProjectWarnings:
+    """_project() NaN 告警测试。"""
+
+    def test_missing_dates_logs_warning(self, caplog):
+        """广度面板日期少于主面板日期时 _project() 输出告警。"""
+        with caplog.at_level(logging.WARNING, logger="btcore.factors.plan"):
+            dates_main = pd.date_range("2024-01-01", periods=40).strftime("%Y%m%d")
+            dates_breadth = pd.date_range("2024-01-01", periods=25).strftime("%Y%m%d")
+            main = _mk_panel(dates_main, ["A", "B", "C"])
+            breadth = _mk_panel(dates_breadth, ["A", "B", "C", "D", "E"], seed=2)
+            p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
+            # 先在广度面板求值
+            breadth_set = p["breadth"]
+            for name in p["topo"]:
+                if name in breadth_set:
+                    breadth[name] = plan._eval_spec_on(breadth, _NODES[name])
+            # 投影：market 坍缩因子，广度面板日期少 → NaN
+            for name, kind in p["collapse"].items():
+                plan._project(main, breadth, name, kind)
+
+        has_warning = any("坍缩因子" in r.message for r in caplog.records)
+        assert has_warning, "日期不匹配应产生告警"

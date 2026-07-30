@@ -45,9 +45,11 @@ def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
 class Engine:
     def __init__(self, strategy, provider: DataProvider,
                  initial_capital: float | None = None,
-                 db_path: str | None = None, max_positions: int | None = None):
+                 db_path: str | None = None, max_positions: int | None = None,
+                 debug: bool = False):
         self.strategy = strategy
         self.provider = provider
+        self._debug = debug
 
         config = strategy.config
         self.initial_capital = float(
@@ -117,6 +119,7 @@ class Engine:
         # 当前 pending 批次是否风控强平（卖出 trigger 标 RISK）
         self._risk_forced = False
         self.pending_actions = {"buy": [], "sell": []}
+        self._debug = debug
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
         self.run_id = 0
         self.bars_df: pd.DataFrame | None = None
@@ -164,6 +167,10 @@ class Engine:
                 factor_plan.materialize(
                     bars_df, breadth_df, fplan, self.strategy.FACTOR_NODES
                 )
+                # 物化后验证
+                issues = factor_plan.validate_materialization(bars_df, fplan)
+                for issue in issues:
+                    logger.warning("[因子验证] %s", issue["message"])
             # 若 factor_universe 比 trading universe 更宽，裁切到交易域
             if factor_symbols is not None and trade_symbols is not None:
                 trade_set = set(trade_symbols)
@@ -397,6 +404,8 @@ class Engine:
                 self._settle(today, bars_dict, all_trades, corporate_log, conn)
 
                 self._compute_pending(today, bars_dict, all_trades)
+                if self._debug:
+                    self._write_debug_snapshot(conn, today, self.pending_actions, day_bars)
         except Exception:
             self._restore_state()
             raise
@@ -469,10 +478,16 @@ class Engine:
         )
         # on_tick 是可选钩子：每日运行（绕过 schedule 包装器），在 select 之前更新策略内部状态
         on_tick = getattr(self.strategy, "on_tick", None)
+        on_tick_result = None
         if callable(on_tick):
-            on_tick(bars_dict, snapshot, self.provider)
+            on_tick_result = on_tick(bars_dict, snapshot, self.provider)
 
         actions = self.strategy.select(bars_dict, snapshot, self.provider)
+
+        # 合并 on_tick 返回的 buy_conditions（不受 schedule 限制）
+        if on_tick_result is not None and on_tick_result.get("buy_conditions"):
+            existing_conds = actions.setdefault("buy_conditions", [])
+            existing_conds.extend(on_tick_result["buy_conditions"])
 
         # 组合级风控: 熔断态强制只卖不买（次日强平, trigger=RISK）;
         # 否则按 risk_rules 裁剪买侧（卖侧永不干预）
@@ -587,6 +602,50 @@ class Engine:
             self.account.cash = self._saved_cash
         if self._saved_holdings is not None:
             self.account.holdings = self._saved_holdings
+
+    def _write_debug_snapshot(self, conn, today, pending_actions, day_bars):
+        """收集每日调试快照并写入 debug_snapshots 表。"""
+        bars = day_bars.to_dict("index")
+
+        # holdings 详情
+        holdings_detail = {}
+        for symbol, h in self.account.holdings.items():
+            holdings_detail[symbol] = {
+                "shares": h.shares,
+                "entry_price": h.entry_price,
+                "entry_date": h.entry_date,
+                "holding_days": h.holding_days,
+            }
+
+        # 涉及 symbol: holdings + buy 目标
+        relevant_symbols = set(holdings_detail) | set(pending_actions.get("buy", []))
+        bc_symbols = {c["symbol"] for c in pending_actions.get("buy_conditions", [])}
+        relevant_symbols |= bc_symbols
+
+        bars_subset = {}
+        for sym in relevant_symbols:
+            bar = bars.get(sym)
+            if bar is not None:
+                bars_subset[sym] = {k: v for k, v in bar.items()
+                                    if not k.startswith("_")}
+
+        snapshot = {
+            "date": today,
+            "account": {
+                "cash": self.account.cash,
+                "total_value": self.account.total_value,
+                "n_holdings": len(self.account.holdings),
+            },
+            "pending": {
+                "buy": pending_actions.get("buy", []),
+                "sell": pending_actions.get("sell", []),
+                "buy_conditions": pending_actions.get("buy_conditions", []),
+            },
+            "risk_forced": self._risk_forced,
+            "holdings_detail": holdings_detail,
+            "bars_subset": bars_subset,
+        }
+        database.write_debug_snapshot(conn, self.run_id, today, snapshot)
 
 
 def is_valid_positive(v) -> bool:

@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import pandas as pd
+
+from btcore.factors.library import resolve_spec
 from btcore.strategy_loader import build_strategy, load_strategy
+from btcore.strategy_tools import eval_factor_specs
 from strategies.examples.topk_momentum import TopKMomentum
 
 EXAMPLE_YAML = "strategies/examples/topk_momentum/config.yaml"
@@ -287,6 +291,18 @@ class TestBuildStrategy:
                 == from_yaml.FACTOR_NODES["mom20"]["expr"])
         assert len(from_dict.FACTOR_SPECS) == len(from_yaml.FACTOR_SPECS)
 
+    def test_materialize_only_resolves(self):
+        """spec 含 materialize_only: true → 解析后 materialize_only=True。"""
+        spec = resolve_spec({"factor": "mom20", "materialize_only": True})
+        assert spec["materialize_only"] is True
+        assert spec["name"] == "mom20"
+        assert spec["weight"] == 1.0
+
+    def test_materialize_only_defaults_false(self):
+        """未声明 materialize_only → 缺省 False。"""
+        spec = resolve_spec({"factor": "mom20", "weight": 2.0})
+        assert spec["materialize_only"] is False
+
 
 # ── factor_universe 加载测试 ──
 
@@ -368,3 +384,69 @@ class TestBuildStrategyFactorUniverse:
         strategy = build_strategy(TopKMomentum, config={})
         assert strategy.get_factor_universe(
             _stub_provider({}), "20240603", "20240630") is None
+
+
+# ── eval_factor_specs materialize_only 测试 ──
+
+
+class TestEvalFactorSpecsMaterializeOnly:
+    def test_materialize_only_skipped_in_scoring_included_in_factor_df(self):
+        """materialize_only 因子不参与加权得分但写入 factor_df。"""
+        df = pd.DataFrame(
+            {
+                "mom20": [0.05, -0.02, 0.10, 0.03],
+                "mkt_breadth20": [0.65, 0.65, 0.65, 0.65],
+            },
+            index=["A", "B", "C", "D"],
+        )
+        factor_specs = [
+            {"name": "mom20", "weight": 1.0, "ascending": False},
+            {"name": "mkt_breadth20", "weight": 1.0, "materialize_only": True},
+        ]
+        factor_df, score = eval_factor_specs(df, factor_specs)
+
+        # factor_df 包含两列
+        assert list(factor_df.columns) == ["mom20", "mkt_breadth20"]
+
+        # score 仅由 mom20 决定（mkt_breadth20 被跳过）
+        # mom20=[0.05,-0.02,0.10,0.03], ascending=False:
+        # B(-0.02)→rank 1→pct 0.25, D(0.03)→rank 2→pct 0.5, A(0.05)→rank 3→pct 0.75, C(0.10)→rank 4→pct 1.0
+        assert score["A"] == 0.75
+        assert score["C"] == 1.0
+        assert score["B"] == 0.25
+
+    def test_all_materialize_only_yields_uniform_score(self):
+        """所有因子都是 materialize_only → score 全 1.0。"""
+        df = pd.DataFrame(
+            {"breadth": [0.5, 0.5]}, index=["A", "B"]
+        )
+        factor_specs = [
+            {"name": "breadth", "weight": 1.0, "materialize_only": True},
+        ]
+        factor_df, score = eval_factor_specs(df, factor_specs)
+
+        assert list(factor_df.columns) == ["breadth"]
+        assert (score == 1.0).all()
+
+    def test_mixed_scoring_and_materialize_only_weights_independent(self):
+        """materialize_only 条目的 weight 不影响 total_weight 和得分。"""
+        df = pd.DataFrame(
+            {
+                "a": [0.3, 0.1, 0.2],
+                "b": [100, 200, 300],
+            },
+            index=["X", "Y", "Z"],
+        )
+        factor_specs = [
+            {"name": "a", "weight": 0.5, "ascending": False},
+            {"name": "b", "weight": 999.0, "materialize_only": True},
+        ]
+        factor_df, score = eval_factor_specs(df, factor_specs)
+
+        # b 被跳过，score 仅由 a 决定
+        # a=[0.3,0.1,0.2], ascending=False, rank(pct=True, ascending=True):
+        # X(0.3)→rank 3→pct 3/3=1.0, Y(0.1)→rank 1→pct 1/3≈0.333, Z(0.2)→rank 2→pct 2/3≈0.667
+        assert score["X"] == 1.0
+        assert score["Z"] == pytest.approx(2.0 / 3.0)
+        assert score["Y"] == pytest.approx(1.0 / 3.0)
+        assert "b" in factor_df.columns

@@ -125,6 +125,20 @@ class DataProvider:
         ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
         return ret.dropna()
 
+    def get_benchmark_trend(self, end_date: str, window: int = 30) -> float | None:
+        """返回基准指数近 window 日累计收益（前视保护）。
+
+        end_date 钳制到当前模拟日。window 默认 30。
+
+        Returns:
+            累计收益小数（如 0.05 即 5%）；无数据返回 None。
+        """
+        rets = self.get_benchmark_returns(end_date, lookback_days=window + 5)
+        if rets is None or rets.empty:
+            return None
+        recent = rets.iloc[-window:]
+        return float((1 + recent).prod() - 1)
+
     # ── 内部 ──
 
     def _prev_trading_day(self, date_str: str) -> str | None:

@@ -154,3 +154,18 @@ class TestEndToEnd:
         full = _run(_strategy(), monkeypatch=monkeypatch, full_columns=True)
         assert _normalize(pruned["trade_log"]) == _normalize(full["trade_log"])
         assert len(pruned["account_daily"]) == len(full["account_daily"])
+
+    def test_materialize_only_factor_in_columns(self):
+        """materialize_only 因子仍被引擎物化到 bars_df 列中。"""
+        specs = [
+            {"name": "mom20", "weight": 1.0, "ascending": False},
+            {"name": "low_turnover", "weight": 0.5, "ascending": True,
+             "materialize_only": True},
+        ]
+        s = _strategy(factor_specs=specs)
+        engine = Engine(s, DataProvider(MockDataBackend()),
+                       initial_capital=1_000_000, db_path=":memory:")
+        engine.run("20240603", "20240628")
+        # materialize_only 的 low_turnover 仍然在列中
+        assert "low_turnover" in engine.bars_df.columns
+        assert "mom20" in engine.bars_df.columns

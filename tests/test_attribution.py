@@ -10,6 +10,7 @@ from research.attribution import (
     _compute_brinson_daily,
     _reconstruct_daily_holdings,
     brinson_attribute,
+    brinson_attribute_from_files,
 )
 
 # ═══════════════════════════════════════════
@@ -257,3 +258,191 @@ class TestRealDBAttribution:
         ind_detail = result["industry_detail"]
         assert "银行" in ind_detail
         assert ind_detail["银行"]["avg_portfolio_weight"] > 0.5
+
+
+# ═══════════════════════════════════════════
+# brinson_attribute_from_files 测试
+# ═══════════════════════════════════════════
+
+
+class TestBrinsonFromFiles:
+    """使用合成 parquet 文件测试 brinson_attribute_from_files。"""
+
+    def test_full_pipeline_from_files(self, tmp_path):
+        """合成 parquet 文件 → brinson_attribute_from_files → 验证输出结构。"""
+        # 创建回测 DB（trade_log）
+        db_path = str(tmp_path / "test_backtest.db")
+        bconn = sqlite3.connect(db_path)
+        bconn.executescript("""
+            CREATE TABLE IF NOT EXISTS trade_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                trigger TEXT NOT NULL DEFAULT 'MANUAL',
+                price REAL NOT NULL DEFAULT 0,
+                shares INTEGER NOT NULL,
+                turnover REAL NOT NULL DEFAULT 0,
+                commission REAL NOT NULL DEFAULT 0,
+                stamp_tax REAL NOT NULL DEFAULT 0,
+                transfer_fee REAL NOT NULL DEFAULT 0,
+                slippage_amount REAL NOT NULL DEFAULT 0,
+                net_amount REAL NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                run_id INTEGER NOT NULL DEFAULT 1
+            );
+        """)
+        trades = [
+            (1, "20240603", "600036.SH", "BUY", 10000),
+            (2, "20240603", "600519.SH", "BUY", 2000),
+            (3, "20240604", "600036.SH", "BUY", 5000),
+            (4, "20240605", "600036.SH", "SELL", 5000),
+            (5, "20240606", "600519.SH", "SELL", 1000),
+        ]
+        for tid, d, s, side, sh in trades:
+            bconn.execute(
+                "INSERT INTO trade_log (id, date, symbol, side, shares, run_id) "
+                "VALUES (?,?,?,?,?, 1)",
+                (tid, d, s, side, sh),
+            )
+        bconn.commit()
+        bconn.close()
+
+        # 创建合成 parquet 文件
+        out_dir = str(tmp_path / "parquet_data")
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+
+        # industry_map
+        ind_map = pd.DataFrame([
+            {"ts_code": "600036.SH", "l1_name": "银行"},
+            {"ts_code": "600519.SH", "l1_name": "食品饮料"},
+        ])
+        ind_map.to_parquet(f"{out_dir}/industry_map.parquet", index=False)
+
+        # sw_returns
+        dates = ["20240603", "20240604", "20240605", "20240606", "20240607"]
+        sw_records = []
+        for d in dates:
+            sw_records.append({"trade_date": d, "name": "银行", "pct_change": 3.0})
+            sw_records.append({"trade_date": d, "name": "食品饮料", "pct_change": 1.0})
+        sw_df = pd.DataFrame(sw_records)
+        sw_wide = sw_df.pivot_table(
+            index="trade_date", columns="name", values="pct_change", aggfunc="first"
+        )
+        sw_wide.to_parquet(f"{out_dir}/sw_returns.parquet")
+
+        # benchmark_weights
+        bw_records = []
+        for d in dates:
+            bw_records.append({"trade_date": d, "l1_name": "银行", "weight": 0.30})
+            bw_records.append({"trade_date": d, "l1_name": "食品饮料", "weight": 0.20})
+        bw_df = pd.DataFrame(bw_records)
+        bw_wide = bw_df.pivot_table(
+            index="trade_date", columns="l1_name", values="weight",
+            aggfunc="first", fill_value=0.0,
+        )
+        bw_wide.to_parquet(f"{out_dir}/benchmark_weights.parquet")
+
+        # bars (MultiIndex)
+        bar_records = []
+        for i, d in enumerate(dates):
+            bar_records.append({
+                "trade_date": d, "symbol": "600036.SH",
+                "close": 35.0 * (1 + 0.02 * i), "pct_chg": 2.0,
+            })
+            bar_records.append({
+                "trade_date": d, "symbol": "600519.SH",
+                "close": 1600.0 * (1 + 0.02 * i), "pct_chg": 5.0,
+            })
+        bars_df = pd.DataFrame(bar_records)
+        bars_df.set_index(["trade_date", "symbol"], inplace=True)
+        bars_df.to_parquet(f"{out_dir}/bars.parquet")
+
+        # 调用 brinson_attribute_from_files
+        result = brinson_attribute_from_files(
+            result_db=db_path,
+            industry_map=f"{out_dir}/industry_map.parquet",
+            sw_returns=f"{out_dir}/sw_returns.parquet",
+            benchmark_weights=f"{out_dir}/benchmark_weights.parquet",
+            bars=f"{out_dir}/bars.parquet",
+            run_id=1,
+        )
+
+        # 验证输出结构
+        assert "summary" in result
+        assert "industry_detail" in result
+        assert "daily" in result
+        assert "exposure_summary" in result
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+
+        s = result["summary"]
+        for k in ["total_portfolio_return", "allocation_effect", "selection_effect",
+                   "interaction_effect", "unexplained"]:
+            assert k in s, f"Missing key {k} in summary"
+
+        # 银行应出现在 industry_detail 中
+        assert "银行" in result["industry_detail"]
+
+        # 验证 attribution 恒等式: excess = allocation + selection + interaction + unexplained
+        excess = s["total_excess_return"]
+        components = (s["allocation_effect"] + s["selection_effect"]
+                      + s["interaction_effect"] + s["unexplained"])
+        assert abs(excess - components) < 1e-8, (
+            f"Attribution identity violated: excess={excess}, components={components}"
+        )
+
+    def test_missing_file_raises(self, tmp_path):
+        """缺少 parquet 文件应抛出 FileNotFoundError。"""
+        db_path = str(tmp_path / "test.db")
+        bconn = sqlite3.connect(db_path)
+        bconn.executescript("""
+            CREATE TABLE IF NOT EXISTS trade_log (
+                id INTEGER PRIMARY KEY, date TEXT, symbol TEXT, side TEXT,
+                shares INTEGER, run_id INTEGER DEFAULT 1
+            );
+        """)
+        bconn.close()
+
+        nonexistent = str(tmp_path / "nonexistent.parquet")
+        with pytest.raises(FileNotFoundError, match="industry_map"):
+            brinson_attribute_from_files(
+                result_db=db_path,
+                industry_map=nonexistent,
+                sw_returns=nonexistent,
+                benchmark_weights=nonexistent,
+                bars=nonexistent,
+            )
+
+    def test_empty_sw_returns(self, tmp_path):
+        """空 sw_returns 返回 error。"""
+        db_path = str(tmp_path / "test.db")
+        bconn = sqlite3.connect(db_path)
+        bconn.executescript("""
+            CREATE TABLE IF NOT EXISTS trade_log (
+                id INTEGER PRIMARY KEY, date TEXT, symbol TEXT, side TEXT,
+                shares INTEGER, run_id INTEGER DEFAULT 1
+            );
+        """)
+        bconn.close()
+
+        out_dir = str(tmp_path / "parquet_data")
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+
+        pd.DataFrame({"ts_code": [], "l1_name": []}).to_parquet(
+            f"{out_dir}/industry_map.parquet", index=False
+        )
+        pd.DataFrame().to_parquet(f"{out_dir}/sw_returns.parquet")
+        pd.DataFrame().to_parquet(f"{out_dir}/benchmark_weights.parquet")
+        pd.DataFrame().to_parquet(f"{out_dir}/bars.parquet")
+
+        result = brinson_attribute_from_files(
+            result_db=db_path,
+            industry_map=f"{out_dir}/industry_map.parquet",
+            sw_returns=f"{out_dir}/sw_returns.parquet",
+            benchmark_weights=f"{out_dir}/benchmark_weights.parquet",
+            bars=f"{out_dir}/bars.parquet",
+        )
+        assert "error" in result
+        assert result["error"] == "sw_returns 为空"

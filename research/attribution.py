@@ -14,6 +14,16 @@
     print(f"配置效应={result['summary']['allocation_effect']:.4%}")
     print(f"选股效应={result['summary']['selection_effect']:.4%}")
 
+    也可从本地 parquet 文件加载数据（无需外部数据库）：
+    result = brinson_attribute_from_files(
+        "backtest_output/run.db",
+        industry_map="brinson_data/industry_map.parquet",
+        sw_returns="brinson_data/sw_returns.parquet",
+        benchmark_weights="brinson_data/benchmark_weights.parquet",
+        bars="brinson_data/bars.parquet",
+    )
+    先用 scripts/dump_brinson_data.py 导出 parquet 文件。
+
 数据源：
     - index_member_all  → 股票→申万行业映射 (ts_code → l1_code/l1_name)
     - sw_daily          → 申万行业指数日线 (pct_change 做行业基准收益)
@@ -635,3 +645,136 @@ def _load_bars_for_symbols(
     df.sort_index(inplace=True)
     logger.info("bars: %d rows, %d symbols", len(df), len(symbols))
     return df
+
+
+
+
+# ═══════════════════════════════════════════
+# 本地文件入口
+# ═══════════════════════════════════════════
+
+
+def brinson_attribute_from_files(
+    result_db: str,
+    industry_map: str,
+    sw_returns: str,
+    benchmark_weights: str,
+    bars: str,
+    run_id: int = 1,
+    benchmark_code: str = "000300.SH",
+) -> dict:
+    """从本地 parquet 文件做 Brinson 归因（无需外部数据库）。
+
+    Args:
+        result_db: 回测结果数据库路径。
+        industry_map: 行业映射 parquet (columns: ts_code, l1_name)。
+        sw_returns: 申万行业日收益 parquet (index=date, columns=行业名, values=小数)。
+        benchmark_weights: 基准行业权重 parquet (index=date, columns=行业名, values=0~1)。
+        bars: 个股 bars parquet (MultiIndex trade_date,symbol; columns: close, pct_chg)。
+        run_id: 回测 run_id。
+        benchmark_code: 基准指数代码（仅用于日志标注）。
+
+    Returns:
+        与 brinson_attribute() 相同结构的归因报告。
+    """
+    import os
+
+    # 校验文件存在
+    for label, path in [
+        ("industry_map", industry_map),
+        ("sw_returns", sw_returns),
+        ("benchmark_weights", benchmark_weights),
+        ("bars", bars),
+    ]:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{label} 文件不存在: {path}")
+
+    # 1. 加载行业映射 parquet → {ts_code: l1_name}
+    ind_df = pd.read_parquet(industry_map)
+    if "ts_code" not in ind_df.columns or "l1_name" not in ind_df.columns:
+        raise ValueError("industry_map parquet 需含 ts_code 和 l1_name 列")
+    industry_map_dict: dict[str, str] = dict(
+        zip(ind_df["ts_code"], ind_df["l1_name"])
+    )
+    logger.info(
+        "industry_map (from files): %d stocks → %d industries",
+        len(industry_map_dict),
+        len(set(industry_map_dict.values())),
+    )
+
+    # 2. 加载行业指数收益 parquet
+    sw_df = pd.read_parquet(sw_returns)
+    if sw_df.empty:
+        return {
+            "error": "sw_returns 为空",
+            "summary": {},
+            "industry_detail": {},
+            "daily": [],
+            "exposure_summary": {},
+        }
+    logger.info("sw_returns (from files): %d days × %d industries", *sw_df.shape)
+
+    # 3. 加载基准行业权重 parquet
+    bw_df = pd.read_parquet(benchmark_weights)
+    if bw_df.empty:
+        logger.warning("benchmark_weights (from files) 为空，配置效应和选股效应将无法计算")
+    else:
+        logger.info("benchmark_weights (from files): %d days × %d industries", *bw_df.shape)
+
+    # 4. 加载 bars parquet（需 MultiIndex trade_date, symbol）
+    bars_df = pd.read_parquet(bars)
+    if isinstance(bars_df.index, pd.MultiIndex):
+        pass  # 已经是 MultiIndex
+    elif "trade_date" in bars_df.columns and "symbol" in bars_df.columns:
+        bars_df = bars_df.set_index(["trade_date", "symbol"])
+    else:
+        raise ValueError(
+            "bars parquet 需含 MultiIndex (trade_date, symbol) 或对应的列"
+        )
+    if bars_df.empty:
+        return {
+            "error": "bars 数据为空",
+            "summary": {},
+            "industry_detail": {},
+            "daily": [],
+            "exposure_summary": {},
+        }
+    logger.info("bars (from files): %d rows", len(bars_df))
+
+    # 5. 读取回测 trade_log
+    backtest_conn = sqlite3.connect(f"file:{result_db}?mode=ro", uri=True)
+    try:
+        trade_log_df = pd.read_sql_query(
+            "SELECT id, date, symbol, side, shares FROM trade_log "
+            "WHERE side IN ('BUY', 'SELL') AND run_id = ? ORDER BY date, id",
+            backtest_conn,
+            params=(run_id,),
+        )
+    finally:
+        backtest_conn.close()
+
+    if trade_log_df.empty:
+        return {
+            "error": "trade_log 无买卖记录",
+            "summary": {},
+            "industry_detail": {},
+            "daily": [],
+            "exposure_summary": {},
+        }
+
+    # 6. 重建每日持仓
+    holdings_df = _reconstruct_daily_holdings(trade_log_df, bars_df, industry_map_dict)
+    if holdings_df.empty:
+        return {
+            "error": "持仓重建失败",
+            "summary": {},
+            "industry_detail": {},
+            "daily": [],
+            "exposure_summary": {},
+        }
+
+    # 7. Brinson 逐日计算
+    daily_df = _compute_brinson_daily(holdings_df, bw_df, sw_df)
+
+    # 8. 聚合
+    return _aggregate_period(daily_df, holdings_df, bw_df, sw_df)

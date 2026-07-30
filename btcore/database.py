@@ -62,9 +62,16 @@ CREATE TABLE IF NOT EXISTS trade_log (
 CREATE INDEX IF NOT EXISTS idx_trade_log_date ON trade_log(date);
 CREATE INDEX IF NOT EXISTS idx_trade_log_symbol ON trade_log(symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_log_run ON trade_log(run_id);
+
+CREATE TABLE IF NOT EXISTS debug_snapshots (
+    run_id        INTEGER NOT NULL,
+    date          TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, date)
+);
 """
 
-_ALL_TABLES = ("runs", "account_daily", "holdings", "trade_log")
+_ALL_TABLES = ("runs", "account_daily", "holdings", "trade_log", "debug_snapshots")
 
 
 def init_backtest_db(path: str) -> sqlite3.Connection:
@@ -201,3 +208,12 @@ def read_run_data(conn: sqlite3.Connection, run_id: int):
     ).fetchone()
     stats = json.loads(row[0]) if row and row[0] else None
     return account_daily, trade_log, stats
+
+
+def write_debug_snapshot(conn: sqlite3.Connection, run_id: int, date: str, snapshot: dict) -> None:
+    """写入每日调试快照（debug 模式）。"""
+    conn.execute(
+        "INSERT OR REPLACE INTO debug_snapshots (run_id, date, snapshot_json) "
+        "VALUES (?, ?, ?)",
+        (run_id, date, json.dumps(snapshot, ensure_ascii=False, default=str)),
+    )

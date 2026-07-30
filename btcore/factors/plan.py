@@ -50,6 +50,27 @@ def expand_columns(columns) -> list[str]:
             out.add(col)
     return sorted(out)
 
+
+def derive_fields(bars_df: pd.DataFrame) -> None:
+    """补齐可由基础列精确派生的字段（原地写列）。
+
+    *_hfq = 裸价 × adj_factor；pct_chg 由 pre_close 派生。
+    与 engine._ensure_derived_fields 等价，供外部模块复用。
+    """
+    import numpy as np
+
+    if "adj_factor" in bars_df.columns:
+        for src, dst in [("open", "open_hfq"), ("high", "high_hfq"),
+                         ("low", "low_hfq"), ("close", "close_hfq")]:
+            if dst not in bars_df.columns and src in bars_df.columns:
+                bars_df[dst] = bars_df[src] * bars_df["adj_factor"]
+
+    if ("pct_chg" not in bars_df.columns
+            and {"close", "pre_close"} <= set(bars_df.columns)):
+        pre = bars_df["pre_close"]
+        bars_df["pct_chg"] = (bars_df["close"] - pre) / pre.replace(0, np.nan)
+
+
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）
 def _to_calendar_days(trading_rows: int) -> int:
     return int(trading_rows * 1.5) + 10
@@ -198,6 +219,62 @@ def materialize(
         main_df.drop(columns=tmp, inplace=True, errors="ignore")
         if breadth_df is not None:
             breadth_df.drop(columns=tmp, inplace=True, errors="ignore")
+    # 坍缩因子物化完整性检查
+    _check_collapse_integrity(main_df, plan)
+
+
+def _check_collapse_integrity(main_df: pd.DataFrame, plan: dict) -> None:
+    """物化后检查坍缩因子是否存在列、是否有 NaN（内部）。"""
+    import logging
+
+    logger = logging.getLogger(__name__)
+    for name in plan.get("collapse", {}):
+        col = main_df.get(name)
+        if col is None:
+            logger.warning("坍缩因子 %r 未物化为主面板列", name)
+        else:
+            nan_count = col.isna().sum()
+            if nan_count:
+                logger.warning("坍缩因子 %r 有 %d 行 NaN (涉及 %d 个交易日)",
+                               name, nan_count,
+                               main_df.index[col.isna()]
+                               .get_level_values("trade_date").nunique())
+
+
+def validate_materialization(
+    main_df: pd.DataFrame,
+    plan: dict,
+) -> list[dict]:
+    """物化后验证：检查坍缩因子的完整性和数据质量。
+
+    Returns:
+        list of dicts with keys: level (info/warning/error), message
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    issues = []
+
+    for name in plan.get("collapse", {}):
+        col = main_df.get(name)
+        if col is None:
+            msg = f"坍缩因子 {name!r} 未物化为主面板列"
+            logger.warning(msg)
+            issues.append({"level": "warning", "message": msg})
+            continue
+        nan_count = col.isna().sum()
+        nan_pct = nan_count / len(col) if len(col) > 0 else 0
+        if nan_pct > 0.05:
+            nan_dates = (
+                main_df.index[col.isna()]
+                .get_level_values("trade_date").nunique()
+            )
+            msg = (f"坍缩因子 {name!r} NaN 占比 {nan_pct:.1%} "
+                   f"({nan_count}/{len(col)} 行, {nan_dates} 个交易日)")
+            logger.warning(msg)
+            issues.append({"level": "warning", "message": msg})
+
+    return issues
 
 
 # ── 内部 ──
@@ -248,6 +325,8 @@ def _project(
     kind: str,
 ) -> None:
     """坍缩节点从广度面板投影回主面板（原地写列）。"""
+    import logging
+
     main_dates = main_df.index.get_level_values("trade_date")
     if kind == "market":
         per_date = breadth_df[name].groupby(level="trade_date").first()
@@ -260,3 +339,8 @@ def _project(
             [main_dates, main_df["industry"].to_numpy()]
         )
         main_df[name] = per_group.reindex(key).to_numpy()
+    missing = main_dates[main_df[name].isna()].unique()
+    if len(missing):
+        logger = logging.getLogger(__name__)
+        logger.warning("坍缩因子 %r 在 %d 个交易日无值: %s ...",
+                       name, len(missing), missing[:5].tolist())

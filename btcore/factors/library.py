@@ -123,6 +123,7 @@ def resolve_spec(spec: dict, library: dict | None = None) -> dict:
         "name": name,
         "weight": float(spec.get("weight", 1.0)),
         "ascending": bool(spec.get("ascending", False)),
+        "materialize_only": bool(spec.get("materialize_only", False)),
     }
 
 
@@ -241,3 +242,138 @@ def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
     except Exception as e:
         raise ValueError(f"因子 '{name}' 求值失败: {e}") from e
     return values
+
+
+def compute_breadth(
+    factor_name: str,
+    backend,              # DataBackend (needs query_bars and get_calendar)
+    start: str,
+    end: str,
+    library: dict | None = None,
+    chunk_days: int = 60,
+) -> "pd.Series":
+    """流式计算坍缩因子，返回 (trade_date,) 索引的日频 Series。
+
+    仅适用于坍缩算子（mean/group_mean）——这些算子将截面聚合为标量，
+    因此可以分块计算后拼接，内存占用 O(chunk_days × N_symbols) 而非
+    O(N_dates × N_symbols)。
+
+    Args:
+        factor_name: 因子名（必须在 library 中注册且使用坍缩算子）
+        backend: DataBackend 实例
+        start: 起始日期 YYYYMMDD
+        end: 结束日期 YYYYMMDD
+        library: 因子库，默认 load_library()
+        chunk_days: 每次处理的交易日数，默认 60
+
+    Returns:
+        pd.Series with index=trade_date (str), values=日频坍缩标量
+    """
+    lib = library if library is not None else load_library()
+    spec = _get_spec(factor_name, lib)
+
+    kind = ops.collapse_kind(spec["expr"])
+    if not kind:
+        raise ValueError(
+            f"compute_breadth 仅支持坍缩因子，{factor_name!r} 是保形因子"
+        )
+
+    # Derive max window from factor DAG
+    closure = resolve_closure([factor_name], lib)
+    max_window = _max_dag_window(closure)
+
+    calendar = backend.get_calendar(start, end)
+    if not len(calendar):
+        return pd.Series(dtype=float)
+
+    # Resolve needed columns
+    from btcore.factors import plan as factor_plan  # noqa: F811
+
+    all_cols: set[str] = set()
+    for node_spec in closure.values():
+        cols, _ = spec_names(node_spec, set(closure))
+        all_cols |= cols
+    base_cols = sorted(all_cols)
+    base_cols = factor_plan.expand_columns(base_cols)
+
+    results = []
+    i = 0
+    while i < len(calendar):
+        chunk_end_idx = min(i + chunk_days, len(calendar))
+        # Extend lookback for ts window
+        lookback_start_idx = max(0, i - max_window)
+        chunk_start = calendar[lookback_start_idx]
+        chunk_end = calendar[chunk_end_idx - 1]
+        actual_start = calendar[i]
+        actual_end = calendar[chunk_end_idx - 1]
+
+        # Query bars for this chunk (full market)
+        df = backend.query_bars(None, chunk_start, chunk_end, columns=base_cols)
+        if df.empty:
+            i = chunk_end_idx
+            continue
+
+        df.sort_index(inplace=True)
+        factor_plan.derive_fields(df)
+
+        # Compute factor for this chunk
+        factor_df = compute_factors([factor_name], df, lib)
+
+        # Extract daily scalar (collapse factors: same value for all symbols on a date)
+        daily = factor_df.groupby(level="trade_date")[factor_name].first()
+        # Filter to actual chunk range (exclude overlap)
+        daily = daily.loc[actual_start:actual_end]
+        results.append(daily)
+
+        i = chunk_end_idx
+
+    if not results:
+        return pd.Series(dtype=float)
+    return pd.concat(results)
+
+
+def _max_dag_window(closure: dict[str, dict]) -> int:
+    """从因子闭包计算最大历史窗口（交易日行数）。
+
+    仿 build_factor_plan 的窗口推导逻辑，仅取 max，不关心具体归属。
+    """
+    names = set(closure)
+    order: list[str] = []
+    deps: dict[str, set[str]] = {}
+    for name, spec in closure.items():
+        _, refs = spec_names(spec, names)
+        deps[name] = refs
+
+    # Kahn topological sort
+    indegree = {n: len(deps[n]) for n in names}
+    rdeps: dict[str, set[str]] = {n: set() for n in names}
+    for name, refs in deps.items():
+        for ref in refs:
+            rdeps[ref].add(name)
+
+    queue = sorted(n for n in names if indegree[n] == 0)
+    while queue:
+        name = queue.pop(0)
+        order.append(name)
+        for dep in sorted(rdeps[name]):
+            indegree[dep] -= 1
+            if indegree[dep] == 0:
+                queue.append(dep)
+
+    windows: dict[str, int] = {}
+    for name in order:
+        spec = closure[name]
+        if ops.has_op_call(spec["expr"]):
+            w = ops.infer_window(spec["expr"], windows)
+        else:
+            refs = extract_expr_names(spec["expr"]) & names
+            w = max([windows.get(r, 1) for r in refs], default=1)
+        where = spec.get("where")
+        if where:
+            if ops.has_op_call(where):
+                w = max(w, ops.infer_window(where, windows))
+            else:
+                refs = extract_expr_names(where) & names
+                w = max([w, *[windows.get(r, 1) for r in refs]])
+        windows[name] = w
+    return max(windows.values(), default=20)

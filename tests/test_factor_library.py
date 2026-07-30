@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from btcore.factors.library import (
+    compute_breadth,
     compute_factor,
     compute_factors,
     load_library,
@@ -136,7 +137,7 @@ class TestCompute:
 class TestResolve:
     def test_resolve_spec(self):
         spec = resolve_spec({"factor": "mom20", "weight": 2.0, "ascending": True})
-        assert spec == {"name": "mom20", "weight": 2.0, "ascending": True}
+        assert spec == {"name": "mom20", "weight": 2.0, "ascending": True, "materialize_only": False}
 
     def test_resolve_spec_rejects_inline_expr(self):
         with pytest.raises(ValueError, match="library.yaml"):
@@ -154,3 +155,64 @@ class TestResolve:
     def test_resolve_closure_unknown(self):
         with pytest.raises(ValueError, match="未知因子"):
             resolve_closure(["nope"])
+
+
+class TestComputeBreadth:
+    """2.5: compute_breadth 流式计算坍缩因子。"""
+
+    def test_rejects_conformal_factor(self, tmp_path):
+        """保形因子应抛出 ValueError。"""
+        path = _write_lib(tmp_path, "factors:\n  mom:\n    expr: \"roc(close, 3)\"\n")
+        lib = load_library(path)
+        backend = MockDataBackend()
+        with pytest.raises(ValueError, match="仅支持坍缩因子"):
+            compute_breadth("mom", backend, "20240603", "20240607", lib)
+
+    def test_collapse_matches_full_compute(self, tmp_path):
+        """坍缩因子分块计算应与全量 compute_factors 一致。"""
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  pct_above:\n    expr: \"mean(close >= ma(close, 3))\"\n",
+        )
+        lib = load_library(path)
+        backend = MockDataBackend()
+
+        # 全量计算
+        bars_full = backend.query_bars(None, "20240603", "20240614")
+        full_result = compute_factors(["pct_above"], bars_full, lib)
+        daily_from_full = (
+            full_result.groupby(level="trade_date")["pct_above"].first()
+        )
+
+        # 流式分块计算（chunk_days=5 覆盖全部日期避免边界效应）
+        daily_stream = compute_breadth(
+            "pct_above", backend, "20240603", "20240614", lib, chunk_days=10
+        )
+
+        # 对齐日期比较
+        common = daily_from_full.index.intersection(daily_stream.index)
+        assert len(common) > 0, "无交叠日期"
+        pd.testing.assert_series_equal(
+            daily_from_full.loc[common].astype(float),
+            daily_stream.loc[common].astype(float),
+            check_names=False,
+            rtol=1e-9,
+        )
+
+    def test_empty_calendar_returns_empty_series(self, tmp_path):
+        """无交易日时应返回空 Series。"""
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  pct_above:\n    expr: \"mean(close >= ma(close, 3))\"\n",
+        )
+        lib = load_library(path)
+
+        # 创建一个始终返回空日历的 mock backend
+        class EmptyCalBackend(MockDataBackend):
+            def get_calendar(self, start, end):
+                return []
+
+        backend = EmptyCalBackend()
+        result = compute_breadth("pct_above", backend, "20240603", "20240614", lib)
+        assert isinstance(result, pd.Series)
+        assert len(result) == 0

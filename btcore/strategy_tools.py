@@ -39,9 +39,11 @@ def eval_factor_specs(
 ) -> tuple[pd.DataFrame, pd.Series]:
     """按 FACTOR_SPECS 读物化因子列并合成加权得分。
 
-    每条 spec: {name, weight=1.0, ascending=False}；因子值由引擎在
-    preload 时物化为 df 的列（找不到列说明 FACTOR_NODES 未挂接）。
-    各因子先转截面 percentile rank（ascending=True 时值小者得分高），
+    每条 spec: {name, weight=1.0, ascending=False, materialize_only=False}；
+    因子值由引擎在 preload 时物化为 df 的列（找不到列说明 FACTOR_NODES 未挂接）。
+    materialize_only=True 的条目仅写入 factor_df 供 calc_conditions 读取判断，
+    不参与百分比排名和加权合成。
+    其余因子先转截面 percentile rank（ascending=True 时值小者得分高），
     再按 weight 加权平均为 score（∈ [0,1]，越大越优）。
 
     Returns:
@@ -54,6 +56,9 @@ def eval_factor_specs(
 
     for spec in factor_specs or []:
         name = spec["name"]
+        if spec.get("materialize_only"):
+            factor_df[name] = df[name]
+            continue
         if name not in df.columns:
             raise ValueError(
                 f"因子列 {name!r} 不在截面数据里——引擎未物化"

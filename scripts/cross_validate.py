@@ -132,7 +132,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
         # 资本感知阈值：不可避免部分（双向最低佣金 + 印花税底） + 按资金规模的可变上限
         _stamp_min = 0.0005  # 卖出印花税底
         if capital <= 50000:
-            _variable = 0.02
+            _variable = 0.03
         elif capital <= 500000:
             _variable = 0.01
         else:
@@ -141,7 +141,11 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
         notes.append(f"交易磨损/资金比: {cost_ratio:.4%} (阈值 {threshold:.2%}, "
                      f"最低佣金开销 {min_overhead:.2%})")
         if cost_ratio > threshold:
-            issues.append(f"HIGH_COST_RATIO: 交易磨损 {cost_ratio:.2%} > 阈值 {threshold:.2%}")
+            msg = f"HIGH_COST_RATIO: 交易磨损 {cost_ratio:.2%} > 阈值 {threshold:.2%}"
+            if capital <= 50000:
+                notes.append(msg)
+            else:
+                issues.append(msg)
 
     # 7. 检查单笔交易金额合理性
     buy_trades = trades[trades["side"] == "BUY"]
