@@ -73,6 +73,8 @@ def build_strategy(
     else:
         strategy_nodes = None
 
+    _check_factor_conflicts(specs, cls)
+
     rules = _validate_filter_rules(filter_rules or {})
 
     strategy = cls(config=config, factor_specs=specs, filter_rules=rules)
@@ -244,3 +246,46 @@ def _validate_conditions(conditions: dict) -> dict:
         if not isinstance(value, (int, float)) or not 0 < value < 1:
             raise ValueError(f"conditions.{key} 必须是 (0,1) 内的数值: {value!r}")
     return dict(conditions)
+
+
+def _check_factor_conflicts(specs: list[dict], strategy_cls: type) -> None:
+    """检查 scoring 因子与 exit 条件引用的因子是否存在冲突。
+
+    三项检查：
+    1. 同一因子同时标记为 scoring 和 materialize_only → WARNING
+    2. 策略 CONDITION_FACTORS 与 scoring 因子有交集 → WARNING
+    3. CONDITION_FACTORS 中的因子未在 factor_specs 中登记 → WARNING
+    """
+    scoring = {s["name"] for s in specs if not s.get("materialize_only")}
+    mat_only = {s["name"] for s in specs if s.get("materialize_only")}
+
+    both = scoring & mat_only
+    if both:
+        logger.warning(
+            "因子交叉冲突: %s 同时标记为评分因子和仅物化因子，"
+            "可能是配置错误——请检查 factor_specs",
+            sorted(both),
+        )
+
+    cond_factors = getattr(strategy_cls, "CONDITION_FACTORS", None)
+    if cond_factors is None:
+        # 子类覆盖为 None → 等同空集，跳过
+        return
+    cond_factors = set(cond_factors)
+
+    overlap = scoring & cond_factors
+    if overlap:
+        logger.warning(
+            "entry/exit 因子冲突: %s 同时用于评分和退出条件判断，"
+            "买入可能因同一因子回落而被卖出——请检查 factor_specs 和 CONDITION_FACTORS",
+            sorted(overlap),
+        )
+
+    all_spec_names = {s["name"] for s in specs}
+    unregistered = cond_factors - all_spec_names
+    if unregistered:
+        logger.warning(
+            "CONDITION_FACTORS 引用未登记因子: %s 不在 factor_specs 中，"
+            "引擎不会物化该列——条件单 handler 读取 bar 时将得到 None",
+            sorted(unregistered),
+        )

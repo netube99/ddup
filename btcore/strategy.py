@@ -29,6 +29,11 @@ class Strategy(ABC):
     FACTOR_SPECS: ClassVar[list[dict]] = []
     FACTOR_NODES: ClassVar[dict | None] = None
     FILTER_RULES: ClassVar[dict] = {}
+    CONDITION_FACTORS: ClassVar[set[str]] = set()
+    """子类可选声明：calc_conditions / 条件单 handler 读取的因子名（不参与评分）。
+
+    策略加载器据此做交叉校验——若 scoring 因子与此集合有交集，发出 WARNING。
+    空集（默认）表示未声明，检查跳过。"""
 
     def __init__(
         self,

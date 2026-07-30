@@ -129,3 +129,43 @@ def calc_factor_corr(
 
     avg_corr = sum(corr_mats) / len(corr_mats)
     return avg_corr
+
+
+def calc_ic_decay(
+    factor_values: pd.Series,
+    close_hfq: pd.Series,
+    horizons: list[int],
+    date_col: str = "trade_date",
+) -> pd.DataFrame:
+    """多前瞻期 IC 衰减汇总表。
+
+    对每个 horizon 计算 forward returns 并汇总 IC / Rank IC 统计量，
+    输出一张 horizon × 指标 的表，用于判断因子 alpha 的衰减速度。
+
+    Args:
+        factor_values: MultiIndex (date, symbol) 的因子值。
+        close_hfq: 同结构的后复权收盘价。
+        horizons: 前瞻天数列表，如 [1, 3, 5, 10, 20]。
+        date_col: 日期索引名。
+
+    Returns:
+        DataFrame，索引为 horizon，列为：
+          ic_mean, ic_ir, ic_win, rank_ic_mean, rank_ic_ir, rank_ic_win, n_days
+    """
+    rows = []
+    for h in horizons:
+        fwd_ret = close_hfq.groupby("symbol").pct_change(h).shift(-h)
+        ic, ric = calc_ic(factor_values, fwd_ret, date_col=date_col)
+        pearson = summarize_ic(ic)
+        spearman = summarize_ic(ric)
+        rows.append({
+            "horizon": h,
+            "ic_mean": pearson["ic_mean"],
+            "ic_ir": pearson["icir"],
+            "ic_win": pearson["ic_positive_ratio"],
+            "rank_ic_mean": spearman["ic_mean"],
+            "rank_ic_ir": spearman["icir"],
+            "rank_ic_win": spearman["ic_positive_ratio"],
+            "n_days": pearson["n_days"],
+        })
+    return pd.DataFrame(rows).set_index("horizon")

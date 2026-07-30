@@ -5,6 +5,10 @@
         --start 20240101 --end 20240630 [--universe CSI300] [--forward 5] \
         [--n-quantiles 5]
 
+IC 衰减模式（多前瞻期）:
+    python scripts/factor_eval.py cci_z,turnover_z \
+        --start 20240101 --end 20240630 --decay 1,3,5,10,20
+
 行情数据库由 adapters/tushare.py 的 _DEFAULT_DB_PATH 决定。
 """
 
@@ -20,6 +24,7 @@ from btcore.factors.library import compute_factors, load_library, spec_names
 from research.factor_eval import (
     calc_factor_corr,
     calc_ic,
+    calc_ic_decay,
     calc_layered_returns,
     summarize_ic,
 )
@@ -66,10 +71,19 @@ def main() -> int:
         help="前瞻收益天数（默认 5，即 1 周）",
     )
     parser.add_argument(
+        "--decay", type=str, default=None,
+        help="多前瞻期 IC 衰减模式（逗号分隔天数，如 1,3,5,10,20）",
+    )
+    parser.add_argument(
         "--n-quantiles", type=int, default=5,
         help="分层回测档数（默认 5）",
     )
     args = parser.parse_args()
+
+    # --decay 与 --forward 互斥
+    if args.decay and args.forward != 5:
+        print("错误：--decay 与 --forward 不能同时指定", file=sys.stderr)
+        return 1
 
     factor_names = [n.strip() for n in args.factors.split(",") if n.strip()]
     if not factor_names:
@@ -84,8 +98,16 @@ def main() -> int:
             return 1
 
     print(f"因子: {', '.join(factor_names)}")
-    print(f"区间: {args.start} ~ {args.end}  |  前瞻: {args.forward}d  |  "
-          f"分档: {args.n_quantiles}")
+    if args.decay:
+        horizons = [int(h.strip()) for h in args.decay.split(",") if h.strip()]
+        if not horizons:
+            print("错误：--decay 需要至少一个天数", file=sys.stderr)
+            return 1
+        print(f"区间: {args.start} ~ {args.end}  |  前瞻: {horizons} (衰减模式)  |  "
+              f"分档: {args.n_quantiles}")
+    else:
+        print(f"区间: {args.start} ~ {args.end}  |  前瞻: {args.forward}d  |  "
+              f"分档: {args.n_quantiles}")
 
     # 连接后端
     backend = TushareBackend()
@@ -167,45 +189,82 @@ def main() -> int:
     print(f"  有效截面: {len(factor_df)} 行  |  "
           f"日期数: {factor_df.index.get_level_values('trade_date').nunique()}")
 
-    # 计算前瞻收益
+    # 计算前瞻收益（单期，供分层回测使用）
     close_hfq = bars_df["close_hfq"]
-    fwd_ret = close_hfq.groupby("symbol").pct_change(
+    fwd_ret_layered = close_hfq.groupby("symbol").pct_change(
         periods=args.forward
     ).shift(-args.forward)
-    fwd_ret.name = "fwd_ret"
+    fwd_ret_layered.name = "fwd_ret"
 
-    # ── 1. IC 分析 ──
-    _print_section("IC 汇总")
-    ic_results = {}
-    for name in factor_names:
-        factor_vals = factor_df[name]
-        ic, ric = calc_ic(factor_vals, fwd_ret)
-        pearson = summarize_ic(ic)
-        spearman = summarize_ic(ric)
-        ic_results[name] = {
-            "pearson_mean": pearson["ic_mean"],
-            "pearson_ir": pearson["icir"],
-            "pearson_win": pearson["ic_positive_ratio"],
-            "spearman_mean": spearman["ic_mean"],
-            "spearman_ir": spearman["icir"],
-            "spearman_win": spearman["ic_positive_ratio"],
-            "n_days": pearson["n_days"],
-        }
-        print(
-            f"  {name:<20s}  "
-            f"IC={_fmt_number(pearson['ic_mean']):>8s}  "
-            f"IR={_fmt_number(pearson['icir']):>7s}  "
-            f"Win={_fmt_number(pearson['ic_positive_ratio']):>7s}  "
-            f"|  RankIC={_fmt_number(spearman['ic_mean']):>8s}  "
-            f"RankIR={_fmt_number(spearman['icir']):>7s}  "
-            f"({pearson['n_days']}d)"
-        )
+    if args.decay:
+        # ── IC 衰减模式 ──
+        _print_section(f"IC 衰减曲线（前瞻: {horizons}）")
+        for name in factor_names:
+            factor_vals = factor_df[name]
+            decay_df = calc_ic_decay(factor_vals, close_hfq, horizons)
+            print(f"\n  {name}:")
 
-    # ── 2. 分层回测 ──
+            # 表头
+            header = (f"  {'前瞻':>6s}  {'IC':>8s}  {'IC IR':>7s}  {'IC Win':>7s}  "
+                      f"{'RankIC':>8s}  {'RankIR':>7s}  {'Win':>7s}  {'n'}")
+            print(header)
+            print("  " + "-" * (len(header) - 2))
+
+            for h in horizons:
+                row = decay_df.loc[h]
+                n_days = int(row["n_days"])
+                print(
+                    f"  {h:>6d}  "
+                    f"{_fmt_number(row['ic_mean']):>8s}  "
+                    f"{_fmt_number(row['ic_ir']):>7s}  "
+                    f"{_fmt_number(row['ic_win']):>7s}  "
+                    f"{_fmt_number(row['rank_ic_mean']):>8s}  "
+                    f"{_fmt_number(row['rank_ic_ir']):>7s}  "
+                    f"{_fmt_number(row['rank_ic_win']):>7s}  "
+                    f"({n_days}d)"
+                )
+
+            # 衰减趋势总结
+            first_ric = decay_df.loc[horizons[0], "rank_ic_mean"]
+            last_ric = decay_df.loc[horizons[-1], "rank_ic_mean"]
+            if not pd.isna(first_ric) and not pd.isna(last_ric):
+                trend = "↘ 衰减" if abs(last_ric) < abs(first_ric) else "↗ 增强"
+                print(f"    趋势: RankIC {first_ric:.4f}({horizons[0]}d)"
+                      f" → {last_ric:.4f}({horizons[-1]}d)  {trend}")
+    else:
+        # ── 1. IC 分析（单期模式）──
+        fwd_ret = fwd_ret_layered
+        _print_section("IC 汇总")
+        ic_results = {}
+        for name in factor_names:
+            factor_vals = factor_df[name]
+            ic, ric = calc_ic(factor_vals, fwd_ret)
+            pearson = summarize_ic(ic)
+            spearman = summarize_ic(ric)
+            ic_results[name] = {
+                "pearson_mean": pearson["ic_mean"],
+                "pearson_ir": pearson["icir"],
+                "pearson_win": pearson["ic_positive_ratio"],
+                "spearman_mean": spearman["ic_mean"],
+                "spearman_ir": spearman["icir"],
+                "spearman_win": spearman["ic_positive_ratio"],
+                "n_days": pearson["n_days"],
+            }
+            print(
+                f"  {name:<20s}  "
+                f"IC={_fmt_number(pearson['ic_mean']):>8s}  "
+                f"IR={_fmt_number(pearson['icir']):>7s}  "
+                f"Win={_fmt_number(pearson['ic_positive_ratio']):>7s}  "
+                f"|  RankIC={_fmt_number(spearman['ic_mean']):>8s}  "
+                f"RankIR={_fmt_number(spearman['icir']):>7s}  "
+                f"({pearson['n_days']}d)"
+            )
+
+    # ── 分层回测（单期，forward 始终适用）──
     _print_section(f"分层回测（{args.n_quantiles} 档，{args.forward}d 前瞻）")
     for name in factor_names:
         layers = calc_layered_returns(
-            factor_df[name], fwd_ret, n_quantiles=args.n_quantiles,
+            factor_df[name], fwd_ret_layered, n_quantiles=args.n_quantiles,
         )
         if not layers:
             print(f"  {name}: 无数据")

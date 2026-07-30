@@ -100,7 +100,15 @@ def compute_factors(
     lib = library if library is not None else load_library()
     work = df.copy()
     memo: dict[str, pd.Series] = {}
-    return pd.DataFrame({n: _eval_named(n, work, lib, memo) for n in names})
+    result = {}
+    for n in names:
+        try:
+            result[n] = _eval_named(n, work, lib, memo)
+        except ValueError as e:
+            raise ValueError(
+                f"计算入口因子 '{n}' 时出错:\n  {e}"
+            ) from e
+    return pd.DataFrame(result)
 
 
 def resolve_spec(spec: dict, library: dict | None = None) -> dict:
@@ -221,7 +229,12 @@ def _eval_named(
     _, refs = spec_names(spec, set(lib))
     for ref in refs:
         if ref not in df.columns:
-            df[ref] = _eval_named(ref, df, lib, memo)
+            try:
+                df[ref] = _eval_named(ref, df, lib, memo)
+            except ValueError as e:
+                raise ValueError(
+                    f"计算因子 '{name}' 时依赖因子 '{ref}' 求值失败:\n  {e}"
+                ) from e
     memo[name] = _eval_spec(df, spec, name)
     return memo[name]
 
@@ -240,8 +253,27 @@ def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
             else:
                 values = values.where(df.eval(where))
     except Exception as e:
-        raise ValueError(f"因子 '{name}' 求值失败: {e}") from e
+        missing = _detect_missing_columns(df, spec)
+        detail = f"因子 '{name}' 求值失败: {e}"
+        if missing:
+            detail += f"\n  缺少列: {sorted(missing)}（不在数据面板中）"
+        raise ValueError(detail) from e
     return values
+
+
+def _detect_missing_columns(df: pd.DataFrame, spec: dict) -> set[str]:
+    """检测因子定义的 expr/where 引用了哪些不在 df 中的列名。"""
+    missing: set[str] = set()
+    for source in ["expr", "where"]:
+        text = spec.get(source)
+        if not text:
+            continue
+        if ops.has_op_call(text):
+            cols, _ = ops.extract_op_names(text, set())
+        else:
+            cols = extract_expr_names(text) - set()
+        missing |= {c for c in cols if c not in df.columns}
+    return missing
 
 
 def compute_breadth(
