@@ -153,7 +153,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 
 - ddup 映射：`config.max_positions` + `top_k` + `buy_weights`
 - 入门建议：等权买入（不设 `buy_weights`）或简单 top_k 轮动，逻辑稳定后再引入按波动/资金比例加减仓
-- 引擎层自动兜底：`shrink_to_affordable`（现金不足）、`cap_by_volume`（成交量约束）、`max_positions` 硬上限
+- 引擎层自动兜底：`cap_by_volume`（成交量约束）
 
 ### 5. 边界情况 — 「不交易」本身就是规则
 

@@ -13,7 +13,6 @@ from btcore.match.core import (
     execute_sell,
     is_valid_price,
     make_holding,
-    shrink_to_affordable,
 )
 from btcore.types import bar_get
 
@@ -100,9 +99,8 @@ def manual_buy(account, bars: dict, buy_symbols: list,
     for idx, symbol in enumerate(eligible):
         n_left = len(eligible) - idx
         if len(account.holdings) >= max_positions:
-            _warn("持仓数已达 max_positions=%d, 跳过 %s 及后续买入",
-                           max_positions, symbol)
-            break
+            logger.info("持仓数已达 max_positions=%d, 继续买入 %s",
+                        max_positions, symbol)
         bar = bars.get(symbol)
         if bar is None:
             continue
@@ -241,9 +239,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
     for symbol, amount in buys:
         holding = account.holdings.get(symbol)
         if holding is None and len(account.holdings) >= max_positions:
-            _warn("%s 超出 max_positions=%d, 跳过新买",
-                           symbol, max_positions)
-            continue
+            logger.info("%s 持仓已达 max_positions=%d, 继续新买",
+                        symbol, max_positions)
         bar = bars.get(symbol)
         if bar is None:
             continue
@@ -268,12 +265,17 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
 
         shares = int(amount / exec_px / 100) * 100
         shares = cap_by_volume(bar, shares, account)
-        # 现金不足则按剩余现金尽量买（逐步减 100 股直到费用估可承受）
-        shares = shrink_to_affordable(account, shares, exec_px,
-                                      costs_fn, slip_fn)
         if shares < 100:
             _warn("[%s] %s 目标加仓金额不足 100 股, 跳过",
                            trade_date, symbol)
+            continue
+
+        est_price = slip_fn(exec_px, account.slippage_ticks, 1)
+        est_costs = costs_fn("BUY", est_price * shares)
+        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
+        if account.cash < est_net:
+            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
+                           trade_date, symbol, est_net, account.cash)
             continue
 
         trade = execute_buy(account, symbol, bar, shares, exec_px, "TARGET",

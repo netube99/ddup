@@ -25,24 +25,24 @@ def _holding(symbol="000001.SZ", shares=1000, price=10.0):
     return make_holding(symbol=symbol, shares=shares, entry_price=price)
 
 
-# ── max_positions 硬上限 ──
+# ── max_positions 软告警（不再硬截断）──
 
 
-def test_manual_buy_respects_max_positions():
+def test_manual_buy_warns_on_max_positions():
     account = _account()
     bars = {s: make_bar() for s in ("000001.SZ", "000002.SZ", "000003.SZ")}
     trades = manual_buy(account, bars, list(bars), 2,
                         get_limit_prices, calc_trade_costs, apply_slippage)
-    assert len(trades) == 2
-    assert len(account.holdings) == 2
+    assert len(trades) == 3  # max_positions 不再硬截断
+    assert len(account.holdings) == 3
 
 
-def test_manual_buy_cap_counts_existing_holdings():
+def test_manual_buy_no_longer_blocked_by_max_positions():
     account = _account(holdings={"000001.SZ": _holding()})
-    trades = manual_buy(account, {"000002.SZ": make_bar()}, ["000002.SZ"], 1,
+    trades = manual_buy(account, {"000002.SZ": make_bar()}, ["000002.SZ"], 2,
                         get_limit_prices, calc_trade_costs, apply_slippage)
-    assert trades == []
-    assert "000002.SZ" not in account.holdings
+    assert len(trades) == 1  # max_positions 不阻止新买
+    assert "000002.SZ" in account.holdings
 
 
 # ── 非法价格防护 ──

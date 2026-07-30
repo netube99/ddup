@@ -176,7 +176,7 @@ def test_buy_condition_limit_up_skip():
     assert trades == []
 
 
-def test_buy_condition_max_positions():
+def test_buy_condition_no_longer_blocked_by_max_positions():
     existing = make_holding(symbol="000002.SZ", shares=100)
     account = _account(holdings={"000002.SZ": existing})
     bars = {SYM: make_bar(open=9.5, low=9.0)}
@@ -185,11 +185,11 @@ def test_buy_condition_max_positions():
                               1, get_limit_prices, calc_trade_costs,
                               apply_slippage)
 
-    assert trades == []
-    assert SYM not in account.holdings
+    assert len(trades) == 1  # max_positions 不再硬截断
+    assert SYM in account.holdings
 
 
-def test_buy_condition_cash_shrink():
+def test_buy_condition_skips_when_cash_insufficient():
     account = _account(cash=1500.0)
     bars = {SYM: make_bar(open=9.5, low=9.0)}
 
@@ -197,9 +197,7 @@ def test_buy_condition_cash_shrink():
                               10, get_limit_prices, calc_trade_costs,
                               apply_slippage)
 
-    assert len(trades) == 1
-    assert trades[0].shares == 100  # 现金只够 100 股
-    assert account.cash >= 0
+    assert trades == []  # cash=1500 不够买, 拒绝而非缩股
 
 
 def test_buy_condition_shares_sizing_normalized():

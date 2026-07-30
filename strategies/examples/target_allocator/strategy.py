@@ -45,6 +45,10 @@ class TargetAllocator(Strategy):
         if not bars:
             return {"buy": [], "sell": [], "target_value": {}}
 
+        # ── 熔断感知：冷却期内暂停所有买入 ───────────────────────────
+        if account_snapshot.risk_active:
+            return {"buy": [], "sell": [], "target_value": {}}
+
         date_str = next(iter(bars.values())).get("trade_date", "")
         date_int = int(date_str) if date_str else 0
 

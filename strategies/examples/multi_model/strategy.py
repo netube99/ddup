@@ -179,6 +179,11 @@ class MultiModel(Strategy):
         if not bars:
             return
 
+        # 熔断期间暂停状态机：持仓已被强平，市场判断无意义
+        if snapshot.risk_active:
+            self._cond.prune(set(snapshot.holdings.keys()))
+            return
+
         # 冷却期递减
         date_str = next(iter(bars.values())).get("trade_date", "")
         date_int = int(date_str) if date_str else 0
@@ -223,6 +228,10 @@ class MultiModel(Strategy):
     # ── select: 多模型加权投票（时间门控） ──────────────────────────────
     def select(self, bars, account_snapshot, provider) -> dict:
         if not bars:
+            return {"buy": [], "sell": []}
+
+        # ── 熔断感知：冷却期内暂停所有买入 ───────────────────────────
+        if account_snapshot.risk_active:
             return {"buy": [], "sell": []}
 
         date_str = next(iter(bars.values())).get("trade_date", "")

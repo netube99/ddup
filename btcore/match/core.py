@@ -31,22 +31,6 @@ def make_holding(symbol: str, bar, shares: int, fill_price: float) -> Holding:
     )
 
 
-def shrink_to_affordable(account, shares: int, price: float,
-                         costs_fn, slip_fn,
-                         slip_ticks: int | None = None) -> int:
-    """现金不足则逐步减 100 股直到费用估可承受；不足 100 股返回 <100 由调用方跳过。"""
-    ticks = account.slippage_ticks if slip_ticks is None else slip_ticks
-    while shares >= 100:
-        est_price = slip_fn(price, ticks, 1)
-        est_costs = costs_fn("BUY", est_price * shares)
-        est_net = (est_price * shares + est_costs["commission"]
-                   + est_costs["transfer_fee"])
-        if account.cash >= est_net:
-            break
-        shares -= 100
-    return shares
-
-
 def cap_by_volume(bar, shares: int, account) -> int:
     """按 account.order_volume_ratio 截单笔股数（None 或 bar 无 vol → 原样）。
 

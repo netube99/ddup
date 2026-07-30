@@ -475,6 +475,7 @@ class Engine:
             holdings=copy.deepcopy(self.account.holdings),
             trades=fills,
             total_value=self.account.total_value,
+            risk_active=self._breaker.active,
         )
         # on_tick 是可选钩子：每日运行，在 select 之前更新策略内部状态
         on_tick = getattr(self.strategy, "on_tick", None)
@@ -489,14 +490,14 @@ class Engine:
             existing_conds = actions.setdefault("buy_conditions", [])
             existing_conds.extend(on_tick_result["buy_conditions"])
 
-        # 组合级风控: 熔断态强制只卖不买（次日强平, trigger=RISK）;
-        # 否则按 risk_rules 裁剪买侧（卖侧永不干预）
+        # 组合级风控: 熔断态强制卖出（合规护栏），买侧由策略通过
+        # snapshot.risk_active 自行决定；否则按 risk_rules 裁剪买侧（卖侧永不干预）
         self._breaker.update(self.account.total_value)
         if self._breaker.tick():
             if self.account.holdings:
                 logger.warning("[%s] 风控态: 强制清仓 %d 只持仓",
                                calc_date, len(self.account.holdings))
-            actions = {"buy": [], "sell": list(self.account.holdings)}
+            actions["sell"] = list(self.account.holdings)
             self._risk_forced = True
         else:
             actions = risk.apply_risk_rules(

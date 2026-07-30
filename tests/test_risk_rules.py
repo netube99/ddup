@@ -231,6 +231,8 @@ class DrawdownStrategy(_BaseStrategy):
     def select(self, bars, snapshot, provider):
         if SYM2 in snapshot.holdings:
             return {"buy": [], "sell": []}
+        if snapshot.risk_active:
+            return {"buy": [], "sell": []}  # 冷却期暂停买入
         return {"buy": [SYM2], "sell": [], "buy_weights": {SYM2: 0.95}}
 
 

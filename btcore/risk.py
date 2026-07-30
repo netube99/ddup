@@ -176,7 +176,7 @@ def _apply_industry_cap(actions: dict, account, total_value: float,
                            ind, cap, symbol)
             continue
         amount = total_value * (weights[symbol] if weights
-                                else 1 / max_positions)
+                                else 1 / max(len(buy), 1))
         exposure[ind] = exposure.get(ind, 0.0) + amount
         kept_buy.append(symbol)
     actions["buy"] = kept_buy

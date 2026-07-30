@@ -176,6 +176,7 @@ class MyStrategy(Strategy):
   - `holdings` — `dict[str, Holding]`，当前持仓的深拷贝（修改不影响引擎状态）
   - `trades` — 当日已执行的成交列表 `list[Trade]`（与 `on_fills` 收到的同一份数据）
   - `total_value` — 总资产（现金 + 持仓市值）
+  - `risk_active` — 回撤熔断是否激活（`bool`）。`True` 时策略应自行关闭买侧，引擎已在当日强制清仓全部持仓（`trigger="RISK"`），但不再自动清除 `buy` 列表
 - `provider`: `DataProvider` 对象，提供 `get_historical_bars()`、`get_benchmark_returns()` 等方法
 
 **返回值**是一个 dict，支持以下键：
@@ -318,7 +319,7 @@ REQUIRED_FIELDS: list[str] = ["open", "high", "low", "close", "vol", "adj_factor
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `initial_capital` | `float` | `1000000` | 初始资金（元） |
-| `max_positions` | `int` | `20` | 最大持仓数（硬上限） |
+| `max_positions` | `int` | `20` | 最大持仓数（软告警，策略应自行管理持仓数量） |
 | `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = 0.01 元） |
 | `condition_slippage_ticks` | `int \| None` | `None` | 条件单独立滑点 tick 数；`None` 时沿用 `slippage_ticks` |
 | `execution_price` | `str` | `"open"` | 手动订单成交价：`"open"`（次日开盘价）或 `"close"`（次日收盘价） |
@@ -382,12 +383,12 @@ conditions:
 ```yaml
 risk_rules:
   max_drawdown: 0.12         # 总权益自峰值回撤 ≥ 12% 触发熔断
-  cooldown_days: 5           # 熔断后冷却 5 个交易日（在此期间强制只卖不买）
+  cooldown_days: 5           # 熔断后冷却 5 个交易日（持仓被强平，策略通过 risk_active 自管买侧）
   max_position_pct: 0.10     # 单票买入金额 ≤ 总资产的 10%
   max_industry_pct: 0.30     # 单行业总暴露 ≤ 总资产的 30%（需 industry_name 后端能力）
 ```
 
-- `max_drawdown` 触发后进入冷却期：所有持仓以 `trigger="RISK"` 强制清仓，买侧彻底关闭。
+- `max_drawdown` 触发后进入冷却期：所有持仓以 `trigger="RISK"` 强制清仓。买侧**不再由引擎关闭**——策略通过 `snapshot.risk_active` 感知冷却状态，自行决定是否暂停买入。
 - `cooldown_days` 到期的下一天重置峰值，允许策略重新出发。出现 `max_drawdown` 时 `cooldown_days` 默认 1。
 - `max_industry_pct` 是"入场闸"而非"持续配平器"——只在买入时把关，持仓自然上涨超出上限不强制减仓。
 
@@ -518,14 +519,13 @@ return self._cond.calc(symbol, entry_price, bar, holding_days)
 
 **引擎自动执行的约束**：
 1. 已持有的 symbol 跳过
-2. `max_positions` 硬上限——达到上限后停止处理后续订单
+2. `max_positions` 达到上限后记录日志，不阻止后续订单（策略应自行管理持仓数量）
 3. bar 缺失 → 跳过
 4. 涨停（`price >= up_limit`）→ 跳过
 5. 成交量为零 → 跳过
 6. `order_volume_ratio` 成交量 cap 应用
-7. 现金不足 → `shrink_to_affordable` 缩股至可负担
-8. 缩股后 < 100 股 → 跳过
-9. T+1 锁定（买入当天不可卖出）
+7. 现金不足 → 跳过该订单并记录 WARNING（不缩股）
+8. T+1 锁定（买入当天不可卖出）
 
 条件买单的滑点使用 `condition_slippage_ticks`（独立于手动买卖的 `slippage_ticks`）。
 
@@ -582,7 +582,7 @@ register_buy_condition_handler("MY_BUY", my_buy_handler)
 
 ```
 select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
-  → 若熔断: 强制 sell = 全部持仓, buy = []
+  → 若熔断: 强制 sell = 全部持仓, buy 侧由策略自行判断
   → 否则: apply_risk_rules() 裁剪买侧
   → 撮合
 ```
@@ -590,7 +590,7 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 **熔断详细行为**：
 - 总资产自峰值回撤 ≥ `max_drawdown` → 触发
 - 触发后**当天**强制清仓（trigger = `"RISK"`），之后冷却 `cooldown_days` 个交易日
-- 冷却期间所有 buy 被抑制（包括条件买单）
+- 冷却期间引擎不再干预买侧；策略通过 `snapshot.risk_active` 自行决定是否关闭买侧
 - 冷却到期后峰值重置，允许策略重新出发
 
 **`max_position_pct` 裁剪**：target_value 中的目标市值、buy_conditions 中的 value、buy_weights 的分配金额均被 cap 到 `total_value × pct`。
@@ -617,8 +617,7 @@ select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
 **通用保障**（所有买入路径）：
 - 滑点自动应用（买+滑点、卖-滑点）
 - 成交量 cap（`order_volume_ratio`）
-- 现金不足自动缩股（每次减 100 股直到可负担）
-- 缩股后 < 100 股取消该买单
+- 现金不足跳过该订单并告警（不缩股）
 
 **T+1 锁定**（所有买卖路径生效）：
 
@@ -998,7 +997,7 @@ conditions:
 **关键点**：
 - `buy_conditions` 与 `buy` 名单可共存——主仓 + 试探仓
 - 自定义 handler 在 `on_start` 中注册，进程级全局
-- 条件买入自动受涨停不买、成交量 cap、现金不足缩股等约束
+- 条件买入自动受涨停不买、成交量 cap、现金不足跳过等约束
 - `condition_slippage_ticks` 独立于手动买卖滑点
 
 ### 6.5 Level 4：状态机多模型策略

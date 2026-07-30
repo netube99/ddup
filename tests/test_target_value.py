@@ -83,7 +83,7 @@ def test_unlisted_holding_untouched():
     assert account.holdings["000002.SZ"].cost == 1000.0
 
 
-def test_max_positions_limits_new_symbols():
+def test_rebalance_no_longer_blocked_by_max_positions():
     account = _account()
     bars = {s: make_bar() for s in ("000001.SZ", "000002.SZ", "000003.SZ")}
     targets = {s: 5000.0 for s in bars}
@@ -92,11 +92,11 @@ def test_max_positions_limits_new_symbols():
                                   get_limit_prices, calc_trade_costs,
                                   apply_slippage)
 
-    assert len(account.holdings) == 2
-    assert len(trades) == 2
+    assert len(account.holdings) == 3  # max_positions 不再硬截断
+    assert len(trades) == 3
 
 
-def test_insufficient_cash_buys_less():
+def test_rebalance_skips_when_cash_insufficient():
     account = _account(cash=1500.0)
     bars = {"000001.SZ": make_bar(open=10.0)}
 
@@ -104,9 +104,7 @@ def test_insufficient_cash_buys_less():
                                   get_limit_prices, calc_trade_costs,
                                   apply_slippage)
 
-    assert len(trades) == 1
-    assert trades[0].shares == 100  # 现金只够 100 股
-    assert account.cash >= 0
+    assert trades == []  # cash=1500 不够买 500 股, 拒绝而非缩股
 
 
 # ── Engine 端到端 ──

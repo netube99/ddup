@@ -11,7 +11,6 @@ from btcore.match.core import (
     execute_sell,
     is_valid_price,
     make_holding,
-    shrink_to_affordable,
 )
 from btcore.types import bar_get
 
@@ -168,8 +167,8 @@ def entry_conditions(account, bars: dict, orders: list[dict],
                      max_positions: int, limits_fn, costs_fn, slip_fn,
                      quiet: bool = False,
                      slip_ticks: int | None = None) -> list:
-    """条件买入撮合。约束与手动买一致：涨停不买、成交量 cap、现金不足减手数、
-    max_positions 硬上限、成交即 T+1 锁定。已持仓标的不重复入场。"""
+    """条件买入撮合。约束与手动买一致：涨停不买、成交量 cap、
+    现金不足跳过、成交即 T+1 锁定。已持仓标的不重复入场。"""
     _warn = logger.debug if quiet else logger.warning
     if orders is None:
         return []
@@ -179,9 +178,8 @@ def entry_conditions(account, bars: dict, orders: list[dict],
         if symbol in account.holdings:
             continue
         if len(account.holdings) >= max_positions:
-            _warn("持仓数已达 max_positions=%d, 跳过条件买入 %s 及后续",
-                           max_positions, symbol)
-            break
+            logger.info("持仓数已达 max_positions=%d, 继续条件买入 %s",
+                        max_positions, symbol)
         bar = bars.get(symbol)
         if bar is None:
             continue
@@ -213,12 +211,18 @@ def entry_conditions(account, bars: dict, orders: list[dict],
         else:
             shares = int(order["value"] / fill_price / 100) * 100
         shares = cap_by_volume(bar, shares, account)
-        shares = shrink_to_affordable(account, shares, fill_price,
-                                      costs_fn, slip_fn,
-                                      slip_ticks=slip_ticks)
         if shares < 100:
             _warn("[%s] %s 条件买入可买不足 100 股, 跳过",
                            trade_date, symbol)
+            continue
+
+        est_price = slip_fn(fill_price,
+                           account.slippage_ticks if slip_ticks is None else slip_ticks, 1)
+        est_costs = costs_fn("BUY", est_price * shares)
+        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
+        if account.cash < est_net:
+            _warn("[%s] %s 条件买入现金不足 (need=%.2f cash=%.2f) 跳过",
+                           trade_date, symbol, est_net, account.cash)
             continue
 
         trade = execute_buy(account, symbol, bar, shares, fill_price,
