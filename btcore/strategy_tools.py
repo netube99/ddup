@@ -76,6 +76,8 @@ class ConditionBuilder:
       stop_loss_pct   → STOP_LOSS    价格 = 成本价 * (1 - pct)
       take_profit_pct → TAKE_PROFIT  价格 = 成本价 * (1 + pct)
       trailing_pct    → TRAILING_TP  价格 = 持仓期间最高价 * (1 - pct)，最高价由本类逐日跟踪
+      model_exit      → ML_EXIT      [{model, threshold}]：bar 中 ml_<model> 分数
+                          >= threshold 时触发（分数由引擎物化/注入，含义由策略定义）
     """
 
     def __init__(self, rules: dict):
@@ -107,6 +109,16 @@ class ConditionBuilder:
                 "type": "TRAILING_TP",
                 "price": high * (1 - rules["trailing_pct"]),
             })
+        for rule in rules.get("model_exit") or []:
+            model = rule["model"]
+            threshold = float(rule.get("threshold", 0.5))
+            score = bar_get(bar, f"ml_{model}")
+            if score is not None and score >= threshold:
+                conds.append({
+                    "type": "ML_EXIT",
+                    "model": model,
+                    "score": round(float(score), 4),
+                })
         return conds
 
     def prune(self, live_symbols) -> None:

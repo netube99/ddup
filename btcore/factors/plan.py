@@ -1,5 +1,10 @@
 """因子数据供给规划与物化 — 引擎 preload 的纯函数助手。
 
+同时承载面板准备的共享助手（必需列契约校验、派生列、伪列附着、
+基准收益派生），引擎 preload 与训练侧（btcore.ml.dataset）/
+研究脚本（scripts/factor_eval.py）共用同一套函数，保证训练与
+回测的数据准备口径逐列一致。
+
 从策略引用的因子闭包静态推导两路数据供给计划（build_factor_plan）：
   - 主面板：候选池 × 长窗口（max(365 天, 闭包最大 ts 窗口换算)）× 基础列
   - 广度面板：全市场 × 短窗口 × 窄列（仅当闭包含坍缩算子节点；
@@ -17,16 +22,27 @@
 纯函数模块：不依赖 engine / match / database / provider。
 """
 
+import numpy as np
 import pandas as pd
 
 from btcore.factors import cse, ops
 from btcore.factors.expr import evaluate_expr, extract_expr_names
 from btcore.factors.library import spec_names
 
-# 伪列：引擎派生/附着，不向 backend 请求
+# 数据契约必需列（docs/backend_guide.md）——缺列直接报错，不走语义不精确的兜底
+# amount 不在其中：引擎内部不消费，仅为策略 select() 提供，策略通过 REQUIRED_FIELDS 声明
+REQUIRED_BAR_COLUMNS = (
+    "open", "high", "low", "close",
+    "vol",          # 单位: 手 (1 手 = 100 股)
+    "adj_factor",
+    "pre_close",    # 交易所除权调整口径: 除权日 = (前裸收盘 - 现金分红) / (1 + 送转比例)
+    "up_limit", "down_limit",
+)
+
+# 伪列：派生/附着，不向 backend 请求
 PSEUDO_COLUMNS = frozenset({"idx_ret", "log_mktcap", "industry"})
 
-# 派生列：引擎在 _ensure_derived_fields 中从基础列计算，不向 backend 请求
+# 派生列：derive_fields 从基础列计算，不向 backend 请求
 DERIVED_BASES: dict[str, frozenset[str]] = {
     "open_hfq": frozenset({"open", "adj_factor"}),
     "high_hfq": frozenset({"high", "adj_factor"}),
@@ -51,14 +67,26 @@ def expand_columns(columns) -> list[str]:
     return sorted(out)
 
 
+def validate_required_columns(bars_df: pd.DataFrame) -> None:
+    """契约强校验：缺必需列直接失败。
+
+    pre_close / up_limit / down_limit 曾允许引擎兜底推算，但兜底语义不精确
+    （除权日涨跌停一阶错误、pct_chg 假暴跌），故改为数据契约强制提供。
+    """
+    missing = [c for c in REQUIRED_BAR_COLUMNS if c not in bars_df.columns]
+    if missing:
+        raise ValueError(
+            f"bars 缺必需列: {missing}, 数据契约见 docs/backend_guide.md"
+        )
+
+
 def derive_fields(bars_df: pd.DataFrame) -> None:
     """补齐可由基础列精确派生的字段（原地写列）。
 
-    *_hfq = 裸价 × adj_factor；pct_chg 由 pre_close 派生。
-    与 engine._ensure_derived_fields 等价，供外部模块复用。
+    *_hfq = 裸价 × adj_factor（hfq 定义）；pct_chg 由 pre_close（交易所
+    除权调整口径，必需列）派生。这两个派生都是精确的，无语义损耗。
+    广度面板按列裁剪后可能只带部分基础列，缺基础列的派生直接跳过。
     """
-    import numpy as np
-
     if "adj_factor" in bars_df.columns:
         for src, dst in [("open", "open_hfq"), ("high", "high_hfq"),
                          ("low", "low_hfq"), ("close", "close_hfq")]:
@@ -69,6 +97,56 @@ def derive_fields(bars_df: pd.DataFrame) -> None:
             and {"close", "pre_close"} <= set(bars_df.columns)):
         pre = bars_df["pre_close"]
         bars_df["pct_chg"] = (bars_df["close"] - pre) / pre.replace(0, np.nan)
+
+
+def derive_idx_ret(df: pd.DataFrame, backend, benchmark: str | None) -> pd.Series:
+    """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
+    bench_fn = getattr(backend, "get_benchmark_bars", None)
+    if not (callable(bench_fn) and benchmark):
+        raise ValueError(
+            "因子引用 idx_ret 需要 benchmark 且 backend 提供 get_benchmark_bars"
+        )
+    dates = df.index.get_level_values("trade_date")
+    bench = bench_fn(benchmark, dates.min(), dates.max())
+    if bench is None or bench.empty:
+        raise ValueError(f"基准 {benchmark} 无数据, 无法派生 idx_ret")
+    ret = bench["hfq_close"].pct_change()
+    ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
+    return dates.map(ret)
+
+
+def ensure_pseudo_columns(
+    df: pd.DataFrame,
+    needs: dict,
+    panel: str,
+    *,
+    backend,
+    benchmark: str | None = None,
+    derive_idx_ret_fn=None,
+) -> None:
+    """按需附着伪列：industry / log_mktcap / idx_ret（原地写列）。
+
+    引擎 preload 与训练侧/研究脚本共用，backend 为鸭子类型（只需有对应方法）。
+    idx_ret 默认用 derive_idx_ret 派生；调用方可传 derive_idx_ret_fn 覆盖。
+    """
+    if needs.get(f"industry_{panel}"):
+        fn = getattr(backend, "get_stock_industries", None)
+        if not callable(fn):
+            raise ValueError(
+                "因子引用 industry 分组需要 backend 提供 get_stock_industries"
+            )
+        symbols = df.index.get_level_values("symbol").unique().tolist()
+        mapping = fn(symbols)
+        df["industry"] = df.index.get_level_values("symbol").map(mapping)
+    if needs.get(f"mktcap_{panel}"):
+        total_mv = df["total_mv"]
+        df["log_mktcap"] = np.log(total_mv.where(total_mv > 0))
+    if needs.get("index"):
+        fn = derive_idx_ret_fn
+        if fn is None:
+            def fn(d):
+                return derive_idx_ret(d, backend, benchmark)
+        df["idx_ret"] = fn(df)
 
 
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）

@@ -2,28 +2,20 @@ import copy
 import json
 import logging
 
-import numpy as np
 import pandas as pd
 
-from btcore import corporate, database, limits, match, risk, stats, types
+from btcore import corporate, database, limits, match, stats, types
 from btcore.costs import make_costs_fn
 from btcore.factors import plan as factor_plan
 from btcore.filters import filter_required_columns
+from btcore.ml import runtime as ml_runtime
 from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
 
 logger = logging.getLogger(__name__)
 
-# 数据契约必需列（docs/backend_guide.md）——缺列直接报错，不走语义不精确的兜底
-# amount 不在其中：引擎内部不消费，仅为策略 select() 提供，策略通过 REQUIRED_FIELDS 声明
-REQUIRED_BAR_COLUMNS = (
-    "open", "high", "low", "close",
-    "vol",          # 单位: 手 (1 手 = 100 股)
-    "adj_factor",
-    "pre_close",    # 交易所除权调整口径: 除权日 = (前裸收盘 - 现金分红) / (1 + 送转比例)
-    "up_limit", "down_limit",
-)
-
+# 数据契约必需列（REQUIRED_BAR_COLUMNS）已下沉至 btcore.factors.plan，
+# 与训练侧/研究脚本共享同一定义
 def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
     """静态推导主面板请求列（preload 列裁剪）。
 
@@ -32,7 +24,7 @@ def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
     派生列替换为派生基础列，伪列与物化因子列不请求。
     策略在 select() 里命令式访问的列必须声明进 REQUIRED_FIELDS。
     """
-    cols = set(REQUIRED_BAR_COLUMNS)
+    cols = set(factor_plan.REQUIRED_BAR_COLUMNS)
     cols |= set(getattr(strategy, "REQUIRED_FIELDS", None) or [])
     cols |= filter_required_columns(
         getattr(strategy, "FILTER_RULES", None) or {}
@@ -104,22 +96,13 @@ class Engine:
             execution_price=execution_price,
         )
         self.account.total_value = self.initial_capital
-        self._risk_rules = risk.validate_risk_rules(config.get("risk_rules"))
-        if ("max_industry_pct" in self._risk_rules
-                and not callable(getattr(provider.backend,
-                                         "get_stock_industries", None))):
-            raise ValueError(
-                "risk_rules.max_industry_pct 需要 backend 提供 "
-                "get_stock_industries 方法"
-            )
-        self._breaker = risk.DrawdownBreaker(
-            self._risk_rules.get("max_drawdown"),
-            self._risk_rules.get("cooldown_days", 1),
-        )
-        # 当前 pending 批次是否风控强平（卖出 trigger 标 RISK）
-        self._risk_forced = False
         self.pending_actions = {"buy": [], "sell": []}
         self._debug = debug
+        # ML 模型（strategy_loader 依据 YAML models 节挂接；未配置为空列表）
+        self._model_specs = list(getattr(strategy, "MODEL_SPECS", None) or [])
+        self._holding_models = [m for m in self._model_specs if m.scope == "holding"]
+        # ml_log: "full" 落盘全截面分数；缺省只落盘决策相关标的
+        self._ml_log_full = config.get("ml_log") == "full"
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
         self.run_id = 0
         self.bars_df: pd.DataFrame | None = None
@@ -133,11 +116,6 @@ class Engine:
         self.run_id = 0
         conn = database.init_backtest_db(self.db_path)
         try:
-            # 熔断状态仅活在单次 run 内
-            self._breaker = risk.DrawdownBreaker(
-                self._risk_rules.get("max_drawdown"),
-                self._risk_rules.get("cooldown_days", 1),
-            )
             calendar = self.provider.get_calendar(start, end)
             if not calendar:
                 raise ValueError("日历为空")
@@ -157,8 +135,8 @@ class Engine:
                 columns=required_bar_columns(self.strategy, fplan),
             )
             bars_df.sort_index(inplace=True)
-            _validate_required_columns(bars_df)
-            _ensure_derived_fields(bars_df)
+            factor_plan.validate_required_columns(bars_df)
+            factor_plan.derive_fields(bars_df)
             if fplan:
                 # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
                 logger.debug("factor warmup rows: %s", fplan["windows"])
@@ -171,6 +149,11 @@ class Engine:
                 issues = factor_plan.validate_materialization(bars_df, fplan)
                 for issue in issues:
                     logger.warning("[因子验证] %s", issue["message"])
+            if self._model_specs:
+                # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
+                # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
+                # 变换的排名口径 = 因子计算域，与训练面板口径一致
+                ml_runtime.materialize_predictions(bars_df, self._model_specs)
             # 若 factor_universe 比 trading universe 更宽，裁切到交易域
             if factor_symbols is not None and trade_symbols is not None:
                 trade_set = set(trade_symbols)
@@ -293,50 +276,17 @@ class Engine:
             columns=factor_plan.expand_columns(fplan["breadth_columns"]),
         )
         breadth_df.sort_index(inplace=True)
-        _ensure_derived_fields(breadth_df)
+        factor_plan.derive_fields(breadth_df)
         self._attach_pseudo_columns(breadth_df, fplan["needs"], "breadth")
         return breadth_df
 
     def _attach_pseudo_columns(self, df: pd.DataFrame, needs: dict, panel: str):
         """按需附着伪列：industry（backend 鸭子类型）/ log_mktcap / idx_ret。"""
-        ensure_pseudo_columns(
+        factor_plan.ensure_pseudo_columns(
             df, needs, panel,
             backend=self.provider.backend,
             benchmark=self.benchmark,
-            derive_idx_ret=self._derive_idx_ret,
         )
-
-    def _derive_idx_ret(self, df: pd.DataFrame) -> pd.Series:
-        """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
-        bench_fn = getattr(self.provider.backend, "get_benchmark_bars", None)
-        if not (callable(bench_fn) and self.benchmark):
-            raise ValueError(
-                "因子引用 idx_ret 需要 config['benchmark'] 且 backend "
-                "提供 get_benchmark_bars"
-            )
-        dates = df.index.get_level_values("trade_date")
-        bench = bench_fn(self.benchmark, dates.min(), dates.max())
-        if bench is None or bench.empty:
-            raise ValueError(f"基准 {self.benchmark} 无数据, 无法派生 idx_ret")
-        ret = bench["hfq_close"].pct_change()
-        ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
-        return dates.map(ret)
-
-    def _derive_idx_ret(self, df: pd.DataFrame) -> pd.Series:
-        """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
-        bench_fn = getattr(self.provider.backend, "get_benchmark_bars", None)
-        if not (callable(bench_fn) and self.benchmark):
-            raise ValueError(
-                "因子引用 idx_ret 需要 config['benchmark'] 且 backend "
-                "提供 get_benchmark_bars"
-            )
-        dates = df.index.get_level_values("trade_date")
-        bench = bench_fn(self.benchmark, dates.min(), dates.max())
-        if bench is None or bench.empty:
-            raise ValueError(f"基准 {self.benchmark} 无数据, 无法派生 idx_ret")
-        ret = bench["hfq_close"].pct_change()
-        ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
-        return dates.map(ret)
 
     def step(self, today: str, day_bars: pd.DataFrame, conn):
         bars_dict = _bars_to_dict(day_bars, today)
@@ -364,7 +314,7 @@ class Engine:
                         self.pending_actions.get("sell", []),
                         limits.get_limit_prices, self.costs_fn, apply_slippage,
                         shares_map=self.pending_actions.get("sell_shares"),
-                        trigger=("RISK" if self._risk_forced else "MANUAL"),
+                        trigger="MANUAL",
                         quiet=self.quiet_skips,
                     )
 
@@ -404,6 +354,8 @@ class Engine:
                 self._settle(today, bars_dict, all_trades, corporate_log, conn)
 
                 self._compute_pending(today, bars_dict, all_trades)
+                if self._model_specs:
+                    self._write_ml_predictions(conn, today, bars_dict)
                 if self._debug:
                     self._write_debug_snapshot(conn, today, self.pending_actions, day_bars)
         except Exception:
@@ -463,6 +415,12 @@ class Engine:
                 return
             bars_dict = _bars_to_dict(day_bars_view, calc_date)
 
+        # holding scope 模型：账户态特征只能在决策时点计算，分数注入持仓
+        # 的 bar dict——策略在 on_tick/select/calc_conditions 中像读普通列
+        # 一样读 ml_<name>，引擎不负责解释分数的含义
+        if self._holding_models:
+            self._inject_holding_model_scores(bars_dict)
+
         fills = list(trades) if trades else []
         # on_fills 是可选 hook（鸭子类型策略可能没定义），须在 select 之前调用
         on_fills = getattr(self.strategy, "on_fills", None)
@@ -475,7 +433,6 @@ class Engine:
             holdings=copy.deepcopy(self.account.holdings),
             trades=fills,
             total_value=self.account.total_value,
-            risk_active=self._breaker.active,
         )
         # on_tick 是可选钩子：每日运行，在 select 之前更新策略内部状态
         on_tick = getattr(self.strategy, "on_tick", None)
@@ -489,25 +446,6 @@ class Engine:
         if on_tick_result is not None and on_tick_result.get("buy_conditions"):
             existing_conds = actions.setdefault("buy_conditions", [])
             existing_conds.extend(on_tick_result["buy_conditions"])
-
-        # 组合级风控: 熔断态强制卖出（合规护栏），买侧由策略通过
-        # snapshot.risk_active 自行决定；否则按 risk_rules 裁剪买侧（卖侧永不干预）
-        self._breaker.update(self.account.total_value)
-        if self._breaker.tick():
-            if self.account.holdings:
-                logger.warning("[%s] 风控态: 强制清仓 %d 只持仓",
-                               calc_date, len(self.account.holdings))
-            actions["sell"] = list(self.account.holdings)
-            self._risk_forced = True
-        else:
-            actions = risk.apply_risk_rules(
-                actions, self.account, self.account.total_value,
-                self._risk_rules,
-                industry_fn=getattr(self.provider.backend,
-                                    "get_stock_industries", None),
-                max_positions=self.max_positions,
-            )
-            self._risk_forced = False
 
         buy = set(actions.get("buy", []))
         sell = set(actions.get("sell", []))
@@ -594,6 +532,62 @@ class Engine:
             )
             match.conditions.validate_condition_types(holding.conditions)
 
+    def _inject_holding_model_scores(self, bars_dict: dict) -> None:
+        """holding scope 模型逐持仓求值并注入 bar dict（原地）。"""
+        for spec in self._holding_models:
+            scores: dict[str, float] = {}
+            for symbol, holding in self.account.holdings.items():
+                bar = bars_dict.get(symbol)
+                if bar is None:
+                    continue
+                score = ml_runtime.holding_score(spec, bar, holding)
+                if score is not None:
+                    scores[symbol] = score
+            scores = ml_runtime.apply_post_transform_flat(
+                pd.Series(scores), spec.post_transform
+            ).to_dict()
+            for symbol, score in scores.items():
+                bars_dict[symbol][spec.column] = score
+
+    def _write_ml_predictions(self, conn, today: str, bars_dict: dict) -> None:
+        """ML 分数落盘（ml_predictions 表）。
+
+        panel scope：缺省只落盘决策相关标的（持仓 + 当日买卖名单 +
+        条件买单），config.ml_log == "full" 时落盘全截面（体积大，仅诊断用）。
+        holding scope：落盘当日注入的全部持仓分数。
+        """
+        rows: list[tuple] = []
+        panel_specs = [m for m in self._model_specs if m.scope == "panel"]
+        if panel_specs:
+            if self._ml_log_full:
+                symbols = set(bars_dict)
+            else:
+                symbols = set(self.account.holdings)
+                symbols |= set(self.pending_actions.get("buy", []))
+                symbols |= set(self.pending_actions.get("sell", []))
+                symbols |= {
+                    o["symbol"]
+                    for o in (self.pending_actions.get("buy_conditions") or [])
+                }
+            for sym in symbols:
+                bar = bars_dict.get(sym)
+                if bar is None:
+                    continue
+                for spec in panel_specs:
+                    score = bar.get(spec.column)
+                    if score is not None:
+                        rows.append((spec.name, sym, float(score)))
+        for spec in self._holding_models:
+            for symbol in self.account.holdings:
+                bar = bars_dict.get(symbol)
+                if bar is None:
+                    continue
+                score = bar.get(spec.column)
+                if score is not None:
+                    rows.append((spec.name, symbol, float(score)))
+        if rows:
+            database.write_ml_predictions(conn, self.run_id, today, rows)
+
     def _save_state(self):
         self._saved_cash = self.account.cash
         self._saved_holdings = copy.deepcopy(self.account.holdings)
@@ -642,7 +636,6 @@ class Engine:
                 "sell": pending_actions.get("sell", []),
                 "buy_conditions": pending_actions.get("buy_conditions", []),
             },
-            "risk_forced": self._risk_forced,
             "holdings_detail": holdings_detail,
             "bars_subset": bars_subset,
         }
@@ -653,72 +646,6 @@ def is_valid_positive(v) -> bool:
     """正数校验: 拒绝 bool / None / NaN / 非正。"""
     return (isinstance(v, (int, float)) and not isinstance(v, bool)
             and v == v and v > 0)
-
-
-def _validate_required_columns(bars_df: pd.DataFrame) -> None:
-    """契约强校验：缺必需列直接失败。
-
-    pre_close / up_limit / down_limit 曾允许引擎兜底推算，但兜底语义不精确
-    （除权日涨跌停一阶错误、pct_chg 假暴跌），故改为数据契约强制提供。
-    """
-    missing = [c for c in REQUIRED_BAR_COLUMNS if c not in bars_df.columns]
-    if missing:
-        raise ValueError(
-            f"bars 缺必需列: {missing}, 数据契约见 docs/backend_guide.md"
-        )
-
-
-def _ensure_derived_fields(bars_df: pd.DataFrame) -> None:
-    """补齐可由必需列精确派生的字段（基础列存在时才派生）。
-
-    *_hfq = 裸价 × adj_factor（hfq 定义）；pct_chg 由 pre_close（交易所
-    除权调整口径，必需列）派生。这两个派生都是精确的，无语义损耗。
-    广度面板按列裁剪后可能只带部分基础列，缺基础列的派生直接跳过。
-    """
-    if "adj_factor" in bars_df.columns:
-        for src, dst in [("open", "open_hfq"), ("high", "high_hfq"),
-                         ("low", "low_hfq"), ("close", "close_hfq")]:
-            if dst not in bars_df.columns and src in bars_df.columns:
-                bars_df[dst] = bars_df[src] * bars_df["adj_factor"]
-
-    if ("pct_chg" not in bars_df.columns
-            and {"close", "pre_close"} <= set(bars_df.columns)):
-        pre = bars_df["pre_close"]
-        bars_df["pct_chg"] = (bars_df["close"] - pre) / pre.replace(0, pd.NA)
-
-
-def ensure_pseudo_columns(
-    df: pd.DataFrame,
-    needs: dict,
-    panel: str,
-    *,
-    backend,
-    benchmark: str | None = None,
-    derive_idx_ret=None,
-) -> None:
-    """按需附着伪列：industry / log_mktcap / idx_ret（原地写列）。
-
-    引擎与 scripts/factor_eval.py 共用，backend 为鸭子类型（只需有对应方法即可）。
-    idx_ret 派生需要 benchmark 和 derive_idx_ret 回调（引擎内联供给）。
-    """
-    if needs.get(f"industry_{panel}"):
-        fn = getattr(backend, "get_stock_industries", None)
-        if not callable(fn):
-            raise ValueError(
-                "因子引用 industry 分组需要 backend 提供 get_stock_industries"
-            )
-        symbols = df.index.get_level_values("symbol").unique().tolist()
-        mapping = fn(symbols)
-        df["industry"] = df.index.get_level_values("symbol").map(mapping)
-    if needs.get(f"mktcap_{panel}"):
-        total_mv = df["total_mv"]
-        df["log_mktcap"] = np.log(total_mv.where(total_mv > 0))
-    if needs.get("index"):
-        if derive_idx_ret is None or not benchmark:
-            raise ValueError(
-                "因子引用 idx_ret 需要 benchmark 且 derive_idx_ret 回调不可缺"
-            )
-        df["idx_ret"] = derive_idx_ret(df)
 
 
 def _bars_to_dict(day_bars_df: pd.DataFrame, trade_date: str) -> dict:

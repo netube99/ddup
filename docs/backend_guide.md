@@ -312,9 +312,9 @@ def get_index_members(
 "industry_name": "index_member_all.l1_name",
 ```
 
-启用能力：行业风控（`max_industry_pct` 控制单行业最大仓位占比）、`industry` 分组（策略 `groupby` 功能）、行业过滤（`exclude_industry`）。
+启用能力：`industry` 分组（策略 `groupby` 功能）、行业过滤（`exclude_industry`）。
 
-**不填的影响**：`exclude_industries` 配置时引擎告警后静默降级（行业过滤不生效）；`max_industry_pct` 配置时直接报错（`ValueError`）。`industry` 伪列不可用于因子表达式。
+**不填的影响**：`exclude_industries` 配置时引擎告警后静默降级（行业过滤不生效）。`industry` 伪列不可用于因子表达式。
 
 ### 6.3 上市日期：`listing_date`
 
@@ -530,7 +530,7 @@ filter 编译为 `WHERE col1 = ? AND col2 IS NOT NULL`，列名自动加双引�
 | 缺失项 | 引擎行为 | 检测方式 | 策略侧影响 |
 |--------|---------|---------|-----------|
 | ST 标记 `st_symbol` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_st: true` 配置时告警后静默降级（ST 过滤不生效） |
-| 行业分类 `industry_name` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_industries` → 告警后静默降级；`max_industry_pct` → 直接报错；`industry` 伪列不可用 |
+| 行业分类 `industry_name` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_industries` → 告警后静默降级；`industry` 伪列不可用 |
 | 上市日期 `listing_date` | 告警后继续运行 | 初始化期 `hasattr` | `exclude_new_stock: true` 不生效，引擎不报错 |
 | 指数成分 `index_code` + `index_member` | 告警后继续运行 | 初始化期 `hasattr` | `index_universe` 或 `factor_universe` 配置时告警后静默降级（对应规则不生效） |
 | 基准行情 `benchmark_close` | 静默关闭 | 初始化期 `hasattr` | 基准对比列为空；`idx_ret` 因子不可用；引擎不报错 |

@@ -59,7 +59,7 @@ def test_expand_params_multi():
 
 def test_expand_params_nested_keys():
     """expand_params 嵌套参数路径的标签使用最后一段。"""
-    params = {"config.risk.max_positions": [10, 20]}
+    params = {"config.max_positions": [10, 20]}
     result = expand_params(params)
     assert len(result) == 2
     labels = [r[0] for r in result]
@@ -69,11 +69,11 @@ def test_expand_params_nested_keys():
 
 def test_expand_params_dict_values():
     """expand_params 验证返回的 param_dict 结构。"""
-    params = {"top_k": [3], "config.risk.max_positions": [5]}
+    params = {"top_k": [3], "config.max_positions": [5]}
     result = expand_params(params)
     assert len(result) == 1
     label, param_dict = result[0]
-    assert param_dict == {"top_k": 3, "config.risk.max_positions": 5}
+    assert param_dict == {"top_k": 3, "config.max_positions": 5}
     assert "top_k=3" in label
     assert "max_positions=5" in label
 

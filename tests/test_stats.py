@@ -108,8 +108,8 @@ def test_sell_source_attribution():
     trades = SAMPLE_TRADES + [
         ["20240604", "CCC", "BUY", "MANUAL", 10.0, 1000, 10000.0, 5.0, 0.0, 0.1, 2.0,
          -10007.1, ""],
-        ["20240606", "CCC", "SELL", "RISK", 9.0, 1000, 9000.0, 5.0, 9.0, 0.1, 2.0,
-         8983.9, "熔断强平"],
+        ["20240606", "CCC", "SELL", "TRAILING_TP", 9.0, 1000, 9000.0, 5.0, 9.0, 0.1, 2.0,
+         8983.9, "移动止盈"],
         ["20240607", "BBB", "SELL", "STOP_LOSS", 22.0, 1000, 22000.0, 6.0, 22.0, 0.2,
          4.0, 21968.0, "止损"],
     ]
@@ -120,13 +120,13 @@ def test_sell_source_attribution():
     stats = calculate_statistics(adf, make_trades(trades))
     src = stats["sell_source"]
 
-    assert set(src) == {"MANUAL", "RISK", "STOP_LOSS"}
+    assert set(src) == {"MANUAL", "TRAILING_TP", "STOP_LOSS"}
     # AAA: 12000-10000=+2000;CCC: 9000-10000=-1000;BBB: 22000-20000=+2000
     assert src["MANUAL"]["count"] == 1
     assert src["MANUAL"]["total_pnl"] == pytest.approx(2000.0)
     assert src["MANUAL"]["win_rate"] == 1.0
-    assert src["RISK"]["total_pnl"] == pytest.approx(-1000.0)
-    assert src["RISK"]["win_rate"] == 0.0
+    assert src["TRAILING_TP"]["total_pnl"] == pytest.approx(-1000.0)
+    assert src["TRAILING_TP"]["win_rate"] == 0.0
     assert src["STOP_LOSS"]["total_pnl"] == pytest.approx(2000.0)
     assert src["MANUAL"]["avg_holding_days"] == pytest.approx(2.0)
 

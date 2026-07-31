@@ -3,9 +3,8 @@ Cross-Validation — 回测结果交叉验证。
 
 检查回测结果与策略设计意图的一致性：
 1. 交易行为验证（买卖是否在预期范围内）
-2. 风控规则触发检查
-3. 异常检测（过度交易、异常滑点等）
-4. 小资金专项检查（交易磨损占比合理性）
+2. 异常检测（过度交易、异常滑点等）
+3. 小资金专项检查（交易磨损占比合理性）
 
 用法：
   .venv/bin/python scripts/cross_validate.py result.db --strategy smart_money
@@ -82,7 +81,8 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
 
     # 检查是否有预期外的 trigger 类型
     expected_triggers = {"MANUAL", "TARGET", "STOP_LOSS", "TAKE_PROFIT",
-                         "TRAILING_TP", "LIMIT_BUY", "BREAKOUT_BUY", "RISK", "CORPORATE"}
+                         "TRAILING_TP", "LIMIT_BUY", "BREAKOUT_BUY",
+                         "CORPORATE", "ML_EXIT"}
     unexpected = set(trigger_dist) - expected_triggers
     if unexpected:
         issues.append(f"UNEXPECTED_TRIGGER: 发现未预期的触发类型: {unexpected}")
@@ -110,16 +110,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
             issues.append(f"SAME_DAY_CONFLICT: {len(conflicts)} 个同日买卖冲突: "
                           f"{conflicts[['date', 'symbol']].to_dict('records')[:5]}")
 
-    # 4. 检查风控强平
-    risk_sells = trades[trades["trigger"] == "RISK"]
-    if len(risk_sells) > 0:
-        notes.append(f"RISK 触发: {len(risk_sells)} 笔风控强平")
-        dates = risk_sells["date"].unique()
-        for d in dates:
-            day_sells = risk_sells[risk_sells["date"] == d]
-            notes.append(f"  {d}: 强平 {len(day_sells)} 只")
-
-    # 5. 检查公司行为
+    # 4. 检查公司行为
     corp = trades[trades["trigger"] == "CORPORATE"]
     if len(corp) > 0:
         notes.append(f"CORPORATE: {len(corp)} 笔公司行为（分红/送转）")
@@ -147,7 +138,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
             else:
                 issues.append(msg)
 
-    # 7. 检查单笔交易金额合理性
+    # 5. 检查单笔交易金额合理性
     buy_trades = trades[trades["side"] == "BUY"]
     if len(buy_trades) > 0:
         avg_buy = buy_trades["turnover"].mean()
@@ -162,7 +153,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
             if capital >= 100000 and pct > 0.5:
                 issues.append(f"TOO_MANY_SMALL_TRADES: {pct:.1%} 的买入触发最低佣金")
 
-    # 8. 检查持有周期
+    # 6. 检查持有周期
     sell_trades = trades[trades["side"] == "SELL"]
     if len(sell_trades) > 0:
         sell_trigger_stats = sell_trades.groupby("trigger").agg(
@@ -172,10 +163,10 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
         )
         notes.append(f"卖出分类统计:\n{sell_trigger_stats.to_string()}")
 
-    # 9. 检查是否有涨停买入（应该被引擎自动跳过，但检查一下）
+    # 7. 检查是否有涨停买入（应该被引擎自动跳过，但检查一下）
     # 无法从 trade_log 直接判断，从 stats 看
 
-    # 10. 交易频率检查
+    # 8. 交易频率检查
     avg_trades_per_day = len(trades) / n_days if n_days > 0 else 0
     notes.append(f"日均交易: {avg_trades_per_day:.1f} 笔")
     if avg_trades_per_day > 10:

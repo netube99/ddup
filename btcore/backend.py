@@ -29,13 +29,13 @@ B) 手写实现（非 SQL 数据源：内存、API、parquet、CSV 等）
 │ 引擎调用（不实现 = 对应功能关闭）                                            │
 │   get_benchmark_bars      基准行情 → 基准收益统计、idx_ret 因子              │
 │   get_st_map              ST 名单日频快照 → exclude_st 过滤                  │
-│   get_stock_industries    行业分类 → 行业风控、industry 分组、行业过滤        │
+│   get_stock_industries    行业分类 → industry 分组、行业过滤        │
 │   get_recent_listings     近期新股 → exclude_new_stock 过滤                  │
 │   get_index_members       指数成分 → index_universe / factor_universe        │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 引擎通过 getattr(backend, "方法名", None) 检测能力是否存在，不存在时相关
-功能自动降级（跳过对应过滤/风控，或报错提示配置了但后端不支持）。
+功能自动降级（跳过对应过滤，或报错提示配置了但后端不支持）。
 """
 
 from __future__ import annotations

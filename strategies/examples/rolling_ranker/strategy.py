@@ -8,7 +8,7 @@
   - calc_conditions holding_days 自适应 — 新仓紧止损，老仓放宽
   - REQUIRED_FIELDS — 声明策略命令式访问的额外列
 
-下一级 target_allocator 展示 target_value / 时间门控自管理 / risk_rules。
+下一级 target_allocator 展示 target_value / 时间门控自管理。
 """
 
 from btcore.filters import StockFilter

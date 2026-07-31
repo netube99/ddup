@@ -1,0 +1,100 @@
+"""训练面板构建 — 与引擎 preload 同一物化路径。
+
+逐行复刻 Engine.run() 的数据准备序列（build_factor_plan → 两路供给 →
+derive_fields → 伪列附着 → materialize → 物化验证），全部调用
+btcore.factors.plan 的同一组函数——训练面板与回测面板逐列一致，
+不存在第二条会漂移的物化管线。
+
+纯函数模块：backend 以参数传入（鸭子类型），不 import adapters。
+"""
+
+import logging
+
+import pandas as pd
+
+from btcore.factors import plan as factor_plan
+from btcore.factors.library import resolve_closure
+from btcore.ml.spec import ModelSpec
+
+logger = logging.getLogger(__name__)
+
+
+def build_panel(
+    backend,
+    symbols: list[str] | None,
+    start: str,
+    end: str,
+    spec: ModelSpec,
+    library: dict,
+    benchmark: str | None = None,
+) -> pd.DataFrame:
+    """构建模型的训练特征面板（含物化因子列 + raw 列），裁到 [start, end]。
+
+    Args:
+        backend: DataBackend 实例（query_bars / get_benchmark_bars 等鸭子类型）。
+        symbols: 股票列表；None = 全市场。
+        start / end: 训练区间（warmup 前伸由因子计划自动推导）。
+        spec: ModelSpec（特征契约来源）。
+        library: 因子库 dict。
+        benchmark: 基准代码（因子引用 idx_ret 时必需，口径同引擎）。
+    """
+    factor_names = list(spec.features)
+    if not factor_names and not spec.raw_features:
+        raise ValueError(f"模型 {spec.name} 无面板特征")
+
+    columns = set(factor_plan.REQUIRED_BAR_COLUMNS) | set(spec.raw_features)
+    fplan = None
+    nodes = None
+    if factor_names:
+        nodes = resolve_closure(factor_names, library)
+        fplan = factor_plan.build_factor_plan(nodes, factor_names)
+        columns |= fplan["main_columns"]
+
+    warmup_days = fplan["main_days"] if fplan else 365
+    load_start = (pd.Timestamp(start) - pd.Timedelta(days=warmup_days)).strftime("%Y%m%d")
+    request_columns = factor_plan.expand_columns(columns)
+
+    logger.info(
+        "训练面板加载: %s ~ %s, %d 列, warmup=%dd",
+        load_start, end, len(request_columns), warmup_days,
+    )
+    bars_df = backend.query_bars(symbols, load_start, end, columns=request_columns)
+    if bars_df is None or len(bars_df) == 0:
+        raise RuntimeError("backend.query_bars 返回空数据")
+    bars_df.sort_index(inplace=True)
+    factor_plan.validate_required_columns(bars_df)
+    factor_plan.derive_fields(bars_df)
+
+    if fplan:
+        breadth_df = None
+        if fplan["needs"]["market"]:
+            breadth_start = (
+                pd.Timestamp(start) - pd.Timedelta(days=fplan["breadth_days"])
+            ).strftime("%Y%m%d")
+            breadth_df = backend.query_bars(
+                None, breadth_start, end,
+                columns=factor_plan.expand_columns(fplan["breadth_columns"]),
+            )
+            breadth_df.sort_index(inplace=True)
+            factor_plan.derive_fields(breadth_df)
+            factor_plan.ensure_pseudo_columns(
+                breadth_df, fplan["needs"], "breadth",
+                backend=backend, benchmark=benchmark,
+            )
+        factor_plan.ensure_pseudo_columns(
+            bars_df, fplan["needs"], "main",
+            backend=backend, benchmark=benchmark,
+        )
+        factor_plan.materialize(bars_df, breadth_df, fplan, nodes)
+        issues = factor_plan.validate_materialization(bars_df, fplan)
+        for issue in issues:
+            logger.warning("[因子验证] %s", issue["message"])
+
+    # 裁掉 warmup，返回训练区间
+    dates = bars_df.index.get_level_values("trade_date")
+    result = bars_df.loc[(dates >= start) & (dates <= end)]
+    logger.info(
+        "训练面板: %d 行, %d 只, %s ~ %s",
+        len(result), result.index.get_level_values("symbol").nunique(), start, end,
+    )
+    return result

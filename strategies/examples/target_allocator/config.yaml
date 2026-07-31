@@ -5,7 +5,6 @@
 #   - target_value 返回格式（引擎自动计算买卖差额，trigger="TARGET"）
 #   - sell_shares 部分减仓（近边缘持仓减半而非清仓）
 #   - 时间门控自管理调仓（select 每日运行，策略自行判断调仓日）
-#   - risk_rules 全系列 — 熔断 / 单票上限 / 行业上限
 #   - materialize_only 因子（仅物化不参与排名）
 #   - execution_price: "close"（收盘价成交）
 #   - condition_slippage_ticks（条件单独立滑点）
@@ -48,13 +47,6 @@ filter_rules:
 conditions:
   stop_loss_pct: 0.06
   trailing_pct: 0.08
-
-# ── 组合风控 ─────────────────────────────────────────────────────────────
-risk_rules:
-  max_drawdown: 0.12             # 回撤 ≥12% 触发熔断，清仓 + 冷却
-  cooldown_days: 5               # 熔断后冷却 5 日
-  max_position_pct: 0.10         # 单票买入金额 ≤ 总资产 10%
-  max_industry_pct: 0.30         # 单行业总暴露 ≤ 总资产 30%（只在买入时把关）
 
 # ── 策略配置 ─────────────────────────────────────────────────────────────
 config:

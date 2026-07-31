@@ -26,7 +26,7 @@ TUSHARE_FORM = {
 
     # ══ 辅助能力（可选：不填 = 对应功能关闭）══
     "st_symbol": "stock_st.ts_code",              # ST 标记，启用 exclude_st 过滤
-    "industry_name": "index_member_all.l1_name",  # 行业分类，启用行业风控/分组
+    "industry_name": "index_member_all.l1_name",  # 行业分类，启用行业分组/过滤
     "listing_date": "stock_basic.list_date",      # 上市日期，启用新股过滤
     "index_code": "index_weight.index_code",      # 指数代码（与 index_member 成对填写）
     "index_member": "index_weight.con_code",      # 指数成分股，启用成分池限定

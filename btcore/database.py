@@ -69,6 +69,16 @@ CREATE TABLE IF NOT EXISTS debug_snapshots (
     snapshot_json TEXT NOT NULL,
     PRIMARY KEY (run_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS ml_predictions (
+    run_id        INTEGER NOT NULL,
+    date          TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    score         REAL NOT NULL,
+    PRIMARY KEY (run_id, date, symbol, model)
+);
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_run ON ml_predictions(run_id);
 """
 
 _ALL_TABLES = ("runs", "account_daily", "holdings", "trade_log", "debug_snapshots")
@@ -208,6 +218,17 @@ def read_run_data(conn: sqlite3.Connection, run_id: int):
     ).fetchone()
     stats = json.loads(row[0]) if row and row[0] else None
     return account_daily, trade_log, stats
+
+
+def write_ml_predictions(
+    conn: sqlite3.Connection, run_id: int, date: str, rows: list[tuple]
+) -> None:
+    """批量写入 ML 分数：rows = [(model, symbol, score), ...]。"""
+    conn.executemany(
+        "INSERT OR REPLACE INTO ml_predictions (run_id, date, symbol, model, score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(run_id, date, sym, model, score) for model, sym, score in rows],
+    )
 
 
 def write_debug_snapshot(conn: sqlite3.Connection, run_id: int, date: str, snapshot: dict) -> None:

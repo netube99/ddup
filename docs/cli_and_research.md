@@ -19,7 +19,7 @@ python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
     --start 20240101 --end 20240630 --out result.db
 
-# 3. 交叉验证：检查交易行为、风控触发、磨损是否合理
+# 3. 交叉验证：检查交易行为与磨损是否合理
 python scripts/cross_validate.py result.db
 
 # 4. 生成 HTML 报告
@@ -186,7 +186,6 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 | 交易触发类型分布 | 检查是否有未预期的 trigger 类型 |
 | 买卖比例平衡 | 卖出/买入比严重偏离 1 时告警 |
 | 同日买卖冲突 | 同日同票既买又卖 |
-| 风控强平 | RISK 触发笔数和日期 |
 | 小资金交易磨损 | 按资金规模使用动态阈值检查成本占比合理性 |
 | 单笔金额合理度 | 小单过多触发最低佣金的告警（≥10 万资金时） |
 | 交易频率 | 日均 >10 笔告警 |
@@ -265,7 +264,7 @@ python scripts/replay.py <result.db> \
 | `--date` | 过滤日期 YYYYMMDD |
 | `--list-symbols` | 按日期列出有快照的标的（不输出详细上下文） |
 
-**输出**：按日期分组输出当日账户状态（现金、总资产、持仓数）、风控状态、pending 买卖名单与条件单、每个持仓的股数/入场价/持仓天数/最新价/因子列值。
+**输出**：按日期分组输出当日账户状态（现金、总资产、持仓数）、pending 买卖名单与条件单、每个持仓的股数/入场价/持仓天数/最新价/因子列值。
 
 **前提条件**：回测时需启用 debug 模式（`Engine(strategy, provider, debug=True)`）才会写入 `debug_snapshots` 表；需要落盘结果库（`db_path` 不为 `:memory:`）。
 

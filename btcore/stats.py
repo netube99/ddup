@@ -372,7 +372,7 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
 
 
 def _compute_sell_source(trip_detail: list) -> dict:
-    """按卖出 trigger 分组的 round-trip 归因（信号卖/调仓/风控强平/条件单）。"""
+    """按卖出 trigger 分组的 round-trip 归因（信号卖/调仓/条件单）。"""
     if not trip_detail:
         return {"sell_source": {}}
     groups: dict[str, list] = defaultdict(list)

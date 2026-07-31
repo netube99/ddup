@@ -69,7 +69,7 @@ Round N:
 - 适合：已确认因子有效，优化进出场时机和资金分配
 
 ### L2 — 目标仓位调仓
-- 新增：`target_value` 精确仓位管理 → `risk_rules` 熔断/单票上限 → 时间门控降频 → `sell_shares` 部分减仓
+- 新增：`target_value` 精确仓位管理 → 时间门控降频 → `sell_shares` 部分减仓
 - 代表：`strategies/examples/target_allocator/`
 - 适合：需要精确资金分配、降低换手率
 
@@ -268,7 +268,7 @@ directions:
 ### 7.1 SQL 维度
 
 ```
-1. 卖出按 trigger 分组：MANUAL vs STOP_LOSS vs TAKE_PROFIT vs TRAILING_TP vs TARGET vs RISK
+1. 卖出按 trigger 分组：MANUAL vs STOP_LOSS vs TAKE_PROFIT vs TRAILING_TP vs TARGET
    → 哪个 trigger 在亏钱？胜率多少？
 
 2. 个股 PnL TOP10 / BOTTOM10
@@ -327,7 +327,7 @@ python scripts/replay.py debug.db --symbol 601998.SH --date 20240605
 python scripts/replay.py debug.db --date 20240315 --list-symbols
 ```
 
-Debug snapshot 包含：当日账户状态、bars 子集（含因子值）、持仓明细、pending actions、风控状态。可以逐日追溯"为什么那天买了/卖了这只股票"。
+Debug snapshot 包含：当日账户状态、bars 子集（含因子值）、持仓明细、pending actions。可以逐日追溯"为什么那天买了/卖了这只股票"。
 
 ---
 
@@ -393,7 +393,7 @@ R3 AH V2: ret=+45.1% shp=0.96 dd=-18.2% trades=86
 
 优先级 2：机制创新（单点 → sweep）
   □ L0 裸因子轮动 → L1 on_fills冷却期 + buy_weights加权
-  □ L1 → L2 target_value 精确仓位 + risk_rules 熔断
+  □ L1 → L2 target_value 精确仓位
   □ L2 → L3 buy_conditions 条件买入 + 自定义 handler
   □ L3 → L4 坍缩因子市场广度 + 多模型投票
 

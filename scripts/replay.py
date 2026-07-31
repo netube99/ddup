@@ -49,7 +49,6 @@ def main():
         print(f"账户: cash={snap['account']['cash']:.0f} "
               f"total={snap['account']['total_value']:.0f} "
               f"holdings={snap['account']['n_holdings']}")
-        print(f"风险: {'FORCED' if snap.get('risk_forced') else 'normal'}")
         pending = snap.get("pending", {})
         if pending.get("buy"):
             print(f"  BUY: {pending['buy']}")

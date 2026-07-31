@@ -1,6 +1,6 @@
 # 策略设计指南
 
-ddup 的策略系统由两部分构成：**YAML 配置**声明因子引用、过滤规则、条件单、风控参数和调度规则；**Python 策略类**实现 `on_start` / `select` / `calc_conditions` 三个核心方法。引擎负责 preload、因子物化、撮合、风控执行和结果落库——策略代码只描述买卖决策。
+ddup 的策略系统由两部分构成：**YAML 配置**声明因子引用、过滤规则和条件单；**Python 策略类**实现 `on_start` / `select` / `calc_conditions` 三个核心方法。引擎负责 preload、因子物化、撮合和结果落库——策略代码只描述买卖决策。
 
 本文从快速开始出发，逐级展示从简单轮动到状态机多模型策略的全部能力。
 
@@ -90,11 +90,10 @@ on_start (一次)
        ├─ on_tick(bars, snapshot) ← 每日状态维护 + buy_conditions  │
        ├─ select(bars, snapshot) → {buy, sell, ...}          │
        ├─ calc_conditions() × N   ← 每个持仓生成条件单        │
-       ├─ 风控裁剪 (DrawdownBreaker + apply_risk_rules)      │
        └─ 生成明日 pending_actions ──────────────────────────┘
 ```
 
-> `select` 和风控生成的是**下一交易日**将执行的买卖信号，当日不成交——这是 T+1 机制的源头。当日撮合的是前一日 `select` 输出的 pending_actions。
+> `select` 生成的是**下一交易日**将执行的买卖信号，当日不成交——这是 T+1 机制的源头。当日撮合的是前一日 `select` 输出的 pending_actions。
 
 `on_fills` 和 `on_tick` 是可选的。`on_tick` 每日运行；`calc_conditions` 同样每日运行。
 
@@ -178,7 +177,6 @@ class MyStrategy(Strategy):
   - `holdings` — `dict[str, Holding]`，当前持仓的深拷贝（修改不影响引擎状态）
   - `trades` — 当日已执行的成交列表 `list[Trade]`（与 `on_fills` 收到的同一份数据）
   - `total_value` — 总资产（现金 + 持仓市值）
-  - `risk_active` — 回撤熔断是否激活（`bool`）。`True` 时策略应自行关闭买侧，引擎已在当日强制清仓全部持仓（`trigger="RISK"`），但不再自动清除 `buy` 列表
 - `provider`: `DataProvider` 对象，提供 `get_historical_bars()`、`get_benchmark_returns()` 等方法
 
 **返回值**是一个 dict，支持以下键：
@@ -336,10 +334,10 @@ class TrendGuard(Strategy):
 | `factor_specs` | 否 | `list[dict]` | 因子引用列表 |
 | `filter_rules` | 否 | `dict` | 股票过滤规则 |
 | `conditions` | 否 | `dict` | 声明式离场条件单 |
-| `risk_rules` | 否 | `dict` | 组合风控规则 |
 | `factor_library` | 否 | `str` | 自定义因子库路径，默认 `factors/library.yaml` |
+| `models` | 否 | `dict` | ML 模型声明（panel/holding 双 scope），详见 [ML 子系统指南](./ml_guide.md) |
 
-`conditions` 和 `risk_rules` 由 loader 合并入 `self.config["conditions"]` 和 `self.config["risk_rules"]`。
+`conditions` 由 loader 合并入 `self.config["conditions"]`。
 
 ### 4.2 `config` 引擎识别键
 
@@ -403,25 +401,17 @@ conditions:
   stop_loss_pct: 0.06    # 跌 6% 止损 → STOP_LOSS at entry_price × (1 - 0.06)
   take_profit_pct: 0.25  # 涨 25% 止盈 → TAKE_PROFIT at entry_price × (1 + 0.25)
   trailing_pct: 0.08     # 从最高点回撤 8% 止盈 → TRAILING_TP at highest × (1 - 0.08)
+  model_exit:            # ML 模型分数 ≥ 阈值 → ML_EXIT（次日开盘价成交）
+    - {model: tb_guard, threshold: 0.6}
 ```
 
-所有值必须是 `(0, 1)` 内的 float。这三项由 `ConditionBuilder` 翻译为条件单 dict，策略在 `calc_conditions` 中通过 `self._cond.calc()` 委托。
+前三项值必须是 `(0, 1)` 内的 float。`model_exit` 是 `[{model, threshold}]`
+列表：`model` 必须在 `models` 节已声明（缺省 threshold=0.5）；持仓 bar 中
+`ml_<model>` 分数（引擎物化或决策时点注入）≥ threshold 时生成 ML_EXIT
+条件单。所有规则由 `ConditionBuilder` 翻译为条件单 dict，策略在
+`calc_conditions` 中通过 `self._cond.calc()` 委托。
 
-### 4.6 `risk_rules` — 组合风控
-
-```yaml
-risk_rules:
-  max_drawdown: 0.12         # 总权益自峰值回撤 ≥ 12% 触发熔断
-  cooldown_days: 5           # 熔断后冷却 5 个交易日（持仓被强平，策略通过 risk_active 自管买侧）
-  max_position_pct: 0.10     # 单票买入金额 ≤ 总资产的 10%
-  max_industry_pct: 0.30     # 单行业总暴露 ≤ 总资产的 30%（需 industry_name 后端能力）
-```
-
-- `max_drawdown` 触发后进入冷却期：所有持仓以 `trigger="RISK"` 强制清仓。买侧**不再由引擎关闭**——策略通过 `snapshot.risk_active` 感知冷却状态，自行决定是否暂停买入。
-- `cooldown_days` 到期的下一天重置峰值，允许策略重新出发。出现 `max_drawdown` 时 `cooldown_days` 默认 1。
-- `max_industry_pct` 是"入场闸"而非"持续配平器"——只在买入时把关，持仓自然上涨超出上限不强制减仓。
-
-### 4.7 自管理调仓 — 策略代码控制换手节奏
+### 4.6 自管理调仓 — 策略代码控制换手节奏
 
 `select()` 每日运行。调仓节奏完全由策略代码自行控制——策略在 `select()` 中判断今天是否调仓，非调仓日返回空名单即可。
 
@@ -466,7 +456,7 @@ class MyStrategy(Strategy):
 
 注意：`bare_bones` 和 `rolling_ranker` 虽未做自管理换手——它们 `select()` 每日全量运行等同于 day trading。不实施自管理不等于自动获得精细化换手控制，需在代码中显式实现。
 
-### 4.8 `factor_library`
+### 4.7 `factor_library`
 
 ```yaml
 factor_library: factors.yaml   # 相对于策略 YAML 所在目录
@@ -605,30 +595,9 @@ def my_buy_handler(order, bar):
 register_buy_condition_handler("MY_BUY", my_buy_handler)
 ```
 
-### 5.3 风控执行顺序
+### 5.3 调仓节奏
 
-每日流水线：
-
-```
-select() → DrawdownBreaker.update() → DrawdownBreaker.tick()
-  → 若熔断: 强制 sell = 全部持仓, buy 侧由策略自行判断
-  → 否则: apply_risk_rules() 裁剪买侧
-  → 撮合
-```
-
-**熔断详细行为**：
-- 总资产自峰值回撤 ≥ `max_drawdown` → 触发
-- 触发后**当天**强制清仓（trigger = `"RISK"`），之后冷却 `cooldown_days` 个交易日
-- 冷却期间引擎不再干预买侧；策略通过 `snapshot.risk_active` 自行决定是否关闭买侧
-- 冷却到期后峰值重置，允许策略重新出发
-
-**`max_position_pct` 裁剪**：target_value 中的目标市值、buy_conditions 中的 value、buy_weights 的分配金额均被 cap 到 `total_value × pct`。
-
-**`max_industry_pct` 裁剪**：买入时检查该股票所在行业的总暴露（持仓市值 + 新买单金额）是否超过上限。超出则丢弃该买单或缩减 target_value。卖出释放的行业余量不在当日回补。
-
-### 5.4 调仓节奏
-
-引擎不再提供声明式调仓调度。`select()` 每日运行，策略代码自行管理调仓节奏——在 `select()` 中判断今天是否调仓，非调仓日返回空名单即可。`on_tick` 和 `calc_conditions` 始终每日运行，不受策略内部调仓判断影响。详见 §4.7。
+引擎不再提供声明式调仓调度。`select()` 每日运行，策略代码自行管理调仓节奏——在 `select()` 中判断今天是否调仓，非调仓日返回空名单即可。`on_tick` 和 `calc_conditions` 始终每日运行，不受策略内部调仓判断影响。详见 §4.6。
 
 ### 5.5 撮合与执行
 
@@ -820,7 +789,7 @@ class RollingRanker(Strategy):
 
 > 完整代码：`strategies/examples/self_managed_time/` · `strategies/examples/self_managed_rank/`
 
-Level 0-1 的策略 `select()` 每日全量运行。这在简单场景下可行，但换手率极高且缺乏精细化控制。两个示例展示如何在策略代码中自行管理调仓节奏，详见 §4.7。
+Level 0-1 的策略 `select()` 每日全量运行。这在简单场景下可行，但换手率极高且缺乏精细化控制。两个示例展示如何在策略代码中自行管理调仓节奏，详见 §4.6。
 
 **模式 A：时间门控 + 非对称买卖**（`self_managed_time`）
 
@@ -885,7 +854,7 @@ class SelfManagedRank(Strategy):
 
 > 完整代码：`strategies/examples/target_allocator/`
 
-**新增能力**：`target_value` 精确仓位管理 + `risk_rules` 组合风控 + 时间门控自管理调仓 + `sell_shares` 部分减仓。
+**新增能力**：`target_value` 精确仓位管理 + 时间门控自管理调仓 + `sell_shares` 部分减仓。
 
 **strategy.py** 关键部分：
 
@@ -926,10 +895,6 @@ class TargetAllocator(Strategy):
 **config.yaml**：
 
 ```yaml
-risk_rules:
-  max_drawdown: 0.12
-  cooldown_days: 5
-  max_position_pct: 0.10
 config:
   execution_price: "close"
   rebalance_interval: 5
@@ -939,7 +904,6 @@ config:
 - `target_value` 返回格式——引擎自动计算买卖差额，trigger = `"TARGET"`
 - `sell_shares` 用于近边缘持仓的部分保留（降低换手率）
 - `rebalance_interval` 时间门控自管理调仓
-- `risk_rules` 提供熔断 + 单票上限
 - `execution_price: "close"` 以收盘价成交
 
 ### 6.4 Level 3：条件单猎手
@@ -1045,10 +1009,6 @@ factor_specs:                   # 11 个因子（含坍缩算子构建的市场�
   - factor: mkt_breadth20      # 坍缩算子——全市场站上 MA20 占比
     weight: 0.06
 # ... 等
-risk_rules:
-  max_drawdown: 0.15
-  cooldown_days: 7
-  max_position_pct: 0.10
 ```
 
 **factors.yaml**（自定义因子库）：
@@ -1365,7 +1325,7 @@ result = engine.run("20240101", "20240630")
 | 收益指标 | `total_return`、`annualized_return`、`sharpe`、`max_drawdown`、`calmar` | 标准绩效指标 |
 | 交易磨损 | `trading_friction` — 双边磨损率、年化拖累 (bps)、成本占盈利比、无摩擦对照收益 | 衡量交易成本对收益的侵蚀程度 |
 | 持仓复杂度 | `management_complexity` — 单日最大成交笔数、有成交天数占比、单票平均市值 | 评估策略的可执行性（对散户跟单来说，日成交 20 笔的策略不可行） |
-| 卖出来源 | `sell_source` — MANUAL / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / RISK / TARGET 各占卖出金额的比例 | 理解退出行为的构成——是自然轮动还是被风控打出 |
+| 卖出来源 | `sell_source` — MANUAL / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / TARGET 各占卖出金额的比例 | 理解退出行为的构成——是自然轮动、条件单触发还是目标仓位调仓 |
 
 ```
 
@@ -1375,7 +1335,6 @@ Engine 构造时传入 `debug=True`，引擎每日写入一条 `debug_snapshots`
 
 - `account`：当日现金、总资产、持仓数
 - `pending`：当日买卖名单与条件买单
-- `risk_forced`：是否触发风控强平
 - `holdings_detail`：每只持仓的股数、入场价、入场日期、持仓天数
 - `bars_subset`：涉及标的的当日行情截面（含因子列值）
 
@@ -1407,15 +1366,14 @@ Engine 构造时传入 `debug=True`，引擎每日写入一条 `debug_snapshots`
 ### 10.2 YAML 全部键一览
 
 ```
-顶层: name, strategy*, config, factor_specs, filter_rules, conditions, risk_rules, factor_library
+顶层: name, strategy*, config, factor_specs, filter_rules, conditions, factor_library
 config: initial_capital, max_positions, slippage_ticks, condition_slippage_ticks,
         execution_price, commission_rate, min_commission, stamp_tax_rate,
         transfer_fee_rate, benchmark, quiet_skips, order_volume_ratio
         + 用户自定义键
 filter_rules: exclude_st, exclude_new_stock, exclude_loss, exclude_boards,
               exclude_industries, min_price, index_universe, factor_universe
-conditions: stop_loss_pct, take_profit_pct, trailing_pct
-risk_rules: max_drawdown, cooldown_days, max_position_pct, max_industry_pct
+conditions: stop_loss_pct, take_profit_pct, trailing_pct, model_exit
 ```
 
 ### 10.3 条件单类型一览
@@ -1448,7 +1406,6 @@ def handler(order: dict, bar: dict) -> tuple[bool, float, dict]
 | `"STOP_LOSS"` | 固定止损 | `conditions.stop_loss_pct` |
 | `"TAKE_PROFIT"` | 固定止盈 | `conditions.take_profit_pct` |
 | `"TRAILING_TP"` | 移动止盈 | `conditions.trailing_pct` |
-| `"RISK"` | 风控强制清仓 | `risk_rules.max_drawdown` 熔断 |
 | 自定义 | 自定义条件 | `register_condition_handler` 注册的 type |
 
 ### 10.5 Holding 属性一览
@@ -1513,7 +1470,7 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 |---|---|---|
 | `run_id` | INTEGER | 关联 runs |
 | `date` | TEXT | 交易日 (YYYYMMDD) |
-| `snapshot_json` | TEXT | JSON：account/pending/holdings_detail/bars_subset/risk_forced |
+| `snapshot_json` | TEXT | JSON：account/pending/holdings_detail/bars_subset |
 
 **account_daily**（逐日账户快照）：
 
@@ -1557,7 +1514,7 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 | rolling_ranker | `strategies/examples/rolling_ranker/` | on_fills + on_tick + buy_weights + 动态参数 |
 | self_managed_time | `strategies/examples/self_managed_time/` | 时间门控 + 非对称买卖 |
 | self_managed_rank | `strategies/examples/self_managed_rank/` | 排名阈值 + 逐仓独立管理 |
-| target_allocator | `strategies/examples/target_allocator/` | target_value + risk_rules + 时间门控 + sell_shares |
+| target_allocator | `strategies/examples/target_allocator/` | target_value + 时间门控 + sell_shares |
 | condition_hunter | `strategies/examples/condition_hunter/` | buy_conditions + 自定义 handler |
 | multi_model | `strategies/examples/multi_model/` | 全部能力：状态机 + 多模型 + 坍缩因子 + 精确跟踪 |
 

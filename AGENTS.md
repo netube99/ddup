@@ -31,10 +31,13 @@ python scripts/run.py strategies/examples/rolling_ranker/config.yaml --start 202
 python scripts/report.py result.db --out report.html
 python scripts/compare.py result.db --html compare.html
 
-# 因子 IC 评估 / 分层回测 / 相关性矩阵
+# 因子 IC 评估 / 分层回测 / 相关性矩阵（--model 可评 ML 模型分数）
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 
-# 回测结果交叉验证（交易行为、风控触发、磨损合理性检查）
+# ML 模型训练（panel scope 截面模型 / holding scope 持仓模型，需要真实数据库）
+python scripts/ml_train.py strategies/my_strategy/config.yaml --model alpha_xs --start 20220101 --end 20250630 --horizon 5
+
+# 回测结果交叉验证（交易行为、磨损合理性检查）
 python scripts/cross_validate.py result.db --strategy name --run-id 1
 
 # 参数扫描批量回测（YAML 路径语法展开参数空间）
@@ -55,7 +58,8 @@ python scripts/dump_fixtures.py
 ## 架构分层与依赖规则（反破坏 linter 强制检查）
 
 ```
-btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策略加载器/工具）
+btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策略加载器/工具、
+              ML 子系统 btcore/ml）
               不要随意修改
 adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
 research/   — 研究工具库（纯 importable 模块，不含 CLI；因子评估、归因、
@@ -108,6 +112,13 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
   注册（进程级全局），但这是条件单机制，不是因子机制
 - **Holding 不得有 `last_adj_factor`**：公司行为仅用分红表，不做启发式兜底
 - **GuardedProvider 包装器不得存在**：单一 provider 对象，前视保护是约定性的
+- **ML 外挂模式不得存在**：`MLConfig` / `MLEvaluator` / `config["_ml_config"]` /
+  factor_specs 的 `type: ml_feature` 已删除。模型经策略 YAML `models` 节声明，
+  对引擎是意图中性的打分公式——scope=panel（无账户态特征）在 preload
+  物化为 `ml_<name>` 列；scope=holding 在决策时点求值注入持仓 bar。
+  分数的解释权在策略（factor_specs / conditions.model_exit / 自读），
+  引擎不得硬编码模型意图（如已删除的 exit_guard role/threshold）；
+  策略不得自行加载 ONNX 做逐日推理（绕开前视保护与物化体系）
 
 ---
 
@@ -178,13 +189,13 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 因子物化规划与两路供给 | `btcore/factors/plan.py` | `docs/factor_library.md` |
 | 物化公共子表达式消除（CSE） | `btcore/factors/cse.py` | `docs/factor_library.md` |
 | 多因子合成（滚动 IC/ICIR 加权） | `research/composite.py` | `docs/cli_and_research.md` |
+| ML 子系统（panel/holding 双 scope、同源物化、model_exit、meta v2 契约） | `btcore/ml/` | `docs/ml_guide.md` |
 | 因子评估（IC/分层/相关性） | `research/factor_eval.py` | `docs/cli_and_research.md` |
 | Brinson 行业归因 | `research/attribution.py` | `docs/cli_and_research.md` |
 | 策略 YAML 加载 | `btcore/strategy_loader.py` | `docs/strategy_guide.md` |
 | select 返回协议与冲突校验 | `btcore/engine.py:_compute_pending` | `docs/strategy_guide.md` |
 | 填表法后端 | `btcore/generic_sql.py` | `docs/backend_guide.md` |
 | 条件单 dispatch 与自定义注册 | `btcore/match/conditions.py` | `docs/strategy_guide.md` |
-| 组合风控（熔断/仓位/行业上限） | `btcore/risk.py` | `docs/strategy_guide.md` |
 | 滑点模型（tick=0.01） | `btcore/slippage.py` | `docs/strategy_guide.md` |
 | 成本函数（可配置费率） | `btcore/costs.py` | `docs/strategy_guide.md` |
 | 多 run 结果库 schema | `btcore/database.py` | `docs/strategy_guide.md` |
@@ -204,9 +215,11 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 398 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
-  列裁剪、风控规则、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
+- 403 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+  列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
+  ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、
+  训练面板与引擎物化一致性、时间切分 embargo、评估指标）、
   统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、
   debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证等
 

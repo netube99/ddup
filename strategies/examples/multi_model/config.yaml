@@ -81,12 +81,6 @@ conditions:
   take_profit_pct: 0.25
   trailing_pct: 0.08
 
-# ── 组合风控 ─────────────────────────────────────────────────────────────
-risk_rules:
-  max_drawdown: 0.15
-  cooldown_days: 7
-  max_position_pct: 0.10
-
 # ── 策略配置 ─────────────────────────────────────────────────────────────
 config:
   max_positions: 20

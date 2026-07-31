@@ -26,7 +26,7 @@ def manual_sell(account, bars: dict, sell_symbols: list,
                 trigger: str = "MANUAL") -> list:
     """手动卖出。shares_map 为 None 时清仓（现状）；否则按指定股数部分卖出。
 
-    trigger 透传进成交记录：风控强平时引擎传 "RISK"，缺省 "MANUAL"。
+    trigger 透传进成交记录，缺省 "MANUAL"。
     """
     _warn = logger.debug if quiet else logger.warning
     trades = []

@@ -2,8 +2,8 @@
 
 import pytest
 
-from btcore.engine import REQUIRED_BAR_COLUMNS, Engine, required_bar_columns
-from btcore.factors.plan import build_factor_plan
+from btcore.engine import Engine, required_bar_columns
+from btcore.factors.plan import REQUIRED_BAR_COLUMNS, build_factor_plan
 from btcore.provider import DataProvider
 from strategies.examples.rolling_ranker import RollingRanker
 from tests.conftest import MockDataBackend

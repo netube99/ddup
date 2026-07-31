@@ -161,6 +161,22 @@ def check_btcore_no_user_layer_import(repo_root: str) -> list[str]:
     return errors
 
 
+def check_btcore_no_engine_import(repo_root: str) -> list[str]:
+    """engine.py must not be imported by btcore internal modules (user-code only)."""
+    errors = []
+    btcore_dir = os.path.join(repo_root, "btcore")
+    for path in _iter_py_files(btcore_dir):
+        if os.path.basename(path) == "engine.py":
+            continue
+        for module, lineno in _iter_import_modules(path):
+            if module == "btcore.engine":
+                errors.append(
+                    f"VIOLATION: btcore internal module imports engine: "
+                    f"{path} line {lineno}"
+                )
+    return errors
+
+
 def check_factors_layer_deps(repo_root: str) -> list[str]:
     """factors/ layer may only depend on btcore.factors."""
     errors = []
@@ -195,6 +211,7 @@ def main():
     all_errors.extend(check_strategy_no_behavior_switches(repo_root))
     all_errors.extend(check_factors_no_old_api(repo_root))
     all_errors.extend(check_btcore_no_user_layer_import(repo_root))
+    all_errors.extend(check_btcore_no_engine_import(repo_root))
     all_errors.extend(check_factors_layer_deps(repo_root))
 
     if all_errors:

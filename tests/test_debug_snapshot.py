@@ -19,7 +19,6 @@ class TestWriteDebugSnapshot:
             "date": "20240603",
             "account": {"cash": 900000.0, "total_value": 1000000.0, "n_holdings": 2},
             "pending": {"buy": ["000001.SZ"], "sell": [], "buy_conditions": []},
-            "risk_forced": False,
             "holdings_detail": {
                 "600036.SH": {"shares": 10000, "entry_price": 35.0,
                               "entry_date": "20240601", "holding_days": 2},
@@ -131,7 +130,7 @@ class TestEngineDebugMode:
             ).fetchone()
             assert row is not None
             snap = json.loads(row[0])
-            expected_keys = {"date", "account", "pending", "risk_forced",
+            expected_keys = {"date", "account", "pending",
                              "holdings_detail", "bars_subset"}
             assert expected_keys <= set(snap.keys()), \
                 f"Missing keys: {expected_keys - set(snap.keys())}"

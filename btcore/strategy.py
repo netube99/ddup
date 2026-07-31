@@ -28,6 +28,12 @@ class Strategy(ABC):
 
     FACTOR_SPECS: ClassVar[list[dict]] = []
     FACTOR_NODES: ClassVar[dict | None] = None
+    MODEL_SPECS: ClassVar[list] = []
+    """ML 模型声明（btcore.ml.spec.ModelSpec 列表），由 strategy_loader
+    依据策略 YAML 的 models 节挂接。scope=panel 的模型分数在 preload
+    物化为 ml_<name> 列（可在 FACTOR_SPECS 中按名引用参与评分）；
+    scope=holding 的模型由引擎在决策时点逐持仓求值，分数注入持仓的
+    bar dict——分数的含义由策略自行解释。"""
     FILTER_RULES: ClassVar[dict] = {}
     CONDITION_FACTORS: ClassVar[set[str]] = set()
     """子类可选声明：calc_conditions / 条件单 handler 读取的因子名（不参与评分）。

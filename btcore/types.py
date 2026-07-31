@@ -52,7 +52,6 @@ class Snapshot:
     holdings: dict = field(default_factory=dict)
     trades: list = field(default_factory=list)
     total_value: float = 0.0
-    risk_active: bool = False
 
 
 def bar_get(bar, key, default=None):

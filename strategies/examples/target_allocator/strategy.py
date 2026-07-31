@@ -1,7 +1,7 @@
 """
 示例 2: target_allocator — 目标仓位精确管理。
 
-展示 target_value / sell_shares / 时间门控自管理 / risk_rules / materialize_only。
+展示 target_value / sell_shares / 时间门控自管理 / materialize_only。
 
 核心路径：过滤 → 打分 → 选 top_k → 按得分比例分配 target_value
   → 不在 top_k 的持仓 target=0（清仓）
@@ -25,11 +25,6 @@ class TargetAllocator(Strategy):
       - 目标市值 < 当前市值 → 减持
       - 目标市值 = 0 → 清仓
       - 未出现在 dict 中的持仓 → 不动
-
-    配合 risk_rules：
-      - max_position_pct 限制单票买入上限
-      - max_industry_pct 行业总暴露闸门
-      - max_drawdown 触发熔断后清仓 + 冷却
     """
 
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
@@ -43,10 +38,6 @@ class TargetAllocator(Strategy):
 
     def select(self, bars, account_snapshot, provider) -> dict:
         if not bars:
-            return {"buy": [], "sell": [], "target_value": {}}
-
-        # ── 熔断感知：冷却期内暂停所有买入 ───────────────────────────
-        if account_snapshot.risk_active:
             return {"buy": [], "sell": [], "target_value": {}}
 
         date_str = next(iter(bars.values())).get("trade_date", "")

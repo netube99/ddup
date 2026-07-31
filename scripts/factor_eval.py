@@ -14,13 +14,21 @@ IC 衰减模式（多前瞻期）:
 
 import argparse
 import sys
+from pathlib import Path
 
 import pandas as pd
 
 from adapters.tushare import TushareBackend
-from btcore.engine import _ensure_derived_fields, ensure_pseudo_columns
 from btcore.factors import plan as factor_plan
-from btcore.factors.library import compute_factors, load_library, spec_names
+from btcore.factors.library import (
+    compute_factors,
+    load_library,
+    resolve_closure,
+    spec_names,
+)
+from btcore.factors.plan import derive_fields, ensure_pseudo_columns
+from btcore.ml import runtime as ml_runtime
+from btcore.ml.spec import ModelSpec
 from research.factor_eval import (
     calc_factor_corr,
     calc_ic,
@@ -58,7 +66,13 @@ def main() -> int:
         description="因子评估 — IC / 分层回测 / 相关性矩阵",
     )
     parser.add_argument(
-        "factors", help="逗号分隔的因子名称（来自 factors/library.yaml）",
+        "factors", nargs="?", default="",
+        help="逗号分隔的因子名称（来自 factors/library.yaml）；--model 时可省略",
+    )
+    parser.add_argument(
+        "--model", default=None,
+        help="ML 模型 ONNX 路径（meta 为同名 .meta.json）——"
+             "模型分数物化为 ml_<name> 列后与因子同口径评估",
     )
     parser.add_argument("--start", required=True, help="开始日期 YYYYMMDD")
     parser.add_argument("--end", required=True, help="结束日期 YYYYMMDD")
@@ -85,8 +99,26 @@ def main() -> int:
         print("错误：--decay 与 --forward 不能同时指定", file=sys.stderr)
         return 1
 
+    # ML 模型：spec 解析（fail-fast），特征并入因子计算与请求列
+    model_spec = None
+    if args.model:
+        model_path = Path(args.model)
+        try:
+            model_spec = ModelSpec.from_dict(
+                model_path.stem, {"artifact": str(model_path)}, "",
+            )
+        except ValueError as e:
+            print(f"错误：{e}", file=sys.stderr)
+            return 1
+        if model_spec.scope != "panel":
+            print("错误：--model 只支持 panel scope 模型（holding scope 无物化列）",
+                  file=sys.stderr)
+            return 1
+
     factor_names = [n.strip() for n in args.factors.split(",") if n.strip()]
-    if not factor_names:
+    if model_spec is not None:
+        factor_names = list(dict.fromkeys(model_spec.features + factor_names))
+    if not factor_names and model_spec is None:
         print("错误：至少需要一个因子名称", file=sys.stderr)
         return 1
 
@@ -149,6 +181,13 @@ def main() -> int:
 
     # 确定需要请求的列：因子依赖的基础列 + hfq 派生所需列
     raw_cols: set[str] = set()
+    if model_spec is not None:
+        # 模型特征：闭包全部节点的基础列 + raw 特征列
+        closure = resolve_closure(model_spec.features, library)
+        for node in closure.values():
+            cols, _ = spec_names(node, set(library))
+            raw_cols |= cols
+        raw_cols |= set(model_spec.raw_features)
     for name in factor_names:
         spec = library[name]
         cols, _ = spec_names(spec, set(library))
@@ -170,7 +209,7 @@ def main() -> int:
         return 1
 
     # 补齐后复权价等派生列
-    _ensure_derived_fields(bars_df)
+    derive_fields(bars_df)
 
     # 附着伪列（industry / log_mktcap / idx_ret），与引擎 preload 口径一致
     pseudo_needs = {
@@ -189,6 +228,18 @@ def main() -> int:
     print(f"  有效截面: {len(factor_df)} 行  |  "
           f"日期数: {factor_df.index.get_level_values('trade_date').nunique()}")
 
+    # ML 模型：分数物化为 ml_<name> 列，后续与因子同口径评估
+    eval_names = list(factor_names)
+    if model_spec is not None:
+        eval_df = bars_df.copy()
+        for c in model_spec.features:
+            eval_df[c] = factor_df[c]
+        ml_runtime.materialize_predictions(eval_df, [model_spec])
+        factor_df[model_spec.column] = eval_df[model_spec.column]
+        eval_names.append(model_spec.column)
+        print(f"模型分数: {model_spec.column} "
+              f"(post_transform={model_spec.post_transform})")
+
     # 计算前瞻收益（单期，供分层回测使用）
     close_hfq = bars_df["close_hfq"]
     fwd_ret_layered = close_hfq.groupby("symbol").pct_change(
@@ -199,7 +250,7 @@ def main() -> int:
     if args.decay:
         # ── IC 衰减模式 ──
         _print_section(f"IC 衰减曲线（前瞻: {horizons}）")
-        for name in factor_names:
+        for name in eval_names:
             factor_vals = factor_df[name]
             decay_df = calc_ic_decay(factor_vals, close_hfq, horizons)
             print(f"\n  {name}:")
@@ -236,7 +287,7 @@ def main() -> int:
         fwd_ret = fwd_ret_layered
         _print_section("IC 汇总")
         ic_results = {}
-        for name in factor_names:
+        for name in eval_names:
             factor_vals = factor_df[name]
             ic, ric = calc_ic(factor_vals, fwd_ret)
             pearson = summarize_ic(ic)
@@ -262,7 +313,7 @@ def main() -> int:
 
     # ── 分层回测（单期，forward 始终适用）──
     _print_section(f"分层回测（{args.n_quantiles} 档，{args.forward}d 前瞻）")
-    for name in factor_names:
+    for name in eval_names:
         layers = calc_layered_returns(
             factor_df[name], fwd_ret_layered, n_quantiles=args.n_quantiles,
         )

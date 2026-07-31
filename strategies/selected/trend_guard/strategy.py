@@ -120,10 +120,6 @@ class TrendGuard(Strategy):
         if not bars:
             return {"buy": [], "sell": []}
 
-        # P1-1: 熔断冷却期关闭买侧
-        if account_snapshot.risk_active:
-            return {"buy": [], "sell": []}
-
         self._days_since_rebalance += 1
         if self._days_since_rebalance < self._rebalance_interval:
             return {"buy": [], "sell": []}
