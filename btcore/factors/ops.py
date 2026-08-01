@@ -13,6 +13,7 @@ MultiIndex 面板，因此 ts 算子、xsec 算子、逐行算术可以在一条
 """
 
 import ast
+import functools
 from dataclasses import dataclass
 from typing import Callable
 
@@ -262,6 +263,7 @@ _CMPOPS: dict[type, Callable] = {
 # ── 表达式结构分析 ──
 
 
+@functools.lru_cache(maxsize=None)
 def _parse(expr: str) -> ast.Expression:
     try:
         return ast.parse(expr, mode="eval")
@@ -274,8 +276,13 @@ def has_op_call(expr: str) -> bool:
     return any(isinstance(n, ast.Call) for n in ast.walk(_parse(expr)))
 
 
+@functools.lru_cache(maxsize=None)
 def validate_op_expr(expr: str) -> None:
-    """算子表达式的白名单校验：Call 仅限算子表、禁属性/下标、参数形状检查。"""
+    """算子表达式的白名单校验：Call 仅限算子表、禁属性/下标、参数形状检查。
+
+    同一表达式在加载期与每次求值都会校验（CSE 重写产物也经此闸），
+    用 lru_cache 记忆化，非法表达式抛 ValueError 不入缓存。
+    """
     tree = _parse(expr)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Attribute, ast.Subscript, ast.Lambda,

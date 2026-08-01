@@ -50,7 +50,7 @@ def build_panel(
         fplan = factor_plan.build_factor_plan(nodes, factor_names)
         columns |= fplan["main_columns"]
 
-    warmup_days = fplan["main_days"] if fplan else 365
+    warmup_days = fplan["main_days"] if fplan else factor_plan.DEFAULT_WARMUP_DAYS
     load_start = (pd.Timestamp(start) - pd.Timedelta(days=warmup_days)).strftime("%Y%m%d")
     request_columns = factor_plan.expand_columns(columns)
 
@@ -88,7 +88,7 @@ def build_panel(
         factor_plan.materialize(bars_df, breadth_df, fplan, nodes)
         issues = factor_plan.validate_materialization(bars_df, fplan)
         for issue in issues:
-            logger.warning("[因子验证] %s", issue["message"])
+            getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
 
     # 裁掉 warmup，返回训练区间
     dates = bars_df.index.get_level_values("trade_date")

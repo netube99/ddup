@@ -23,6 +23,20 @@ from btcore.factors.expr import evaluate_expr, extract_expr_names, validate_expr
 # 缺省因子库：repo 根下顶层 factors/library.yaml（用户可编辑的定义文件）
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "factors" / "library.yaml"
 
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """重复键 fail-fast：PyYAML 默认后者静默覆盖，因子库手工维护易踩。"""
+
+    def construct_mapping(self, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                line = key_node.start_mark.line + 1
+                raise ValueError(f"因子库重复键 {key!r}（line {line}）")
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
 # 因子名保留字：与 bars 必需列 / 引擎派生列 / 伪列冲突的名字禁止登记
 _RESERVED_NAMES = frozenset({
     "open", "high", "low", "close", "vol", "amount",
@@ -41,7 +55,7 @@ def load_library(path: str | None = None) -> dict[str, dict]:
     """
     lib_path = Path(path) if path else _DEFAULT_PATH
     with open(lib_path, encoding="utf-8") as f:
-        doc = yaml.safe_load(f)
+        doc = yaml.load(f, Loader=_UniqueKeyLoader)
     factors = (doc or {}).get("factors")
     if not isinstance(factors, dict):
         raise ValueError(f"因子库缺少 factors mapping: {lib_path}")
@@ -244,14 +258,11 @@ def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
     try:
         if ops.has_op_call(spec["expr"]):
             values = ops.eval_op_expr(df, spec["expr"])
-        else:
-            values = evaluate_expr(df, spec["expr"])
-        where = spec.get("where")
-        if where:
-            if ops.has_op_call(where):
+            where = spec.get("where")
+            if where:
                 values = values.where(ops.eval_op_expr(df, where).astype(bool))
-            else:
-                values = values.where(df.eval(where))
+        else:
+            values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
     except Exception as e:
         missing = _detect_missing_columns(df, spec)
         detail = f"因子 '{name}' 求值失败: {e}"
@@ -303,6 +314,8 @@ def compute_breadth(
     """
     lib = library if library is not None else load_library()
     spec = _get_spec(factor_name, lib)
+    # 局部 import 避免模块级循环（plan 模块级依赖 library.spec_names）
+    from btcore.factors import plan as factor_plan  # noqa: F811
 
     kind = ops.collapse_kind(spec["expr"])
     if not kind:
@@ -312,15 +325,29 @@ def compute_breadth(
 
     # Derive max window from factor DAG
     closure = resolve_closure([factor_name], lib)
-    max_window = _max_dag_window(closure)
+    max_window = max(factor_plan.infer_windows(closure).values(), default=1)
 
     calendar = backend.get_calendar(start, end)
     if not len(calendar):
         return pd.Series(dtype=float)
 
-    # Resolve needed columns
-    from btcore.factors import plan as factor_plan  # noqa: F811
+    # warmup 前伸：请求起点前多取 max_window 个交易日，物化后裁剪回请求
+    # 区间——否则区间前段 ts 窗口不足会静默算错（口径同引擎 preload）
+    cal_start = (
+        pd.Timestamp(start)
+        - pd.Timedelta(days=factor_plan._to_calendar_days(max_window))
+    ).strftime("%Y%m%d")
+    calendar_all = backend.get_calendar(cal_start, end)
+    if not len(calendar_all):
+        return pd.Series(dtype=float)
+    request_days = [d for d in calendar_all if d >= start]
+    lookback = [d for d in calendar_all if d < start]
+    if not request_days:
+        return pd.Series(dtype=float)
+    full_cal = lookback + request_days
+    offset = len(lookback)
 
+    # Resolve needed columns
     all_cols: set[str] = set()
     for node_spec in closure.values():
         cols, _ = spec_names(node_spec, set(closure))
@@ -330,14 +357,15 @@ def compute_breadth(
 
     results = []
     i = 0
-    while i < len(calendar):
-        chunk_end_idx = min(i + chunk_days, len(calendar))
-        # Extend lookback for ts window
-        lookback_start_idx = max(0, i - max_window)
-        chunk_start = calendar[lookback_start_idx]
-        chunk_end = calendar[chunk_end_idx - 1]
-        actual_start = calendar[i]
-        actual_end = calendar[chunk_end_idx - 1]
+    n = len(request_days)
+    while i < n:
+        chunk_end_idx = min(i + chunk_days, n)
+        # 分块起点前伸：在 lookback+request 拼接日历上回溯窗口
+        lookback_start_idx = max(0, offset + i - max_window)
+        chunk_start = full_cal[lookback_start_idx]
+        chunk_end = request_days[chunk_end_idx - 1]
+        actual_start = request_days[i]
+        actual_end = request_days[chunk_end_idx - 1]
 
         # Query bars for this chunk (full market)
         df = backend.query_bars(None, chunk_start, chunk_end, columns=base_cols)
@@ -362,50 +390,3 @@ def compute_breadth(
     if not results:
         return pd.Series(dtype=float)
     return pd.concat(results)
-
-
-def _max_dag_window(closure: dict[str, dict]) -> int:
-    """从因子闭包计算最大历史窗口（交易日行数）。
-
-    仿 build_factor_plan 的窗口推导逻辑，仅取 max，不关心具体归属。
-    """
-    names = set(closure)
-    order: list[str] = []
-    deps: dict[str, set[str]] = {}
-    for name, spec in closure.items():
-        _, refs = spec_names(spec, names)
-        deps[name] = refs
-
-    # Kahn topological sort
-    indegree = {n: len(deps[n]) for n in names}
-    rdeps: dict[str, set[str]] = {n: set() for n in names}
-    for name, refs in deps.items():
-        for ref in refs:
-            rdeps[ref].add(name)
-
-    queue = sorted(n for n in names if indegree[n] == 0)
-    while queue:
-        name = queue.pop(0)
-        order.append(name)
-        for dep in sorted(rdeps[name]):
-            indegree[dep] -= 1
-            if indegree[dep] == 0:
-                queue.append(dep)
-
-    windows: dict[str, int] = {}
-    for name in order:
-        spec = closure[name]
-        if ops.has_op_call(spec["expr"]):
-            w = ops.infer_window(spec["expr"], windows)
-        else:
-            refs = extract_expr_names(spec["expr"]) & names
-            w = max([windows.get(r, 1) for r in refs], default=1)
-        where = spec.get("where")
-        if where:
-            if ops.has_op_call(where):
-                w = max(w, ops.infer_window(where, windows))
-            else:
-                refs = extract_expr_names(where) & names
-                w = max([w, *[windows.get(r, 1) for r in refs]])
-        windows[name] = w
-    return max(windows.values(), default=20)

@@ -13,15 +13,16 @@ def test_simple_expr():
 
 
 def test_expr_with_where():
+    """where 统一为求值后掩码：被过滤行保留在索引里、值为 NaN。"""
     df = pd.DataFrame(
         {"pe_ttm": [10.0, 0.0, -5.0, 20.0]},
         index=["A", "B", "C", "D"],
     )
     result = evaluate_expr(df, "1 / pe_ttm", where="pe_ttm > 0")
-    assert "A" in result.index
-    assert "B" not in result.index
-    assert "C" not in result.index
-    assert "D" in result.index
+    assert result["A"] == pytest.approx(0.1)
+    assert result["D"] == pytest.approx(0.05)
+    assert pd.isna(result["B"])
+    assert pd.isna(result["C"])
 
 
 def test_validate_rejects_call():

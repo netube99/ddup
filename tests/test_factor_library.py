@@ -77,6 +77,15 @@ class TestLoad:
         with pytest.raises(ValueError, match="环"):
             load_library(path)
 
+    def test_duplicate_key_rejected(self, tmp_path):
+        """重复键 fail-fast：PyYAML 默认后者静默覆盖，必须显式报错。"""
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  dup:\n    expr: \"close\"\n  dup:\n    expr: \"open\"\n",
+        )
+        with pytest.raises(ValueError, match="重复键"):
+            load_library(path)
+
 
 class TestCompute:
     def test_cross_section_where_post_mask(self):
@@ -218,3 +227,14 @@ class TestComputeBreadth:
         result = compute_breadth("pct_above", backend, "20240603", "20240614", lib)
         assert isinstance(result, pd.Series)
         assert len(result) == 0
+
+    def test_warmup_lookback(self):
+        """回归：同一日期的值不随请求起点漂移（warmup 缺失曾导致前段静默 0.0）。"""
+        lib = load_library()
+        backend = MockDataBackend()
+        cal = backend.get_calendar("20240603", "20240628")
+        # adv_dec_ratio = mean(roc(close_hfq, 1) > 0)，窗口 2 行
+        full = compute_breadth("adv_dec_ratio", backend, cal[0], cal[10], lib)
+        late = compute_breadth("adv_dec_ratio", backend, cal[3], cal[10], lib)
+        assert full.loc[cal[3]] == pytest.approx(late.loc[cal[3]])
+        assert full.loc[cal[3]] != 0.0

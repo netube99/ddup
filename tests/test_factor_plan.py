@@ -321,14 +321,17 @@ class TestValidateMaterialization:
     """validate_materialization() 的单元测试。"""
 
     def test_normal_returns_empty(self):
-        """正常物化不产生 issues（足够长的时间序列使 NaN 占比低于 5%）。"""
+        """正常物化不产生 warning issues（足够长的时间序列使 NaN 占比低于 5%）。
+
+        info 级的小量 NaN 提示允许存在，但不该升级为 warning。
+        """
         dates = pd.date_range("2024-01-01", periods=500).strftime("%Y%m%d")
         main = _mk_panel(dates, ["A", "B", "C"])
         breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
         p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
         plan.materialize(main, breadth, p, _NODES)
         issues = plan.validate_materialization(main, p)
-        assert len(issues) == 0
+        assert all(i["level"] != "warning" for i in issues), issues
 
     def test_nan_detected(self):
         """含高 NaN 占比的坍缩因子被检出。"""

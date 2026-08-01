@@ -34,6 +34,36 @@ def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
     return factor_plan.expand_columns(cols)
 
 
+class _DaySlicer:
+    """按日懒切片：排序 MultiIndex 面板上 .loc 取单日截面，替代全量 groupby 预切。
+
+    峰值内存从「完整面板 + 每日副本」（约 2× 面板）降为「面板 + 单日临时切片」。
+    接口对齐 dict（get / __getitem__ / __contains__）：测试手动步进场景仍可
+    直接给 engine.bars_by_date 赋普通 dict。
+    """
+
+    __slots__ = ("_df",)
+
+    def __init__(self, df: pd.DataFrame):
+        self._df = df  # 必须已按 (trade_date, symbol) MultiIndex 排序
+
+    def get(self, trade_date: str, default=None):
+        try:
+            return self._df.loc[trade_date]
+        except KeyError:
+            return default
+
+    def __getitem__(self, trade_date: str) -> pd.DataFrame:
+        return self._df.loc[trade_date]
+
+    def __contains__(self, trade_date: str) -> bool:
+        try:
+            self._df.index.get_loc(trade_date)
+        except KeyError:
+            return False
+        return True
+
+
 class Engine:
     def __init__(self, strategy, provider: DataProvider,
                  initial_capital: float | None = None,
@@ -106,7 +136,7 @@ class Engine:
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
         self.run_id = 0
         self.bars_df: pd.DataFrame | None = None
-        self.bars_by_date: dict = {}
+        self.bars_by_date: dict | _DaySlicer = {}
         self._saved_cash: float | None = None
         self._saved_holdings: dict | None = None
 
@@ -126,7 +156,7 @@ class Engine:
             # factor_universe 未配置时 factor_symbols 为 None，沿用 trade_symbols
             load_symbols = factor_symbols if factor_symbols is not None else trade_symbols
             fplan = self._build_factor_plan()
-            warmup_days = fplan["main_days"] if fplan else 365
+            warmup_days = fplan["main_days"] if fplan else factor_plan.DEFAULT_WARMUP_DAYS
             preload_start = (
                 pd.Timestamp(calendar[0]) - pd.Timedelta(days=warmup_days)
             ).strftime("%Y%m%d")
@@ -149,7 +179,7 @@ class Engine:
                 # 物化后验证
                 issues = factor_plan.validate_materialization(bars_df, fplan)
                 for issue in issues:
-                    logger.warning("[因子验证] %s", issue["message"])
+                    getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
             if self._model_specs:
                 # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
                 # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
@@ -165,10 +195,7 @@ class Engine:
                         "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
                     )
             self.bars_df = bars_df
-            self.bars_by_date = {
-                d: group.droplevel("trade_date")
-                for d, group in bars_df.groupby(level="trade_date", sort=False)
-            }
+            self.bars_by_date = _DaySlicer(bars_df)
             self.provider.attach_bars(bars_df)
             self.strategy.on_start(self.provider, calendar[0], end_date=end)
 

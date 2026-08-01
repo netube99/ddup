@@ -58,7 +58,8 @@ def evaluate_expr(
     expr:
         ``pandas.eval`` 支持的算术 / 比较表达式。
     where:
-        可选的过滤表达式，先于 expr 应用。
+        可选的过滤表达式（仅纯表达式）；与因子库统一口径：求值后掩码
+        （False → NaN），不删行、不破坏索引对齐。
     engine:
         传给 ``pandas.eval`` 的求值引擎。
 
@@ -67,14 +68,12 @@ def evaluate_expr(
     symbol 索引的表达式值 Series。
     """
     _validate_cached(expr, engine)
-    if where:
-        _validate_cached(where, engine)
-        mask = df.eval(where, engine=engine)
-        df = df[mask]
-
     result = df.eval(expr, engine=engine)
     if not isinstance(result, pd.Series):
         result = pd.Series(result, index=df.index)
+    if where:
+        _validate_cached(where, engine)
+        result = result.where(df.eval(where, engine=engine))
     return result
 
 

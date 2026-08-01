@@ -24,7 +24,6 @@ from btcore.factors.library import (
     compute_factors,
     load_library,
     resolve_closure,
-    spec_names,
 )
 from btcore.factors.plan import derive_fields, ensure_pseudo_columns
 from btcore.ml import runtime as ml_runtime
@@ -91,6 +90,10 @@ def main() -> int:
     parser.add_argument(
         "--n-quantiles", type=int, default=5,
         help="分层回测档数（默认 5）",
+    )
+    parser.add_argument(
+        "--benchmark", default=None,
+        help="基准指数代码（因子引用 idx_ret 时必需，口径同引擎）",
     )
     args = parser.parse_args()
 
@@ -179,22 +182,16 @@ def main() -> int:
         symbols = None  # 全市场
         print("股池: 全市场")
 
-    # 确定需要请求的列：因子依赖的基础列 + hfq 派生所需列
-    raw_cols: set[str] = set()
+    # 列/伪列需求统一走 build_factor_plan 推导（与引擎 preload 同源）：
+    # 引用 log_mktcap 自动补 total_mv，伪列不向 backend 请求；
+    # model_spec.features 已在上面并入 factor_names
+    nodes = resolve_closure(factor_names, library)
+    fplan = factor_plan.build_factor_plan(nodes, factor_names)
+    raw_cols = set(fplan["main_columns"])
     if model_spec is not None:
-        # 模型特征：闭包全部节点的基础列 + raw 特征列
-        closure = resolve_closure(model_spec.features, library)
-        for node in closure.values():
-            cols, _ = spec_names(node, set(library))
-            raw_cols |= cols
         raw_cols |= set(model_spec.raw_features)
-    for name in factor_names:
-        spec = library[name]
-        cols, _ = spec_names(spec, set(library))
-        raw_cols |= cols
-    # 补齐 _ensure_derived_fields 所需的列
+    # 补齐 derive_fields / 前瞻收益所需的列
     raw_cols |= {"open", "high", "low", "close", "adj_factor", "pre_close"}
-    # 伪列（industry / log_mktcap / idx_ret）不向 backend 请求，后续由引擎附着
     request_columns = factor_plan.expand_columns(raw_cols)
     print(f"请求列: {len(request_columns)} 列")
 
@@ -211,14 +208,11 @@ def main() -> int:
     # 补齐后复权价等派生列
     derive_fields(bars_df)
 
-    # 附着伪列（industry / log_mktcap / idx_ret），与引擎 preload 口径一致
-    pseudo_needs = {
-        "industry_main": "industry" in raw_cols,
-        "mktcap_main": "log_mktcap" in raw_cols,
-        "index": "idx_ret" in raw_cols,
-    }
-    if any(pseudo_needs.values()):
-        ensure_pseudo_columns(bars_df, pseudo_needs, "main", backend=backend)
+    # 附着伪列（industry / log_mktcap / idx_ret），needs 由 fplan 推导（引擎同源）
+    ensure_pseudo_columns(
+        bars_df, fplan["needs"], "main",
+        backend=backend, benchmark=args.benchmark,
+    )
 
     backend.close()
 

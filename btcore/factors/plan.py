@@ -42,6 +42,10 @@ REQUIRED_BAR_COLUMNS = (
 # 伪列：派生/附着，不向 backend 请求
 PSEUDO_COLUMNS = frozenset({"idx_ret", "log_mktcap", "industry"})
 
+# 主面板 warmup 地板（日历天）：因子窗口再小也预加载一年历史，
+# 供策略 select() 命令式读取历史 bar；窗口推导只覆盖因子物化需求
+DEFAULT_WARMUP_DAYS = 365
+
 # 派生列：derive_fields 从基础列计算，不向 backend 请求
 DERIVED_BASES: dict[str, frozenset[str]] = {
     "open_hfq": frozenset({"open", "adj_factor"}),
@@ -189,24 +193,7 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
     nodes = {n: nodes[n] for n in reachable}
     names = set(nodes)
     order = _topo_order(nodes, entry_names)
-
-    # 逐节点窗口（拓扑序保证引用的窗口先算）
-    windows: dict[str, int] = {}
-    for name in order:
-        spec = nodes[name]
-        if ops.has_op_call(spec["expr"]):
-            w = ops.infer_window(spec["expr"], windows)
-        else:
-            refs = extract_expr_names(spec["expr"]) & names
-            w = max([windows.get(r, 1) for r in refs], default=1)
-        where = spec.get("where")
-        if where:
-            if ops.has_op_call(where):
-                w = max(w, ops.infer_window(where, windows))
-            else:
-                refs = extract_expr_names(where) & names
-                w = max([w, *[windows.get(r, 1) for r in refs]])
-        windows[name] = w
+    windows = infer_windows(nodes)
     max_window = max(windows.values(), default=1)
 
     # 广度集合 = 坍缩节点及其传递引用闭包（在广度面板上计算）；
@@ -265,9 +252,37 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
         "windows": windows,
         "nodes": nodes,
         "cse_temp": cse_temp,
-        "main_days": max(365, breadth_days),
+        "main_days": max(DEFAULT_WARMUP_DAYS, breadth_days),
         "breadth_days": breadth_days,
     }
+
+
+def infer_windows(nodes: dict[str, dict]) -> dict[str, int]:
+    """推导闭包每节点所需历史行数（交易日），含命名引用传递窗口。
+
+    build_factor_plan 与 library.compute_breadth 共用同一份推导，避免两份
+    逻辑漂移。拓扑序保证引用的窗口先算；纯表达式与 xsec 算子不消耗时间轴，
+    ts 算子按其 window_cost 累加。
+    """
+    names = set(nodes)
+    order = _topo_order(nodes, list(names))
+    windows: dict[str, int] = {}
+    for name in order:
+        spec = nodes[name]
+        if ops.has_op_call(spec["expr"]):
+            w = ops.infer_window(spec["expr"], windows)
+        else:
+            refs = extract_expr_names(spec["expr"]) & names
+            w = max([windows.get(r, 1) for r in refs], default=1)
+        where = spec.get("where")
+        if where:
+            if ops.has_op_call(where):
+                w = max(w, ops.infer_window(where, windows))
+            else:
+                refs = extract_expr_names(where) & names
+                w = max([w, *[windows.get(r, 1) for r in refs]])
+        windows[name] = w
+    return windows
 
 
 def materialize(
@@ -297,33 +312,13 @@ def materialize(
         main_df.drop(columns=tmp, inplace=True, errors="ignore")
         if breadth_df is not None:
             breadth_df.drop(columns=tmp, inplace=True, errors="ignore")
-    # 坍缩因子物化完整性检查
-    _check_collapse_integrity(main_df, plan)
-
-
-def _check_collapse_integrity(main_df: pd.DataFrame, plan: dict) -> None:
-    """物化后检查坍缩因子是否存在列、是否有 NaN（内部）。"""
-    import logging
-
-    logger = logging.getLogger(__name__)
-    for name in plan.get("collapse", {}):
-        col = main_df.get(name)
-        if col is None:
-            logger.warning("坍缩因子 %r 未物化为主面板列", name)
-        else:
-            nan_count = col.isna().sum()
-            if nan_count:
-                logger.warning("坍缩因子 %r 有 %d 行 NaN (涉及 %d 个交易日)",
-                               name, nan_count,
-                               main_df.index[col.isna()]
-                               .get_level_values("trade_date").nunique())
 
 
 def validate_materialization(
     main_df: pd.DataFrame,
     plan: dict,
 ) -> list[dict]:
-    """物化后验证：检查坍缩因子的完整性和数据质量。
+    """物化后验证：检查坍缩因子的完整性和数据质量（唯一验证入口）。
 
     Returns:
         list of dicts with keys: level (info/warning/error), message
@@ -342,15 +337,19 @@ def validate_materialization(
             continue
         nan_count = col.isna().sum()
         nan_pct = nan_count / len(col) if len(col) > 0 else 0
+        nan_dates = (
+            main_df.index[col.isna()].get_level_values("trade_date").nunique()
+        )
         if nan_pct > 0.05:
-            nan_dates = (
-                main_df.index[col.isna()]
-                .get_level_values("trade_date").nunique()
-            )
             msg = (f"坍缩因子 {name!r} NaN 占比 {nan_pct:.1%} "
                    f"({nan_count}/{len(col)} 行, {nan_dates} 个交易日)")
             logger.warning(msg)
             issues.append({"level": "warning", "message": msg})
+        elif nan_count:
+            msg = (f"坍缩因子 {name!r} 有 {nan_count} 行 NaN "
+                   f"({nan_dates} 个交易日)")
+            logger.info(msg)
+            issues.append({"level": "info", "message": msg})
 
     return issues
 
@@ -385,14 +384,11 @@ def _topo_order(nodes: dict[str, dict], entry_names: list[str]) -> list[str]:
 def _eval_spec_on(df: pd.DataFrame, spec: dict) -> pd.Series:
     if ops.has_op_call(spec["expr"]):
         values = ops.eval_op_expr(df, spec["expr"])
-    else:
-        values = evaluate_expr(df, spec["expr"])
-    where = spec.get("where")
-    if where:
-        if ops.has_op_call(where):
+        where = spec.get("where")
+        if where:
             values = values.where(ops.eval_op_expr(df, where).astype(bool))
-        else:
-            values = values.where(df.eval(where))
+    else:
+        values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
     return values
 
 
