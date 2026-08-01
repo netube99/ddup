@@ -40,6 +40,9 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model alpha_xs -
 # 回测结果交叉验证（交易行为、磨损合理性检查）
 python scripts/cross_validate.py result.db --strategy name --run-id 1
 
+# skill 与代码事实同步校验（改 CLI/算子/YAML 键/协议后必跑）
+python scripts/check_skill_sync.py
+
 # 参数扫描批量回测（YAML 路径语法展开参数空间）
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out sweep.db
 
@@ -68,6 +71,7 @@ scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评�
               性能基准、fixtures 生成、反破坏检查）
 factors/    — 用户因子定义（library.yaml，可编辑）
 strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
+.omp/skills/ — agent 研究指导 skills（随仓库分发；接口变更须同步）
 ```
 
 必须遵守：
@@ -232,3 +236,6 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Docstring 最小化；设计文档在 `docs/`
 - 代码与注释中不使用 emoji
 - 编辑任何文件后检查是否影响同目录下的 `AGENTS.md`
+- 接口变更（CLI 参数、算子、YAML 键、select 协议、config 默认值、ML meta 契约）
+  必须同批更新 `.omp/skills/` 与 `docs/`；`scripts/check_skill_sync.py` 机械对账，
+  漂移即失败
