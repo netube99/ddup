@@ -22,7 +22,8 @@
         benchmark_weights="brinson_data/benchmark_weights.parquet",
         bars="brinson_data/bars.parquet",
     )
-    先用 scripts/dump_brinson_data.py 导出 parquet 文件。
+    用 scripts/dump_brinson_data.py 导出前三个 parquet（--index 指定基准指数）；
+    提供 --result-db 与 --start/--end 时自动导出 bars.parquet。
 
 数据源：
     - index_member_all  → 股票→申万行业映射 (ts_code → l1_code/l1_name)
@@ -206,10 +207,14 @@ def _reconstruct_daily_holdings(
     holdings: dict[str, int] = {}  # symbol → current shares
     results: list[dict] = []
 
-    # 口径：只遍历 trade_log 出现过的日期；个股当日缺 bar（如停牌）时该股当天市值按缺失处理
-    for date in sorted(trades_by_date):
+    # 口径：持仓沿交易日轴逐日结转——只遍历 trade_log 出现过的日期会漏掉
+    # 无成交日（买入持有 20 天只贡献 1 天归因，total_return 对不上回测）；
+    # 日期轴取 bars 的交易日（traded symbols 全区间有 bar）
+    all_dates = sorted(bars_df.index.get_level_values("trade_date").unique())
+
+    for date in all_dates:
         # 处理当日买卖
-        for t in trades_by_date[date]:
+        for t in trades_by_date.get(date, []):
             sym = t["symbol"]
             if t["side"] == "BUY":
                 holdings[sym] = holdings.get(sym, 0) + t["shares"]
@@ -217,6 +222,9 @@ def _reconstruct_daily_holdings(
                 holdings[sym] = holdings.get(sym, 0) - t["shares"]
                 if holdings[sym] <= 0:
                     holdings.pop(sym, None)
+            elif t["side"] == "STK_DIV":
+                # 送转增股：trade_log 的 shares = 送转后总股数（引擎口径）
+                holdings[sym] = t["shares"]
             # DIV side 不影响持仓股数
 
         # 过滤零/负持仓
@@ -230,13 +238,13 @@ def _reconstruct_daily_holdings(
         industry_mv: dict[str, float] = defaultdict(float)
         industry_wgt_ret: dict[str, float] = defaultdict(float)
         total_mv = 0.0
+        total_wgt_ret = 0.0  # 组合日收益分子（含无行业映射股，unexplained 吸收差额）
         unmapped = set()
 
         for sym, shares in active.items():
             industry = industry_map.get(sym)
             if industry is None:
                 unmapped.add(sym)
-                continue
 
             try:
                 bar = bars_df.loc[(date, sym)]
@@ -252,9 +260,12 @@ def _reconstruct_daily_holdings(
             )
 
             mv = shares * close
-            industry_mv[industry] += mv
             total_mv += mv
+            total_wgt_ret += mv * pct_chg
+            if industry is None:
+                continue
 
+            industry_mv[industry] += mv
             # 市值加权收益率累加
             industry_wgt_ret[industry] += mv * pct_chg
 
@@ -266,6 +277,9 @@ def _reconstruct_daily_holdings(
             row["portfolio_return"] = 0.0
             results.append(row)
             continue
+
+        # 组合日收益（此前分支缺失此列，Brinson 策略侧恒为 0）
+        row["portfolio_return"] = total_wgt_ret / total_mv
 
         # 计算行业权重和收益率
         for industry, mv in industry_mv.items():
@@ -286,6 +300,16 @@ def _reconstruct_daily_holdings(
 # ═══════════════════════════════════════════
 
 
+def _ffill_benchmark(
+    benchmark_weights: pd.DataFrame, dates: pd.Index,
+) -> pd.DataFrame:
+    """基准行业权重快照（约每月 2 次）向前填充到日频：快照延续到下次调整。
+
+    首个快照前的日期保持 NaN（当日无已知基准构成，Brinson 排除该日）。
+    """
+    return benchmark_weights.reindex(dates).ffill()
+
+
 def _compute_brinson_daily(
     holdings_df: pd.DataFrame,
     benchmark_weights: pd.DataFrame,
@@ -301,8 +325,10 @@ def _compute_brinson_daily(
     Returns:
         DataFrame，index=date，含 allocation/selection/interaction 等列。
     """
-    # 对齐日期
-    common_dates = holdings_df.index.intersection(benchmark_weights.index)
+    # 对齐日期：基准权重先 ffill 到日频（快照稀疏，只按快照日算 Brinson
+    # 会把归因压缩到 ~10% 的交易日），首个快照前的日期因无已知基准构成而排除
+    bw_daily = _ffill_benchmark(benchmark_weights, holdings_df.index)
+    common_dates = holdings_df.index.intersection(bw_daily.dropna().index)
     common_dates = common_dates.intersection(sw_returns.index)
     common_dates = sorted(common_dates)
 
@@ -310,11 +336,14 @@ def _compute_brinson_daily(
         logger.warning("Brinson: 三方数据无交叠日期")
         return pd.DataFrame()
 
-    # 提取列名模式: 行业名从 holdings_df 的 {ind}_weight 列提取
+    # 行业全集 = 策略持仓 ∪ 基准权重 ∪ 行业收益（基准持有但策略未持有的
+    # 行业也必须进入 benchmark_return，否则超额收益被系统性高估）
     industry_names = set()
     for col in holdings_df.columns:
         if col.endswith("_weight"):
             industry_names.add(col[:-7])  # 去掉 "_weight"
+    industry_names |= set(benchmark_weights.columns)
+    industry_names |= set(sw_returns.columns)
 
     if not industry_names:
         logger.warning("Brinson: 无行业持仓数据")
@@ -323,12 +352,12 @@ def _compute_brinson_daily(
     daily_results = []
 
     for date in common_dates:
-        # common_dates 已是三方索引交集，直接 .loc 取值
-        w_b_row = benchmark_weights.loc[date]
+        # common_dates 已是对齐后的交集，直接 .loc 取值
+        w_b_row = bw_daily.loc[date]
         sw_row = sw_returns.loc[date]
         h_row = holdings_df.loc[date]
 
-        # 单遍提取每行业的 (基准权重, 行业基准收益, 策略权重, 策略收益)
+        # 单遍提取每行业的 (基准权重, 基准行业收益, 策略权重, 策略收益)
         ind_data = [
             (
                 float(w_b_row.get(ind, 0.0)),
@@ -339,8 +368,8 @@ def _compute_brinson_daily(
             for ind in industry_names
         ]
 
-        # 口径：基准收益只在策略持仓出现过的行业上累加，未持有行业的基准权重
-        # 不进入 benchmark_return 与配置效应（疑似方法论缺陷，本次只显式化不改行为）
+        # 基准收益按全部基准行业累加（未持有行业只进 benchmark_return，
+        # 不进配置/选股效应——它们以策略权重为差分基准）
         r_b_total = 0.0
         for w_b, r_b_i, _w_p, _r_p_i in ind_data:
             r_b_total += w_b * r_b_i
@@ -405,9 +434,10 @@ def _aggregate_period(
             industry_names.add(col[:-7])
 
     industry_detail = {}
+    bw_daily = _ffill_benchmark(benchmark_weights, holdings_df.index)
     for ind in sorted(industry_names):
         w_p_series = holdings_df.get(f"{ind}_weight", pd.Series(dtype=float))
-        w_b_series = benchmark_weights.get(ind, pd.Series(dtype=float))
+        w_b_series = bw_daily.get(ind, pd.Series(dtype=float))
         r_b_series = sw_returns.get(ind, pd.Series(dtype=float))
 
         avg_w_p = float(w_p_series.mean()) if len(w_p_series) > 0 else 0.0
@@ -575,6 +605,9 @@ def brinson_attribute(
         }
         run_filter = ""
         run_params: list = []
+        # 持仓重建窗口 = run 实际区间：用户传子区间时，期初已建仓的
+        # 持仓在 run 起点前买入，只按用户区间拉 trade_log 会从空仓开始
+        trade_start, trade_end = start, end
         if "run_id" in run_cols:
             if run_id is None:
                 # 聚合查询 fetchone 恒返回一行，None 风险只在 row[0]
@@ -584,12 +617,24 @@ def brinson_attribute(
             if run_id is not None:
                 run_filter = " AND run_id = ?"
                 run_params = [run_id]
+                run_row = backtest_conn.execute(
+                    "SELECT start_date, end_date FROM runs WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if run_row and run_row[0]:
+                    trade_start, trade_end = run_row[0], run_row[1]
+                    if trade_start != start or trade_end != end:
+                        logger.warning(
+                            "归因区间 %s~%s 与 run %d 实际区间 %s~%s 不一致："
+                            "持仓自 run 起点重建，归因统计按用户区间",
+                            start, end, run_id, trade_start, trade_end,
+                        )
 
         trade_log_df = pd.read_sql_query(
             "SELECT id, date, symbol, side, shares FROM trade_log "
-            "WHERE date >= ? AND date <= ? AND side IN ('BUY', 'SELL')"
+            "WHERE date >= ? AND date <= ? AND side IN ('BUY', 'SELL', 'STK_DIV')"
             f"{run_filter} ORDER BY date, id",
-            backtest_conn, params=(start, end, *run_params),
+            backtest_conn, params=(trade_start, trade_end, *run_params),
         )
 
         # 5. 加载 bars 数据（只拉实际交易过的股票）
@@ -598,8 +643,8 @@ def brinson_attribute(
             return {"error": "trade_log 无买卖记录", "summary": {}, "industry_detail": {},
                     "daily": [], "exposure_summary": {}}
 
-        # 从数据库拉 bars
-        bars_df = _load_bars_for_symbols(provider_conn, traded_symbols, start, end)
+        # 从数据库拉 bars（自 run 起点，供期初持仓重建）
+        bars_df = _load_bars_for_symbols(provider_conn, traded_symbols, trade_start, end)
         if bars_df.empty:
             return {"error": "bars 数据为空", "summary": {}, "industry_detail": {},
                     "daily": [], "exposure_summary": {}}
@@ -610,8 +655,14 @@ def brinson_attribute(
             return {"error": "持仓重建失败", "summary": {}, "industry_detail": {},
                     "daily": [], "exposure_summary": {}}
 
+        # 归因窗口裁剪回用户区间（持仓含 run 起点前的结转日）
+        if trade_start != start:
+            holdings_df = holdings_df.loc[start:end]
+
         # 7. Brinson 逐日计算
         daily_df = _compute_brinson_daily(holdings_df, benchmark_weights, sw_returns)
+        if trade_start != start and not daily_df.empty:
+            daily_df = daily_df.loc[start:end]
 
         # 8. 聚合
         result = _aggregate_period(daily_df, holdings_df, benchmark_weights, sw_returns)
@@ -746,7 +797,7 @@ def brinson_attribute_from_files(
     try:
         trade_log_df = pd.read_sql_query(
             "SELECT id, date, symbol, side, shares FROM trade_log "
-            "WHERE side IN ('BUY', 'SELL') AND run_id = ? ORDER BY date, id",
+            "WHERE side IN ('BUY', 'SELL', 'STK_DIV') AND run_id = ? ORDER BY date, id",
             backtest_conn,
             params=(run_id,),
         )

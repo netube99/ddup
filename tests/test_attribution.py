@@ -90,6 +90,35 @@ def synth_benchmark_weights():
 
 
 class TestReconstructHoldings:
+
+    def test_carry_forward_no_trade_days(self, synth_bars, synth_industry_map):
+        """无成交日持仓逐日结转：买入持有 5 天 → 5 行，权重恒 1.0。"""
+        trade_log = pd.DataFrame([
+            {"id": 1, "date": "20240603", "symbol": "600036.SH",
+             "side": "BUY", "shares": 10000},
+        ])
+        df = _reconstruct_daily_holdings(trade_log, synth_bars, synth_industry_map)
+        assert len(df) == len(synth_bars.index.get_level_values("trade_date").unique())
+        # 无成交的中间日（20240604）持仓仍为银行 100%
+        assert df.loc["20240604", "银行_weight"] == pytest.approx(1.0)
+        assert df.loc["20240604", "portfolio_return"] == pytest.approx(0.02)
+
+    def test_stk_div_updates_shares(self, synth_bars, synth_industry_map):
+        """STK_DIV 行（shares=送转后总股数）覆盖重建股数，后续卖出不再超卖。"""
+        trade_log = pd.DataFrame([
+            {"id": 1, "date": "20240603", "symbol": "600036.SH",
+             "side": "BUY", "shares": 100},
+            {"id": 2, "date": "20240604", "symbol": "600036.SH",
+             "side": "STK_DIV", "shares": 150},
+            {"id": 3, "date": "20240605", "symbol": "600036.SH",
+             "side": "SELL", "shares": 150},
+        ])
+        df = _reconstruct_daily_holdings(trade_log, synth_bars, synth_industry_map)
+        # 送转日：按新总股数持仓，权重仍为 1.0
+        assert df.loc["20240604", "银行_weight"] == pytest.approx(1.0)
+        # 送转后全额卖出：20240605 空仓（权重列为其他日期并集产生的 NaN）
+        assert df.loc["20240605", "portfolio_return"] == 0.0
+        assert pd.isna(df.loc["20240605", "银行_weight"])
     def test_basic_reconstruction(self, synth_trade_log, synth_bars, synth_industry_map):
         df = _reconstruct_daily_holdings(synth_trade_log, synth_bars, synth_industry_map)
         assert not df.empty
@@ -98,6 +127,33 @@ class TestReconstructHoldings:
 
 
 class TestBrinsonDaily:
+    def test_benchmark_weights_ffilled(self, synth_sw_returns):
+        """基准权重快照（稀疏）ffill 到日频：快照间日期参与归因。"""
+        dates = synth_sw_returns.index
+        bw = pd.DataFrame({"银行": 0.3, "食品饮料": 0.2},
+                          index=[dates[0], dates[-1]])
+        records = []
+        for d in dates:
+            records.append({"date": d, "银行_weight": 0.3, "银行_return": 0.03,
+                           "食品饮料_weight": 0.2, "食品饮料_return": 0.01,
+                           "portfolio_return": 0.03})
+        holdings_df = pd.DataFrame(records).set_index("date")
+        daily_df = _compute_brinson_daily(holdings_df, bw, synth_sw_returns)
+        assert len(daily_df) == len(dates)
+
+    def test_benchmark_return_includes_unheld_industries(self, synth_sw_returns):
+        """基准收益按全基准行业累加（含策略从未持有的行业）。"""
+        dates = synth_sw_returns.index
+        bw = pd.DataFrame({"银行": 0.3, "医药": 0.7}, index=dates)
+        records = []
+        for d in dates:
+            records.append({"date": d, "银行_weight": 1.0, "银行_return": 0.03,
+                           "portfolio_return": 0.03})
+        holdings_df = pd.DataFrame(records).set_index("date")
+        daily_df = _compute_brinson_daily(holdings_df, bw, synth_sw_returns)
+        # 银行 3% + 医药 1%（synth_sw_returns 无医药列 → 收益按 0 计）
+        assert daily_df["benchmark_return"].iloc[0] == pytest.approx(0.3 * 0.03 + 0.7 * 0.0)
+
     def test_pure_sector_bet(self, synth_benchmark_weights, synth_sw_returns):
         """全配银行（行业赌注），选股效应应接近 0。"""
         dates = synth_benchmark_weights.index
