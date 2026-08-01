@@ -60,7 +60,7 @@ factors:
 | `where` | 否 | 同 `expr` 的表达式规则；为 False 处置 NaN（§8） |
 | `description` | 否 | 任意文本 |
 
-加载期校验（`load_library`）：逐条校验 `expr`/`where` 语法；因子名撞保留字、缺 `expr`、表达式非法、引用成环均直接报错（见 §15 反模式）。
+加载期校验（`load_library`）：逐条校验 `expr`/`where` 语法；因子名撞保留字、缺 `expr`、表达式非法、引用成环、**YAML 重复键**均直接报错（见 §15 反模式）。
 
 ### 3.1 保留字
 
@@ -576,7 +576,7 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 
 - 症状：`compute_factor(s)` 返回的因子值前 N 天全是 NaN，IC 失真。
 - 根因：`compute_factor` 对传入 df 现算，不自动向前延伸窗口；df 起于 2024-01-02 而因子需 20 日窗口，前 19 天均为 NaN。引擎 preload 会自动前伸（`max(365, 最大窗口 × 1.5 + 10)` 日历天），研究侧需自行保证。
-- 修复：取数时向前多取 `max(365, 最大窗口 × 1.5 + 10)` 个日历天；精确窗口行数可用 `btcore.factors.ops.infer_window` 静态推导（规则见 §7.2）。
+- 修复：取数时向前多取 `max(365, 最大窗口 × 1.5 + 10)` 个日历天；精确窗口行数可用 `btcore.factors.ops.infer_window` 静态推导（规则见 §7.2）。`compute_breadth` 例外：它自动前伸窗口（与引擎同源的 `infer_windows` 推导），传入起止日期即可，无需手动扩展。
 
 **陷阱二：口径自负**
 
@@ -783,6 +783,17 @@ factors:
 
 见 §11.4 陷阱四：坍缩因子无截面区分度，IC/分层/合成都不可用；改用时间序列维度评估。
 
+### 15.9 因子库 YAML 重复键
+
+```yaml
+mkt_breadth20:                     # 错误：与下方同名键重复
+  expr: "pct_above_ma20"
+mkt_breadth20:
+  expr: "pct_above_close20"        # PyYAML 默认后者静默覆盖前者
+```
+
+`load_library` 对重复键直接报错并给出行号（如 `因子库重复键 'mkt_breadth20'（line 3）`）——库是手工维护的，静默覆盖是 typo 温床。
+
 ---
 
 ## 16. 参考表
@@ -855,7 +866,8 @@ compute_factors(names, df, library=None) -> pd.DataFrame
 compute_breadth(factor_name, backend, start, end, library=None, chunk_days=60) -> pd.Series
   # 流式计算坍缩因子为日频 Series（index=trade_date，值=当日全市场口径坍缩标量）。
   # 仅接受坍缩算子定义的因子，保形因子抛 ValueError；
-  # 按 chunk_days 分片加载全市场数据，内存 O(chunk)
+  # 按 chunk_days 分片加载全市场数据，内存 O(chunk)；自动前伸 warmup 窗口
+  # （同引擎 infer_windows 推导），评估区间头部即有值
 
 resolve_spec(spec, library=None) -> dict
   # factor_specs 条目 → {name, weight, ascending, materialize_only}

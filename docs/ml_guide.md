@@ -209,7 +209,7 @@ conditions:
 | `train_window` | 训练窗口 `[start, end]` |
 | `metrics` | 测试集评估指标（见 §2.3） |
 | `n_train` / `n_test` | 切分后的样本数 |
-| `scaler_mean` / `scaler_std` | StandardScaler 参数，推理时自动应用 |
+| `scaler_mean` / `scaler_std` | StandardScaler 参数，推理时自动应用；维度与特征契约不符时加载期 `ValueError`（meta 与特征不一致 = 静默错分，请重新训练导出） |
 | `artifact_sha256` | ONNX 文件哈希（版本追溯，随 runs.config_json 落盘） |
 
 ### 3.4 `scripts/ml_train.py` 参数
@@ -232,8 +232,8 @@ conditions:
 - holding 求值时机：每日 `select` / `calc_conditions` 之前逐持仓注入；
   截面后变换口径 = 当日全部持仓
 - 分数语义：回归模型输出预测值；分类模型输出正类概率
-- 缺失特征在 scaler 之后按 0 填充（标准化空间的 0 = 训练段均值，缺失被
-  解释为中性）；缺失特征过半则**无分数**：holding 模型该持仓当天无分数
+- 缺失特征与 ±inf 在 scaler 之后按 0 填充（标准化空间的 0 = 训练段均值，缺失/发散被
+  解释为中性；训练侧先把 ±inf 归一为 NaN，两侧同口径）；缺失特征过半则**无分数**：holding 模型该持仓当天无分数
   （bar 中不出现 `ml_<name>` 键），panel 模型该行分数为 NaN（截面排名末位），
   `model_exit` 不会触发
 - 回测窗口与 meta `train_window` 重叠时引擎告警（样本内乐观偏差风险）；
@@ -330,6 +330,11 @@ A: 调 `conditions.model_exit` 的 `threshold`（纯策略配置，改完直接�
 **Q: 在 YAML models 节里写 `post_transform` 有效吗？**
 A: 无效。`post_transform` 由训练侧确定并写入 meta（用
 `--post-transform` 指定），引擎只从 meta 读取。
+
+**Q: `model_exit` 引用的模型 `post_transform` 不是 `none` 会怎样？**
+A: 引擎在加载期告警一次：阈值比较作用于变换后分数，而持仓数过小时截面
+rank/zscore 会退化——单持仓时 `xs_rank` 恒为 1.0，`model_exit` 每次都触发。
+model_exit 配 `--post-transform none` 训练的模型最省事（分数直接可比）。
 
 **Q: 缺 onnxruntime？**
 A: `uv pip install onnxruntime`（推理）；训练另需

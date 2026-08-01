@@ -14,9 +14,8 @@ INDEX_LOOKBACK_DAYS = 45
 def filter_required_columns(rules: dict) -> set[str]:
     """过滤规则对 bars 列的固定依赖（引擎 preload 列裁剪用）。
 
-    只统计显式开启的规则: StockFilter 运行时 exclude_loss 缺省为 True,
-    但不用 StockFilter 的策略不应被强制要求 pe_ttm 列; 依赖缺省值的
-    策略由 StockFilter 在列缺失时告警提示显式声明。
+    只统计显式开启的规则: exclude_loss 未声明即不过滤、不 preload;
+    显式开启但后端缺 pe_ttm 列时才告警（软回退）。
     """
     if rules.get("exclude_loss"):
         return {"pe_ttm"}

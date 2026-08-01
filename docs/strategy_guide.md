@@ -179,13 +179,14 @@ class MyStrategy(Strategy):
 | `buy_weights` | `dict[str, float] \| None` | 每只买入的资金权重，每项 ∈ (0, 1]，权重和 ≤ 1。引擎按 `total_value × weight` 分配资金。键必须与 `buy` 列表精确一致。`None` = 等权买入。 |
 | `sell_shares` | `dict[str, int] \| None` | 部分减仓股数（正整数）。键必须是 `sell` 列表的子集。 |
 | `buy_conditions` | `list[dict] \| None` | T+1 日盘中条件买单列表，格式见 §5.2.2。 |
-| `target_value` | `dict[str, float] \| None` | 每只股票的目标市值，引擎自动计算买卖差额。`0` = 清仓；未出现的 symbol 不动。与 `buy`/`sell`/`buy_conditions` 同日互斥。 |
+| `target_value` | `dict[str, float] \| None` | 每只股票的目标市值，引擎自动计算买卖差额。`0` = 清仓；未出现的 symbol 不动。键必须是非空字符串、值必须 ≥ 0 的有限数值，否则 `ValueError`。与 `buy`/`sell`/`buy_conditions` 同日互斥。 |
 
 **冲突校验**（引擎在决策时点执行，违规即 `ValueError`，fast-fail）：
 
 | 违规 | 错误 |
 |---|---|
 | `buy` 与 `sell` 有交集 | `ValueError: 同日买卖冲突` |
+| `buy`/`sell` 名单含非字符串或空字符串元素 | `ValueError` |
 | `target_value` 与 `buy`/`sell` 同时非空 | `ValueError: 互斥` |
 | `target_value` 与 `buy_conditions` 同时非空 | `ValueError: 互斥` |
 | `buy_weights` 的键与 `buy` 列表不一致，或权重 ∉ (0,1]，或权重和 > 1 | `ValueError` |
@@ -329,7 +330,7 @@ class MyStrategy(Strategy):
 |---|---|---|---|
 | `initial_capital` | `float` | `1000000` | 初始资金（元） |
 | `max_positions` | `int` | `20` | 最大持仓数。所有买入路径达到上限后只记 INFO 日志、不拦截——策略应自行管理持仓数量 |
-| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = 0.01 元） |
+| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = 0.01 元）。必须是非负整数，否则 `ValueError` |
 | `condition_slippage_ticks` | `int \| None` | `None` | 条件单（含条件买入）独立滑点 tick 数；`None` 时沿用 `slippage_ticks`。必须是非负整数或 None，否则 `ValueError` |
 | `execution_price` | `str` | `"open"` | 手动订单成交价字段：`"open"`（次日开盘）或 `"close"`（次日收盘），其他值 `ValueError` |
 | `commission_rate` | `float` | `0.00015` | 佣金费率（万 1.5） |
@@ -338,7 +339,7 @@ class MyStrategy(Strategy):
 | `transfer_fee_rate` | `float` | `0.00001` | 过户费费率 |
 | `benchmark` | `str \| None` | 自动推导 | 基准指数代码。未设置或 `None` 时：`index_universe` 恰为单指数 → 取该指数，否则沪深 300（`000300.SH`）。显式设为空字符串 `""` = 无基准 |
 | `quiet_skips` | `bool` | `False` | `True` 时跳过类告警（涨跌停、成交量、现金不足等）降级为 DEBUG |
-| `order_volume_ratio` | `float \| None` | `None` | 单笔订单股数 ≤ `int(成交量(手) × ratio) × 100`；`None` 不限制 |
+| `order_volume_ratio` | `float \| None` | `None` | 单笔订单股数 ≤ `int(成交量(手) × ratio) × 100`；`None` 不限制。必须是正数或 None，否则 `ValueError` |
 | `ml_log` | `str` | — | `"full"` 时落盘全截面 ML 分数（缺省只落盘决策相关标的），见 ml_guide |
 
 **自定义键**：任何不在此列表的键（`top_k`、`cooldown_days`、`rebalance_interval` 等）策略代码通过 `self.config.get("key")` 自由读取，引擎不干预。
@@ -363,9 +364,9 @@ factor_specs:
 
 | 键 | 类型 | 默认 | 需要后端能力 | 说明 |
 |---|---|---|---|---|
-| `exclude_st` | `bool` | `True` | `st_symbol` | 排除 ST（日频快照：当日有记录才是 ST，摘帽次日恢复可买） |
-| `exclude_new_stock` | `bool` | `True` | `listing_date` | 排除上市 60 日内的新股 |
-| `exclude_loss` | `bool` | `True` | `pe_ttm` 列 | 排除 `pe_ttm <= 0` 的亏损股 |
+| `exclude_st` | `bool` | `False` | `st_symbol` | 排除 ST（日频快照：当日有记录才是 ST，摘帽次日恢复可买）。未声明 = 不过滤 |
+| `exclude_new_stock` | `bool` | `False` | `listing_date` | 排除上市 60 日内的新股。未声明 = 不过滤 |
+| `exclude_loss` | `bool` | `False` | `pe_ttm` 列 | 排除 `pe_ttm <= 0` 的亏损股。未声明 = 不过滤 |
 | `exclude_boards` | `list[str]` | `[]` | — | 排除板块：`"BJ"`（北交所）、`"688"`（科创板）、`"300"`/`"301"`（创业板） |
 | `exclude_industries` | `list[str]` | `[]` | `industry_name` | 排除指定行业名 |
 | `min_price` | `float` | `0.0` | — | 最低收盘价过滤 |
@@ -375,7 +376,7 @@ factor_specs:
 要点：
 
 - 未知键 → WARNING 并被忽略（不报错）。
-- `exclude_loss` 需**显式声明** `exclude_loss: true` 才会触发 preload 加载 `pe_ttm` 列；未声明时 StockFilter 读不到列，告警一次后该规则不生效。
+- `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启后后端缺能力（缺 ST 表 / 上市日期 / `pe_ttm` 列）时告警一次、该规则不生效（软回退）。
 - `index_universe` / `factor_universe` 可用的指数代码取决于后端数据库已有的成分数据；后端无 `get_index_members` 能力或对应指数无数据时，告警一次、规则不生效（软回退）。
 - `StockFilter` 是策略侧工具：引擎不过滤，策略在 `select()` 中自行调用 `self._filter.filter(bars, date_str)`。
 

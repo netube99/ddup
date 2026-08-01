@@ -119,7 +119,7 @@ MY_FORM = {
 
 | 方法 | 签名 | 返回契约 |
 |------|------|---------|
-| `query_bars` | `(symbols: list[str] \| None, start: str, end: str, columns: list[str] \| None = None) -> pd.DataFrame` | `[start, end]` 闭区间日线；MultiIndex `(trade_date, symbol)`，日期为 YYYYMMDD 字符串；`symbols=None` 表示全部股票；`columns=None` 返回全部可用列；被请求不存在的列名应快速报错，不得静默忽略 |
+| `query_bars` | `(symbols: list[str] \| None, start: str, end: str, columns: list[str] \| None = None) -> pd.DataFrame` | `[start, end]` 闭区间日线；MultiIndex `(trade_date, symbol)`，日期为 YYYYMMDD 字符串；`symbols=None` 表示全部股票，**空列表 `[]` 返回空面板**（与 None 语义不同，勿混用）；`columns=None` 返回全部可用列；被请求不存在的列名应快速报错，不得静默忽略 |
 | `get_calendar` | `(start: str, end: str) -> list[str]` | `[start, end]` 区间内交易日列表，YYYYMMDD 升序；start/end 当天是交易日则必须包含 |
 | `get_dividends_on_date` | `(date_str: str) -> dict[str, dict[str, float]]` | `{symbol: {"stk_div": float, "cash_div": float}}`；`stk_div` 每股送转比例（10 送 3 → 0.3），`cash_div` 每股现金红利（元）；当日无除权除息返回空 dict |
 
@@ -392,4 +392,12 @@ FROM financials;
 | 指数成分 `index_code` + `index_member` | `get_index_members` | `index_universe` → 告警一次，白名单不生效；`factor_universe` → 告警一次，因子计算域回退为交易域 |
 | 基准行情 `benchmark_close` | `get_benchmark_bars` | 报告基准对比列为空，不报错；因子表达式引用 `idx_ret` → preload 报错 |
 
-另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 在过滤规则中缺省为开启——后端缺能力时即使策略未显式配置，也会出现上述告警，属预期行为。
+另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力时才会出现上表告警（软回退）。
+
+### 10.1 数据卫生检查与空值语义（fail-fast）
+
+与软回退相反，以下问题在 `GenericSQLBackend` 加载期直接 `ValueError`，不会静默跑出错误结果：
+
+- **键列类型探针**：日期键列须为 `YYYYMMDD` 文本、代码键列须为 `TEXT`（首次连接时逐表抽样验证）。SQLite 类型序 `INTEGER < TEXT`，键列存成整数时与文本参数的比较恒假，查询会静默返回空面板——回测会在“无行情数据”下照常跑完。
+- **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 outer join 多对多爆炸、策略层 `to_dict` 静默丢行。
+- **空 universe 语义**：`query_bars` 的 `symbols=[]` 返回空面板，`None` 才表示全市场（引擎 preload 用 None；勿用空列表表达“全市场”）。

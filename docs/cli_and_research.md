@@ -273,7 +273,7 @@ python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
 |------|------|
 | `bench_universe_preload.py --start D --end D [--yaml path] [--skip-load] [--skip-engine]` | 性能基准：全市场 preload vs 沪深300+中证500+中证1000 成分并集 preload，分数据加载层（行数/耗时/内存）与端到端（engine.run 耗时）两层；调优 `get_universe` 时使用 |
 | `dump_fixtures.py` | 从真实行情库重新生成 `tests/fixtures/*.parquet` 测试 fixtures（无参数；数据库结构或数据更新后使用） |
-| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数；开发工具） |
+| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，13 项结构检查；开发工具） |
 
 ---
 
