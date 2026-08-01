@@ -315,7 +315,11 @@ class Engine:
                         benchmark_nav = (bm[hfq_col] / first).tolist()
                         benchmark_nav = [float(v) for v in benchmark_nav]
             with conn:
-                database.write_run_stats(conn, self.run_id, stats_result)
+                # 基准净值随 stats_json 落库：离线 report 才能画出基准叠加线
+                stats_payload = dict(stats_result)
+                stats_payload["benchmark_nav"] = benchmark_nav
+                stats_payload["benchmark_code"] = self.benchmark
+                database.write_run_stats(conn, self.run_id, stats_payload)
                 database.update_run_status(conn, self.run_id, "completed")
             return {
                 "account_daily": account_daily_df,
@@ -486,6 +490,16 @@ class Engine:
                     turnover=0.0, commission=0.0, stamp_tax=0.0,
                     transfer_fee=0.0, slippage_amount=0.0,
                     net_amount=event["net"], reason="cash_div",
+                ))
+            elif event["type"] == "stk_div":
+                # 送转增股必须落库：stats 往返盈亏 / Brinson 持仓重建 /
+                # ML 回合配对都从 trade_log 重建持股事实，缺失会腐化三处
+                database.write_trade(conn, self.run_id, types.Trade(
+                    date=today, symbol=event["symbol"], side="STK_DIV",
+                    trigger="CORPORATE", price=0.0, shares=event["new_shares"],
+                    turnover=0.0, commission=0.0, stamp_tax=0.0,
+                    transfer_fee=0.0, slippage_amount=0.0,
+                    net_amount=0.0, reason="stk_div",
                 ))
 
     def _compute_pending(self, calc_date: str, bars_dict: dict | None = None,

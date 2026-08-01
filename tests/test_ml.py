@@ -349,6 +349,21 @@ class TestTradePairRounds:
         ])
         assert len(extract_trade_pairs(db)) == 1
 
+    def test_stk_div_round_paired(self, tmp_path):
+        """送转增股回合不再因"超卖"被丢弃，buy_price 为除权后每股成本。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            ("20240105", "X", "STK_DIV", "CORPORATE", 0.0, 140),
+            ("20240108", "X", "SELL", "MANUAL", 5.1, 140),
+        ])
+        pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        r = pairs.iloc[0]
+        assert r["buy_price"] == pytest.approx(1000.0 / 140, abs=1e-4)
+        assert r["pnl"] == pytest.approx(140 * 5.1 - 100 * 10.0)
+
     def test_partial_sells_one_round(self, tmp_path):
         """买 1000 两次部分卖 500/500 → 1 回合，pnl 为两笔合计，trigger 取末笔。"""
         from btcore.ml.labels import extract_trade_pairs
@@ -393,6 +408,7 @@ class TestTradePairRounds:
 
     def test_oversell_round_skipped(self, tmp_path, caplog):
         """卖出超过买入股数：残缺回合跳过并告警。"""
+        # 该场景在送转落库后仅剩真正的"超卖"（无送转支撑）才触发
         from btcore.ml.labels import extract_trade_pairs
 
         db = self._db(tmp_path, [

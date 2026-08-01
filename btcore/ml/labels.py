@@ -75,6 +75,18 @@ def extract_trade_pairs(result_db_path: str) -> pd.DataFrame:
             r["buy_shares"] += shares
             r["buy_cost"] += shares * price
             r["pnl"] += net_amount
+        elif side == "STK_DIV":
+            # 送转增股：trade_log 的 shares = 送转后总股数。buy_shares 同步为
+            # 总股数，buy_price = buy_cost / buy_shares 即除权后每股成本
+            #（引擎 entry_price 同口径），否则卖出超买被误判残缺回合
+            r = open_rounds.get(symbol)
+            if r is None:
+                logger.warning(
+                    "[ML标签] %s %s 送转无对应持仓，跳过", date, symbol,
+                )
+                continue
+            r["shares"] = shares
+            r["buy_shares"] = shares
         else:  # SELL
             r = open_rounds.get(symbol)
             if r is None:

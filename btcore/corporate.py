@@ -32,12 +32,13 @@ def adjust(account, today: str, day_bars, provider, log: list):
 
 def _apply_stk_div(holding, stk_div: float, today: str, log: list):
     scale = 1.0 / (1.0 + stk_div)
+    old_shares = holding.shares
     holding.shares = max(1, int(holding.shares * (1 + stk_div)))
     _rescale_holding(holding, scale)
     log.append({
         "date": today, "symbol": holding.symbol,
         "type": "stk_div", "stk_div": stk_div,
-        "new_shares": holding.shares,
+        "old_shares": old_shares, "new_shares": holding.shares,
     })
 
 

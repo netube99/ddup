@@ -61,3 +61,60 @@ def test_missing_dividend_skips():
 
     assert holding.shares == 1000
     assert len(log) == 0
+
+
+def test_engine_logs_stk_div_trade(tmp_path):
+    """引擎把送转增股写入 trade_log（side=STK_DIV, shares=送转后总股数）。
+
+    fixtures 中 920469.BJ 于 20240611 除权（stk_div=0.3）；买入当天除权不
+    享有分红（先 corporate.adjust 后撮合），必须跨除权日持仓。跨除权日的
+    stats 往返盈亏 / Brinson 重建 / ML 回合配对都依赖这行记录。
+    """
+    from btcore.engine import Engine
+    from btcore.provider import DataProvider
+    from btcore.strategy import Strategy
+    from tests.conftest import MockDataBackend
+
+    class HoldThroughSplit(Strategy):
+        REQUIRED_FIELDS = ["open", "high", "low", "close", "vol", "adj_factor"]
+
+        def __init__(self, **kw):
+            super().__init__(config=kw.pop("config", {}), **kw)
+
+        def on_start(self, provider, first_date, end_date=None):
+            pass
+
+        def select(self, bars, snapshot, provider) -> dict:
+            return {"buy": ["920469.BJ"], "sell": []}
+
+        def calc_conditions(self, symbol, entry_price, bar, holding_days) -> list[dict]:
+            return []
+
+    backend = MockDataBackend()
+    provider = DataProvider(backend)
+    db_path = tmp_path / "run.db"
+    strategy = HoldThroughSplit(
+        config={"max_positions": 5, "initial_capital": 100000},
+    )
+    engine = Engine(
+        strategy=strategy, provider=provider, db_path=str(db_path),
+        initial_capital=100000,
+    )
+    engine.run("20240603", "20240612")
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    try:
+        buy = conn.execute(
+            "SELECT shares FROM trade_log WHERE side='BUY' AND symbol='920469.BJ'"
+        ).fetchone()
+        stk = conn.execute(
+            "SELECT shares, trigger FROM trade_log WHERE side='STK_DIV'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert buy is not None, "买入未成交，测试前提失败"
+    assert stk is not None, "trade_log 缺少 STK_DIV 行"
+    assert stk[0] == int(buy[0] * 1.3)
+    assert stk[1] == "CORPORATE"
+

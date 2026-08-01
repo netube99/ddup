@@ -78,6 +78,30 @@ def test_management_complexity_values():
     assert mc["avg_position_value"] == pytest.approx(expected_apv)
 
 
+def test_round_trip_through_stk_div():
+    """送转后卖出：lot 缩放、成本每股下摊，盈亏与经济口径一致。
+
+    100 股 @10 → 10送10（STK_DIV shares=200）→ 卖 200 @5.1：
+    真实 pnl = 200×5.1 - 100×10 = +20；修复前按未缩放 lot 记为 -490。
+    """
+    adf = make_account_daily(
+        [1_000_000.0, 1_010_000.0, 1_010_020.0], n_holdings=[1, 1, 0]
+    )
+    trades = make_trades([
+        ["20240603", "AAA", "BUY", "MANUAL", 10.0, 100, 1000.0, 5.0, 0.0, 0.1, 2.0,
+         -1007.1, ""],
+        ["20240604", "AAA", "STK_DIV", "CORPORATE", 0.0, 200, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, "stk_div"],
+        ["20240605", "AAA", "SELL", "MANUAL", 5.1, 200, 1020.0, 5.0, 0.51, 0.1, 1.0,
+         1013.39, ""],
+    ])
+    stats = calculate_statistics(adf, trades)
+    rt = stats["round_trip"]
+    assert rt["summary"]["total_realized_pnl"] == pytest.approx(20.0, abs=0.01)
+    assert rt["trip_detail"][0]["shares"] == 200
+    assert rt["trip_detail"][0]["pnl"] == pytest.approx(20.0, abs=0.01)
+
+
 def test_empty_trades_zero_dicts():
     adf = make_account_daily([1_000_000.0, 1_010_000.0], n_holdings=[0, 1])
     stats = calculate_statistics(adf, make_trades([]))

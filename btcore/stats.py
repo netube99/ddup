@@ -229,7 +229,7 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
     if trades.empty and div_log.empty:
         return {"round_trip": {"trip_detail": [], "open_positions": [], "summary": {}}}
 
-    # 构建统一事件流: BUY / SELL / DIV 三类, 按日期排序
+    # 构建统一事件流: BUY / SELL / DIV / STK_DIV 四类, 按日期排序
     events = []
     for _, row in trades.iterrows():
         events.append({
@@ -266,6 +266,21 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                 per_share_div = div_amount / total_open
                 for lot in lots[sym]:
                     lot["dividend_accrued"] += lot["shares"] * per_share_div
+        elif event["type"] == "STK_DIV":
+            # 送转增股：按比例缩放 lot 队列（shares × ratio、成本每股 ÷ ratio），
+            # 总成本不变；除权后卖出才能与引擎口径对得上
+            total_open = sum(lot["shares"] for lot in lots[sym])
+            if total_open <= 0:
+                continue
+            ratio = event["shares"] / total_open
+            new_total = 0
+            for lot in lots[sym]:
+                scaled = int(lot["shares"] * ratio)
+                lot["shares"] = scaled
+                lot["cost_per_share"] = lot["cost_per_share"] / ratio
+                new_total += scaled
+            if new_total < event["shares"]:
+                lots[sym][0]["shares"] += event["shares"] - new_total
         elif event["type"] == "SELL":
             sell_shares = event["shares"]
             sell_price = event["price"]
