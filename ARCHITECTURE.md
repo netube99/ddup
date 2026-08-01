@@ -218,7 +218,7 @@ init_backtest_db → get_calendar → get_factor_universe / get_universe
 → 因子物化：_preload_breadth → ensure_pseudo_columns → materialize → validate_materialization
 → ML panel 物化：ml_runtime.materialize_predictions → bars_df['ml_<name>']   ← 必须在裁切前
 → factor_universe 裁切到交易域（裁空 → ValueError）
-→ bars_by_date 分组 → provider.attach_bars → strategy.on_start
+→ bars_by_date 懒切片（_DaySlicer，不复制面板）→ provider.attach_bars → strategy.on_start
 → write_run（独立事务，status=running）
 → _compute_pending(prev_day)   ← 首日信号在前一交易日预计算（T 信号 T+1 撮合）
 → for today in calendar: step(today, day_bars, conn)

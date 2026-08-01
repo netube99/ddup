@@ -65,7 +65,8 @@ class DataBackend(ABC):
         Parameters
         ----------
         symbols : list[str] | None
-            股票代码列表；None 表示全部股票（引擎 preload 用）。
+            股票代码列表；None 表示全部股票（引擎 preload 用），
+            空列表返回空面板（与 None 语义不同，勿混用）。
         start, end : str
             日期区间（含两端），YYYYMMDD 格式。
         columns : list[str] | None
@@ -80,7 +81,7 @@ class DataBackend(ABC):
         ── 数据契约列（缺列引擎 preload 直接报错）─────────────────────
         open / high / low / close   裸价（元）
         vol                         成交量，单位：手（1 手 = 100 股）
-        adj_factor                  后复权因子（除数法：hfq_close = close / adj_factor）
+        adj_factor                  后复权因子（乘法：hfq_close = close × adj_factor）
         pre_close                   昨收价，交易所除权调整口径：
                                     除权日：pre_close = (前裸收盘 - 现金分红) / (1 + 送转比例)
                                     非除权日：pre_close = 前裸收盘

@@ -31,6 +31,10 @@ class DataProvider:
         self._prev_day_cache: dict[str, str | None] = {}
         self._bars_df: pd.DataFrame | None = None
         self._as_of_date: str | None = None
+        # benchmark 面板精确键缓存：(code, start, end) → frame|None。
+        # 只对同区间重复调用去重（如 trend + returns 同日连调）；逐日滑窗
+        # 调用每窗回源一次——单标的索引查询，成本可忽略
+        self._bench_cache: dict[tuple[str, str, str], pd.DataFrame | None] = {}
 
     # ── 引擎用 (含当日) ──
 
@@ -118,7 +122,10 @@ class DataProvider:
         lookback_start = (
             date.fromisoformat(end_date) - timedelta(days=lookback_days)
         ).strftime("%Y%m%d")
-        bench = bench_fn(self.benchmark, lookback_start, prev)
+        key = (self.benchmark, lookback_start, prev)
+        if key not in self._bench_cache:
+            self._bench_cache[key] = bench_fn(self.benchmark, lookback_start, prev)
+        bench = self._bench_cache[key]
         if bench is None or bench.empty:
             return None
         ret = bench["hfq_close"].pct_change()

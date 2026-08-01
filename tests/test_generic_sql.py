@@ -426,3 +426,69 @@ def test_view_as_source_table(tmp_path):
     df2 = b.query_bars(["000001.SZ"], "20240102", "20240102", ["adj_factor"])
     assert list(df2.columns) == ["adj_factor"]
     b.close()
+
+
+# ── 契约加固：空 universe / 重复键 / 键类型探针 ──
+
+
+def test_query_bars_empty_symbols_returns_empty(backend):
+    """空列表 ≠ None：显式空 universe 返回空面板，而不是全市场。"""
+    empty = backend.query_bars([], "20240101", "20241231")
+    assert len(empty) == 0
+    assert list(empty.index.names) == ["trade_date", "symbol"]
+    full = backend.query_bars(None, "20240101", "20241231")
+    assert len(full) > 0
+
+
+def test_query_bars_duplicate_keys_rejected(tmp_path):
+    """面板表 (交易日, 代码) 键重复 → 加载期报错，而非 join 爆炸/静默丢行。"""
+    path = str(tmp_path / "dup.db")
+    _build_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO quotes_a VALUES ('000001.SZ','20240102',1,1,1,1,1,1,1,1)"
+    )
+    conn.commit()
+    conn.close()
+    b = GenericSQLBackend(FULL_FORM, path)
+    try:
+        with pytest.raises(ValueError, match="重复"):
+            b.query_bars(None, "20240101", "20241231")
+    finally:
+        b.close()
+
+
+def test_integer_date_column_rejected(tmp_path):
+    """日期列存 INTEGER → 初始化期报错（SQLite 类型序 INTEGER < TEXT，
+    与文本参数的键比较恒假，面板会静默查空）。"""
+    path = str(tmp_path / "intdate.db")
+    _build_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE quotes_int AS SELECT ts_code,"
+        " CAST(trade_date AS INTEGER) AS trade_date, open, high, close, vol,"
+        " amount, adj_factor, pre_close, pe_ttm FROM quotes_a"
+    )
+    conn.execute("DROP TABLE quotes_a")
+    conn.execute("ALTER TABLE quotes_int RENAME TO quotes_a")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        GenericSQLBackend(FULL_FORM, path)
+
+
+def test_integer_symbol_column_rejected(tmp_path):
+    """代码列存 INTEGER → 初始化期报错（symbol IN 文本参数比较恒假）。"""
+    path = str(tmp_path / "intsym.db")
+    _build_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE ind_int AS SELECT CAST(ts_code AS INTEGER) AS ts_code,"
+        " name FROM ind"
+    )
+    conn.execute("DROP TABLE ind")
+    conn.execute("ALTER TABLE ind_int RENAME TO ind")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ValueError, match="TEXT"):
+        GenericSQLBackend(FULL_FORM, path)

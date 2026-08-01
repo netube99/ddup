@@ -61,7 +61,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import date, timedelta
-from types import MethodType
 
 import pandas as pd
 
@@ -119,6 +118,11 @@ class GenericSQLBackend(DataBackend):
 
     def __init__(self, form: dict, db_path: str):
         self._c = _compile_form(form)
+        # 鸭子类型能力方法一次性装配为实例属性（hasattr/getattr 探测路径
+        # 与普通方法一致，静态检查可见）；类 MRO 已定义（子类覆盖）的跳过
+        for meth, sec in _EXTRAS.items():
+            if sec in self._c["sections"] and getattr(type(self), meth, None) is None:
+                setattr(self, meth, getattr(self, f"_impl_{meth}"))
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
         self._conn.row_factory = sqlite3.Row
         self._check_schema()
@@ -126,13 +130,6 @@ class GenericSQLBackend(DataBackend):
 
     def close(self):
         self._conn.close()
-
-    def __getattr__(self, name: str):
-        # 仅在常规查找失败时调用；self.__dict__ 取 _c 避免与初始化顺序递归
-        cfg_key = _EXTRAS.get(name)
-        if cfg_key and cfg_key in self.__dict__.get("_c", {}).get("sections", {}):
-            return MethodType(getattr(type(self), f"_impl_{name}"), self)
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     # ═══════════════════════════════════
     # 核心 — DataBackend ABC 方法
@@ -153,12 +150,25 @@ class GenericSQLBackend(DataBackend):
             raise ValueError(
                 f"query_bars 未知列名: {sorted(unknown)}（未在表单中声明）"
             )
+        if symbols is not None and not symbols:
+            # 空列表 ≠ None（全市场）：显式空 universe 返回空面板
+            idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
+            return pd.DataFrame(index=idx)
         frames = []
         for table, cols in c["panel"].items():
             need = {canon: phys for canon, phys in cols.items() if canon in wanted}
             if not need:
                 continue  # 列裁剪：该表无字段被请求，整表跳过
-            frames.append(self._query_table(table, need, symbols, start, end))
+            f = self._query_table(table, need, symbols, start, end)
+            if f.index.has_duplicates:
+                # 重复键会让 outer join 多对多爆炸、策略层 to_dict 静默丢行：
+                # 必须在回源处 fail-fast（AGENTS.md 不产生静默错误结果）
+                sample = f.index[f.index.duplicated()][:3].tolist()
+                raise ValueError(
+                    f"表 {table} 存在重复的 (交易日, 代码) 键，示例 {sample}："
+                    "请检查源表数据或 tables 节的键列名声明"
+                )
+            frames.append(f)
         if not frames:
             idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
             return pd.DataFrame(index=idx)
@@ -353,7 +363,7 @@ class GenericSQLBackend(DataBackend):
             _q(phys) if phys == canon else f"{_q(phys)} AS {_q(canon)}"
             for canon, phys in need.items()
         ]
-        if symbols:
+        if symbols is not None:
             ph = ",".join("?" * len(symbols))
             where = f"{ksym} IN ({ph}) AND "
             params: list = list(symbols)
@@ -457,6 +467,84 @@ class GenericSQLBackend(DataBackend):
                     bad_cols.append(f"{table}.{col}（{desc}）")
         if bad_cols:
             raise ValueError(f"表单引用的列在库中不存在: {bad_cols}")
+        self._check_key_types()
+
+    def _check_key_types(self):
+        """抽样验证键列存储类型：日期列须为 YYYYMMDD 文本，代码列须为 TEXT。
+
+        SQLite 类型序 INTEGER < TEXT：键列存成 INTEGER 时与文本参数的比较恒假，
+        面板会静默查空（每日"无行情数据"但回测照常跑完）。每列取首个非 NULL
+        样本探一次；空表无样本可验，跳过（数据缺失在运行期以显式告警呈现）。
+        """
+        c = self._c
+        probes: list[tuple[str, str, str]] = []  # (表, 列, "date" | "text")
+
+        def probe(table: str, col: str, kind: str):
+            item = (table, col, kind)
+            if item not in probes:
+                probes.append(item)
+
+        for table in c["panel"]:
+            ksym, kdate = self._keys(table)
+            probe(table, ksym, "text")
+            probe(table, kdate, "date")
+        secs = c["sections"]
+        cal = secs["calendar"]
+        probe(cal["table"], cal["date"], "date")
+        div = secs["dividends"]
+        dsym, _ = self._keys(div["table"])
+        probe(div["table"], dsym, "text")
+        probe(div["table"], div["ex_date"], "date")
+        if "st" in secs:
+            sec = secs["st"]
+            _, sdate = self._keys(sec["table"])
+            probe(sec["table"], sec["symbol"], "text")
+            probe(sec["table"], sdate, "date")
+        if "industry" in secs:
+            sec = secs["industry"]
+            isym, _ = self._keys(sec["table"])
+            probe(sec["table"], isym, "text")
+        if "listings" in secs:
+            sec = secs["listings"]
+            lsym, _ = self._keys(sec["table"])
+            probe(sec["table"], lsym, "text")
+            probe(sec["table"], sec["list_date"], "date")
+        if "index_members" in secs:
+            sec = secs["index_members"]
+            _, xdate = self._keys(sec["table"])
+            probe(sec["table"], xdate, "date")
+            probe(sec["table"], sec["index"], "text")
+            probe(sec["table"], sec["member"], "text")
+        if "benchmark" in secs:
+            sec = secs["benchmark"]
+            csym, cdate = self._keys(sec["close_table"])
+            probe(sec["close_table"], csym, "text")
+            probe(sec["close_table"], cdate, "date")
+            if sec["adj_table"] is not None:
+                asym, adate = self._keys(sec["adj_table"])
+                probe(sec["adj_table"], asym, "text")
+                probe(sec["adj_table"], adate, "date")
+
+        for table, col, kind in probes:
+            row = self._conn.execute(
+                f"SELECT typeof({_q(col)}), {_q(col)} FROM {_q(table)}"
+                f" WHERE {_q(col)} IS NOT NULL LIMIT 1"
+            ).fetchone()
+            if row is None:
+                continue
+            dtype, value = row
+            if kind == "date":
+                ok = (dtype == "text" and isinstance(value, str)
+                      and len(value) == 8 and value.isdigit())
+                expect = "YYYYMMDD 文本（8 位数字）"
+            else:
+                ok = dtype == "text"
+                expect = "TEXT"
+            if not ok:
+                raise ValueError(
+                    f"表 {table} 的列 {col} 应为{expect}，实测类型 {dtype} 值 {value!r}："
+                    "SQLite 中 INTEGER < TEXT，类型不匹配的键比较恒假，查询会静默查空"
+                )
 
 
 def _parse_key_name(form: dict, name: str) -> str:

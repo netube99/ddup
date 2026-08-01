@@ -98,7 +98,7 @@ class MockDataBackend(DataBackend):
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
         mask = (self._bars["trade_date"] >= start) & (self._bars["trade_date"] <= end)
-        if symbols:
+        if symbols is not None:
             mask &= self._bars["symbol"].isin(symbols)
         result = self._bars.loc[mask].copy()
 
@@ -109,7 +109,7 @@ class MockDataBackend(DataBackend):
         ]
         for aux in aux_frames:
             aux_mask = (aux["trade_date"] >= start) & (aux["trade_date"] <= end)
-            if symbols:
+            if symbols is not None:
                 aux_mask &= aux["ts_code"].isin(symbols)
             aux_df = aux.loc[aux_mask].rename(columns={"ts_code": "symbol"})
             result = result.merge(aux_df, on=["symbol", "trade_date"], how="left")
