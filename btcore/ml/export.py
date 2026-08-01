@@ -94,9 +94,12 @@ def _verify(spec, result: TrainResult, onnx_path: Path, meta: dict,
     )
     onnx_out = ml_runtime._run_batch(runtime_spec, rows)
 
-    x = (rows - np.asarray(meta["scaler_mean"], dtype=np.float32)) / np.where(
-        np.asarray(meta["scaler_std"], dtype=np.float32) > 1e-10,
-        np.asarray(meta["scaler_std"], dtype=np.float32), 1.0,
+    x = np.nan_to_num(
+        (rows - np.asarray(meta["scaler_mean"], dtype=np.float32)) / np.where(
+            np.asarray(meta["scaler_std"], dtype=np.float32) > 1e-10,
+            np.asarray(meta["scaler_std"], dtype=np.float32), 1.0,
+        ),
+        nan=0.0,
     )
     if spec.state_features:
         sk_out = result.model.predict_proba(x)[:, 1]

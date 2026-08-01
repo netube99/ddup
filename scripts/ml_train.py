@@ -149,7 +149,7 @@ def _train_panel(args, spec, backend, symbols, library, benchmark) -> int:
     print(f"分层: 多空={layered.get('long_short', 0):.4f} "
           f"单调={layered.get('monotonic')}")
 
-    verify = panel[spec.feature_order].astype(float).fillna(0.0).to_numpy()[:32]
+    verify = panel[spec.feature_order].astype(float).to_numpy()[:32]
     onnx_path, meta_path = export_model(
         result, spec, spec.artifact,
         label={"type": "xs_fwdret", "horizon": args.horizon},
@@ -191,7 +191,7 @@ def _train_holding(args, spec, backend, symbols, library, benchmark) -> int:
           f"precision={result.metrics['precision@0.5']:.3f} "
           f"recall={result.metrics['recall@0.5']:.3f}")
 
-    verify = samples[spec.feature_order].astype(float).fillna(0.0).to_numpy()[:32]
+    verify = samples[spec.feature_order].astype(float).to_numpy()[:32]
     onnx_path, meta_path = export_model(
         result, spec, spec.artifact,
         label={"type": "trend_break", "lookahead": args.lookahead},

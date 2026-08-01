@@ -5,15 +5,18 @@ pct rank ∈ (0,1]，消除市场 beta，跨日可比；同时返回原始前向
 （供分层评估，逐日单调等价于 rank 标签）。
 
 holding scope 模型：trend_break — 从回测结果库 trade_log FIFO 配对买卖，
-持仓期间逐日打标：未来 lookahead 天内触发 TREND_BREAK 且净亏损 = 正样本。
+持仓期间逐日打标：未来 lookahead 个交易日内触发 TREND_BREAK 且净亏损 = 正样本。
 账户态特征（hold_days / ret_from_entry）按持仓区间重放，
-公式与引擎推理侧共用 btcore.ml.runtime.compute_state_features。
+公式与引擎推理侧共用 btcore.ml.runtime.compute_state_features；
+hold_days 按市场交易日口径（引擎逐日 +1，成交当日 decision 时点为 1），
+缺失特征保留 NaN，由 trainer 在 scaler 之后填 0（= 训练段均值）。
 """
 
 import logging
 import sqlite3
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
 
 from btcore.ml.runtime import compute_state_features
@@ -92,13 +95,18 @@ def build_guard_samples(
 ) -> pd.DataFrame:
     """holding scope 训练样本：持仓期间逐日一行。
 
-    - positive: 该回合以 TREND_BREAK 触发且净亏损，且当日距卖出 ∈ [1, lookahead]
-    - negative: 非 TB 亏损回合的持仓日（末尾 lookahead 天丢弃，避免边界混淆），
+    - positive: 该回合以 TREND_BREAK 触发且净亏损，且当日距卖出 ∈ [1, lookahead] 个交易日
+    - negative: 非 TB 亏损回合的持仓日（末尾 lookahead 个交易日丢弃，避免边界混淆），
       以及 TB 亏损回合的"安全窗口"日
-    特征 = 面板特征列 + 账户态特征（按统一公式重放）。
+    特征 = 面板特征列 + 账户态特征（按统一公式重放；hold_days 为市场
+    交易日口径，与引擎 decision 时点的 holding.holding_days 逐日一致）。
     """
     feature_cols = spec.feature_order
     samples = []
+    # 市场交易日位置表：hold_days / 距卖出天数都按交易日计，不能用
+    # 日历日（约 1.43 倍漂移，且与引擎逐日 +1 的口径不一致）
+    cal = panel.index.get_level_values("trade_date").unique().sort_values()
+    date_pos = {d: k for k, d in enumerate(cal)}
     for pos in pairs_df.itertuples(index=False):
         sym = pos.symbol
         mask = (
@@ -112,13 +120,19 @@ def build_guard_samples(
 
         is_positive_pair = pos.trigger == "TREND_BREAK" and pos.pnl < 0
         dates = pos_bars.index.get_level_values("trade_date")
+        buy_pos = date_pos.get(pos.buy_date)
+        sell_pos = date_pos.get(pos.sell_date)
 
         for i in range(len(pos_bars)):
             trade_date = dates[i]
-            hd = (pd.to_datetime(trade_date) - pd.to_datetime(pos.buy_date)).days
-            if hd < 1:
-                continue
-            dts = (pd.to_datetime(pos.sell_date) - pd.to_datetime(trade_date)).days
+            # 引擎在成交当日的 _compute_pending 已 +1：成交日 holding_days=1。
+            # buy_date 落在面板窗口外时退化为窗口内相对位置（近似）
+            hd = date_pos[trade_date] - buy_pos + 1 if buy_pos is not None else i + 1
+            dts = (
+                sell_pos - date_pos[trade_date]
+                if sell_pos is not None
+                else len(pos_bars) - 1 - i
+            )
 
             if is_positive_pair:
                 label = 1 if 1 <= dts <= lookahead else 0
@@ -139,7 +153,8 @@ def build_guard_samples(
             state = compute_state_features(spec.state_features, bar, holding)
             for name in feature_cols:
                 v = state.get(name, day.get(name))
-                row[name] = float(v) if v is not None and v == v else 0.0
+                # 缺失保留 NaN：trainer 在 scaler 之后填 0（训练段均值）
+                row[name] = float(v) if v is not None and v == v else np.nan
             samples.append(row)
 
     return pd.DataFrame(samples)

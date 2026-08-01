@@ -6,6 +6,7 @@ ONNX 相关用例需要 onnxruntime + xgboost + onnxmltools（开发依赖，
 
 import hashlib
 import json
+import logging
 import sqlite3
 
 import numpy as np
@@ -187,6 +188,59 @@ class TestLoaderIntegration:
         assert ok["model_exit"][0]["model"] == "m"
 
 
+# ── holding scope 标签重放 / scaler 口径（无 ONNX 依赖）──
+
+
+class TestGuardSamplesBasis:
+    def _spec(self):
+        return ModelSpec(
+            name="g", artifact="x.onnx",
+            features=["mom20"], raw_features=["turnover_rate"],
+            state_features=["hold_days"],
+        )
+
+    def test_trading_day_hold_days(self):
+        """hold_days/dts 按市场交易日口径（跨周末场景下与日历日可区分）。"""
+        from btcore.ml.labels import build_guard_samples
+
+        idx = pd.MultiIndex.from_tuples(
+            [(d, "A") for d in ["20240605", "20240606", "20240607", "20240610"]],
+            names=["trade_date", "symbol"],
+        )
+        panel = pd.DataFrame(
+            {"mom20": [1.0, np.nan, 3.0, 4.0], "turnover_rate": [0.5] * 4},
+            index=idx,
+        )
+        pairs = pd.DataFrame([{
+            "symbol": "A", "buy_date": "20240605", "sell_date": "20240610",
+            "buy_price": 10.0, "pnl": -1.0, "trigger": "TREND_BREAK",
+            "holding_days": 5,
+        }])
+        samples = build_guard_samples(panel, pairs, self._spec(), lookahead=2)
+        # 成交当日 hd=1（引擎在成交日 _compute_pending 已 +1），逐交易日 +1；
+        # 日历日口径会跳过成交日且跨周末后漂移（0610 日历日 hd=5）
+        assert samples["hold_days"].tolist() == [1.0, 2.0, 3.0, 4.0]
+        # dts 同为交易日口径：0606/0607 距卖出 ∈ [1,2] → 正样本
+        assert samples["label"].tolist() == [0, 1, 1, 0]
+        # 缺失特征保留 NaN（trainer 在 scaler 之后填 0），不再预填 0.0
+        assert np.isnan(samples["mom20"].iloc[1])
+
+    def test_fit_scaler_nan_aware(self):
+        """scaler 只在非缺失值上拟合；缺失在 scaler 之后填 0（= 训练均值）。"""
+        from btcore.ml.trainer import _fit_scaler, _scale
+
+        x = np.array([[1.0, np.nan], [3.0, 2.0], [5.0, 4.0]])
+        mean, std = _fit_scaler(x)
+        assert mean[0] == pytest.approx(3.0)
+        assert mean[1] == pytest.approx(3.0)  # nanmean([2, 4])
+        scaled = _scale(x, mean, std)
+        assert scaled[0, 1] == 0.0  # 缺失 → 标准化空间 0 = 均值
+        assert scaled[0, 0] == pytest.approx((1.0 - 3.0) / std[0])
+        # 全缺失列回退 mean=0/std=1，不产生 NaN 参数
+        mean2, std2 = _fit_scaler(np.full((3, 1), np.nan))
+        assert mean2[0] == 0.0 and std2[0] == 1.0
+
+
 # ── ONNX 相关用例 ──
 
 onnxruntime = pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
@@ -336,6 +390,55 @@ class TestRuntime:
         z = ml_runtime.apply_post_transform_flat(s, "xs_zscore")
         assert z.mean() == pytest.approx(0.0, abs=1e-9)
 
+    def test_missing_neutral_after_scaler(self, tmp_path):
+        """缺失值在 scaler 之后填 0：NaN 行与"恰为训练均值"行得分相同。"""
+        art = _make_model(tmp_path)
+        _write_meta(  # 非平凡 scaler：原始空间的 0 不再是均值
+            tmp_path / "m.meta.json",
+            scaler_mean=[3.0, 1.0], scaler_std=[2.0, 1.0],
+        )
+        spec = ModelSpec.from_dict("m", {"artifact": str(art)}, str(tmp_path))
+        at_mean = ml_runtime._run_batch(spec, np.array([[3.0, 1.0]]))
+        missing = ml_runtime._run_batch(spec, np.array([[np.nan, np.nan]]))
+        assert float(missing[0]) == pytest.approx(float(at_mean[0]))
+
+    def test_materialize_missing_ratio_guard(self, tmp_path):
+        """panel 路径与 holding 同一护栏：特征缺失过半的行无分数（NaN）。"""
+        art = _make_model(tmp_path, post="none")
+        spec = ModelSpec.from_dict("m", {"artifact": str(art)}, str(tmp_path))
+        idx = pd.MultiIndex.from_tuples(
+            [("20240603", "FULL"), ("20240603", "HALF"), ("20240603", "NONE")],
+            names=["trade_date", "symbol"],
+        )
+        df = pd.DataFrame(
+            {"mom20": [1.0, 1.0, np.nan], "turnover_rate": [1.0, np.nan, np.nan]},
+            index=idx,
+        )
+        ml_runtime.materialize_predictions(df, [spec])
+        assert not np.isnan(df.loc[("20240603", "FULL"), "ml_m"])
+        assert not np.isnan(df.loc[("20240603", "HALF"), "ml_m"])  # 恰好 50% 不越界
+        assert np.isnan(df.loc[("20240603", "NONE"), "ml_m"])
+
+
+class _BuyThenSell(Strategy):
+    """首日买一只，holding_days 到阈值后卖出（制造跨周末持仓回合）。"""
+
+    def on_start(self, provider, first_date, end_date=None): pass
+
+    def select(self, bars, snapshot, provider):
+        if not snapshot.holdings:
+            if getattr(self, "_bought", False):
+                return {"buy": [], "sell": []}
+            self._bought = True
+            return {"buy": [sorted(bars)[0]], "sell": []}
+        sym = next(iter(snapshot.holdings))
+        if snapshot.holdings[sym].holding_days >= 6:
+            return {"buy": [], "sell": [sym]}
+        return {"buy": [], "sell": []}
+
+    def calc_conditions(self, symbol, entry_price, bar, holding_days):
+        return []
+
 
 class TestEngineIntegration:
     def test_panel_model_scoring_and_logging(self, tmp_path):
@@ -429,6 +532,33 @@ class TestEngineIntegration:
             assert all(d > bd for bd in buy_dates.get(s, []) if bd <= d), \
                 f"{s} 在 {d} 的 ML_EXIT 击穿 T+1 锁定"
 
+    def test_train_window_overlap_warns(self, tmp_path, caplog):
+        """回测窗口与模型训练窗口重叠 → 告警；完全不重叠 → 无告警。"""
+        art = _make_model(tmp_path)  # meta train_window=["20240101","20240630"]
+
+        def _engine(db_name):
+            strat = build_strategy(
+                _TopK,
+                {"initial_capital": 1_000_000, "max_positions": 3},
+                factor_specs=[{"factor": "ml_m", "weight": 1.0}],
+                models={"m": {"artifact": str(art)}},
+            )
+            return Engine(strat, DataProvider(MockDataBackend()),
+                          db_path=str(tmp_path / db_name))
+
+        with caplog.at_level(logging.WARNING, logger="btcore.engine"):
+            _engine("w1.db").run("20240603", "20240614")
+        assert any("样本内乐观偏差" in r.message for r in caplog.records)
+
+        caplog.clear()
+        _write_meta(
+            tmp_path / "m.meta.json", train_window=["20230101", "20231231"],
+            artifact_sha256=hashlib.sha256(art.read_bytes()).hexdigest(),
+        )
+        with caplog.at_level(logging.WARNING, logger="btcore.engine"):
+            _engine("w2.db").run("20240603", "20240614")
+        assert not any("样本内乐观偏差" in r.message for r in caplog.records)
+
 
 class TestTrainingPipeline:
     def test_dataset_matches_engine_panel(self, tmp_path):
@@ -458,6 +588,48 @@ class TestTrainingPipeline:
             a = engine.bars_df.loc[common, col]
             b = ds.loc[common, col]
             assert (((a - b).abs().fillna(0) < 1e-9) | (a.isna() & b.isna())).all(), col
+
+    def test_guard_samples_match_engine_holding_days(self, tmp_path):
+        """holding 侧同源验收：标签重放的 hold_days 与引擎决策时点的
+        holding_days（debug 快照）逐日一致——日历日口径会跨周末漂移。"""
+        from btcore.factors.library import load_library
+        from btcore.ml import dataset, labels
+
+        strat = build_strategy(
+            _BuyThenSell, {"initial_capital": 1_000_000, "max_positions": 3},
+        )
+        db = str(tmp_path / "hd.db")
+        engine = Engine(strat, DataProvider(MockDataBackend()), db_path=db,
+                        debug=True)
+        engine.run("20240603", "20240614")
+
+        pairs = labels.extract_trade_pairs(db)
+        assert len(pairs) == 1
+        sym = pairs.iloc[0]["symbol"]
+
+        spec = ModelSpec(
+            name="g", artifact="x.onnx",
+            features=["mom20"], raw_features=["turnover_rate"],
+            state_features=["hold_days"],
+        )
+        panel = dataset.build_panel(
+            MockDataBackend(), [sym], "20240603", "20240614",
+            spec, load_library(), benchmark="000300.SH",
+        )
+        samples = labels.build_guard_samples(panel, pairs, spec, lookahead=0)
+
+        conn = sqlite3.connect(db)
+        snaps = {}
+        for d, js in conn.execute("SELECT date, snapshot_json FROM debug_snapshots"):
+            h = json.loads(js)["holdings_detail"].get(sym)
+            if h:
+                snaps[d] = h["holding_days"]
+        conn.close()
+
+        # 跨周末持仓（0604 成交 ~ 0611）：日历日口径在 0610 之后会偏大
+        assert len(samples) >= 5 and samples["hold_days"].max() >= 5
+        for row in samples.itertuples():
+            assert row.hold_days == snaps[row.trade_date], row.trade_date
 
     def test_time_split_embargo(self):
         from btcore.ml.trainer import time_split_masks

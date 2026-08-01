@@ -2,10 +2,13 @@
 
 切分纪律：按 trade_date 排序 80/20，切点之前 horizon 个交易日从训练集
 剔除（embargo），防止标签窗口跨切分点重叠造成泄露。scaler 只在训练段
-拟合。early stopping 用训练段尾部 15% 日期做验证集，测试集只用于评估。
+拟合（缺失感知：nanmean/nanstd）。缺失值在 scaler 之后填 0（= 训练段
+均值，中性），与推理侧 runtime._run_batch 的口径严格一致。early
+stopping 用训练段尾部 15% 日期做验证集，测试集只用于评估。
 """
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -46,12 +49,23 @@ def time_split_masks(
     return (dates <= train_end).to_numpy(), (dates >= test_start).to_numpy()
 
 
-def _fit_scaler(x_train: np.ndarray):
-    from sklearn.preprocessing import StandardScaler
+def _fit_scaler(x_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """缺失感知 StandardScaler，返回 (mean, std)。
 
-    scaler = StandardScaler()
-    scaler.fit(x_train)
-    return scaler
+    nanmean/nanstd 只在非缺失值上拟合；全缺失或零方差列回退 mean=0/std=1。
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # 全缺失列的 nanmean 告警
+        mean = np.nanmean(x_train, axis=0)
+        std = np.nanstd(x_train, axis=0)
+    mean = np.where(np.isnan(mean), 0.0, mean)
+    std = np.where(np.isnan(std) | (std < 1e-10), 1.0, std)
+    return mean, std
+
+
+def _scale(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """标准化并在其后把缺失填 0（= 训练段均值），与推理侧同一口径。"""
+    return np.nan_to_num((x - mean) / std, nan=0.0)
 
 
 def _split_train_val(dates: pd.Series, val_ratio: float = 0.15):
@@ -83,11 +97,12 @@ def train_panel(
     dates = df.index.get_level_values("trade_date").to_series()
 
     train_mask, test_mask = time_split_masks(dates, horizon)
-    x_all = df[feature_cols].astype(np.float64).fillna(0.0).to_numpy()
+    # 保留 NaN：scaler 拟合缺失感知，缺失在 scaler 之后填 0
+    x_all = df[feature_cols].astype(np.float64).to_numpy()
     y_all = df["label"].to_numpy()
 
-    scaler = _fit_scaler(x_all[train_mask])
-    x_scaled = scaler.transform(x_all)
+    mean, std = _fit_scaler(x_all[train_mask])
+    x_scaled = _scale(x_all, mean, std)
 
     x_tr, y_tr = x_scaled[train_mask], y_all[train_mask]
     tr_dates = dates[train_mask]
@@ -121,8 +136,8 @@ def train_panel(
     )
     return TrainResult(
         model=model,
-        scaler_mean=scaler.mean_.tolist(),
-        scaler_std=scaler.scale_.tolist(),
+        scaler_mean=mean.tolist(),
+        scaler_std=std.tolist(),
         metrics=result_metrics,
         n_train=int(train_mask.sum()),
         n_test=int(test_mask.sum()),
@@ -151,11 +166,11 @@ def train_guard(
     dates = samples["trade_date"]
 
     train_mask, test_mask = time_split_masks(dates, lookahead)
-    x_all = samples[feature_cols].astype(np.float64).fillna(0.0).to_numpy()
+    x_all = samples[feature_cols].astype(np.float64).to_numpy()
     y_all = samples["label"].to_numpy().astype(int)
 
-    scaler = _fit_scaler(x_all[train_mask])
-    x_scaled = scaler.transform(x_all)
+    mean, std = _fit_scaler(x_all[train_mask])
+    x_scaled = _scale(x_all, mean, std)
 
     x_tr, y_tr = x_scaled[train_mask], y_all[train_mask]
     tr_dates = dates[train_mask]
@@ -190,9 +205,12 @@ def train_guard(
     )
     return TrainResult(
         model=model,
-        scaler_mean=scaler.mean_.tolist(),
-        scaler_std=scaler.scale_.tolist(),
+        scaler_mean=mean.tolist(),
+        scaler_std=std.tolist(),
         metrics=result_metrics,
         n_train=int(train_mask.sum()),
         n_test=int(test_mask.sum()),
     )
+
+
+

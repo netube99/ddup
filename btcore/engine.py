@@ -114,6 +114,7 @@ class Engine:
         # 重置 run_id: 同一实例重复 run 时, 若本次在 write_run 前抛异常,
         # except 分支不能拿到上一次 run 的 id 去误标 failed
         self.run_id = 0
+        self._warn_in_sample_overlap(start, end)
         conn = database.init_backtest_db(self.db_path)
         try:
             calendar = self.provider.get_calendar(start, end)
@@ -531,6 +532,23 @@ class Engine:
                 symbol, entry_price, bar, holding_days
             )
             match.conditions.validate_condition_types(holding.conditions)
+
+    def _warn_in_sample_overlap(self, start: str, end: str) -> None:
+        """回测窗口与模型训练窗口重叠时告警（样本内乐观偏差风险）。
+
+        仅告警不阻断：walk-forward 复用已训练模型是合法用法。
+        """
+        for spec in self._model_specs:
+            tw = spec.meta.get("train_window") or []
+            if len(tw) != 2:
+                continue
+            t0, t1 = str(tw[0]), str(tw[1])
+            if start <= t1 and end >= t0:
+                logger.warning(
+                    "模型 %s 训练窗口 [%s, %s] 与回测窗口 [%s, %s] 重叠——"
+                    "样本内乐观偏差风险（walk-forward 复用可忽略此告警）",
+                    spec.name, t0, t1, start, end,
+                )
 
     def _inject_holding_model_scores(self, bars_dict: dict) -> None:
         """holding scope 模型逐持仓求值并注入 bar dict（原地）。"""

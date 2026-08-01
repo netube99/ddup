@@ -57,8 +57,14 @@ def _apply_scaler(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
 
 
 def _run_batch(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
-    """批量推理，返回 1-D 分数：分类取正类概率，回归取预测值。"""
+    """批量推理，返回 1-D 分数：分类取正类概率，回归取预测值。
+
+    缺失值（NaN）在 scaler 之后填 0 —— 标准化空间的 0 = 训练段均值，
+    缺失被解释为中性的"平均水准"。若在 scaler 之前填 0，缺失会映射成
+    远离均值的极端输入，让缺失模式主导分数。
+    """
     arr = _apply_scaler(spec, arr.astype(np.float32, copy=False))
+    arr = np.nan_to_num(arr, nan=0.0)
     sess = _get_session(spec.artifact)
     input_name = sess.get_inputs()[0].name
     outputs = sess.run(None, {input_name: arr})
@@ -102,9 +108,14 @@ def materialize_predictions(bars_df: pd.DataFrame, specs: list[ModelSpec]) -> No
                 f"模型 {spec.name} 特征列未物化: {missing} —— "
                 "loader 闭包合并应已覆盖，请检查 models 配置"
             )
-        features = bars_df[cols].astype(np.float64).fillna(0.0).to_numpy()
+        features = bars_df[cols].astype(np.float64).to_numpy()
+        missing_ratio = np.isnan(features).mean(axis=1)
         scores = pd.Series(_run_batch(spec, features), index=bars_df.index)
-        bars_df[spec.column] = _apply_post_transform(scores, spec.post_transform)
+        scores = _apply_post_transform(scores, spec.post_transform)
+        # 与 holding_score 同一护栏：特征缺失过半 → 无分数（NaN）。
+        # 下游截面 rank 把 NaN 置于末位，而不是让缺失模式主导分数
+        scores[missing_ratio > 0.5] = np.nan
+        bars_df[spec.column] = scores
         logger.debug(
             "模型 %s 物化完成: %d 行, post_transform=%s",
             spec.name, len(scores), spec.post_transform,
@@ -145,7 +156,10 @@ def compute_state_features(names: list[str], bar: dict, holding) -> dict[str, fl
 
 
 def holding_score(spec: ModelSpec, bar: dict, holding) -> float | None:
-    """holding scope 模型对单个持仓推理；特征缺失过半返回 None。"""
+    """holding scope 模型对单个持仓推理；特征缺失过半返回 None。
+
+    缺失特征保留 NaN 进 _run_batch，在 scaler 之后填 0（= 训练段均值）。
+    """
     state = compute_state_features(spec.state_features, bar, holding)
     values: list[float] = []
     nan_count = 0
@@ -154,7 +168,7 @@ def holding_score(spec: ModelSpec, bar: dict, holding) -> float | None:
         if v is None:
             v = bar_get(bar, name, None)
         if v is None or (isinstance(v, float) and np.isnan(v)):
-            values.append(0.0)
+            values.append(np.nan)
             nan_count += 1
         else:
             values.append(float(v))

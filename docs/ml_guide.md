@@ -175,8 +175,9 @@ trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
 | `raw` | backend 原始列名列表（如 `turnover_rate`、`pe_ttm`），并入请求列 |
 | `state` | 账户态特征列表，支持 `hold_days`、`ret_from_entry`；非空即 holding scope |
 
-账户态特征定义（训练/推理同一公式）：`hold_days` = 引擎维护的持仓交易日数；
-`ret_from_entry` = 当日 hfq 收盘 / 买入均价 − 1。
+账户态特征定义（训练/推理同一公式）：`hold_days` = 引擎维护的持仓交易日数
+（成交当日 decision 时点为 1，逐交易日 +1；训练侧重放按市场交易日位置
+计算，与引擎逐日一致）；`ret_from_entry` = 当日 hfq 收盘 / 买入均价 − 1。
 
 ### 3.2 `conditions.model_exit`（策略 YAML）
 
@@ -229,8 +230,12 @@ conditions:
 - holding 求值时机：每日 `select` / `calc_conditions` 之前逐持仓注入；
   截面后变换口径 = 当日全部持仓
 - 分数语义：回归模型输出预测值；分类模型输出正类概率
-- 缺失特征按 0 填充；holding 模型当日缺失特征过半则该持仓当天**无分数**
-  （bar 中不出现 `ml_<name>` 键），`model_exit` 不会触发
+- 缺失特征在 scaler 之后按 0 填充（标准化空间的 0 = 训练段均值，缺失被
+  解释为中性）；缺失特征过半则**无分数**：holding 模型该持仓当天无分数
+  （bar 中不出现 `ml_<name>` 键），panel 模型该行分数为 NaN（截面排名末位），
+  `model_exit` 不会触发
+- 回测窗口与 meta `train_window` 重叠时引擎告警（样本内乐观偏差风险）；
+  仅告警不阻断，walk-forward 复用模型属合法用法
 - 引擎 config 键 `ml_log`：`"full"` 时 ml_predictions 表落盘全截面分数；
   缺省只落盘决策相关标的（持仓 + 当日买卖名单 + 条件买单）。
 
@@ -244,7 +249,7 @@ conditions:
 | 特征已含截面算子（`zscore(...)` 等） | `--post-transform none` | 因子表达式内已截面化，避免双重变换 |
 | 原始量纲特征（turnover_rate 等 raw 列） | `--post-transform xs_rank` | 分数跨日可比，与 eval_factor_specs 的 rank 语义一致 |
 | horizon | 与策略调仓周期一致 | 5 日调仓 → `--horizon 5` |
-| lookahead | 期望提前预警的天数 | holding 标签 = 距 TB 亏损离场 ≤ lookahead 天 |
+| lookahead | 期望提前预警的交易日数 | holding 标签 = 距 TB 亏损离场 ≤ lookahead 个交易日 |
 
 后变换口径：`xs_rank` 为逐日截面 pct rank ∈ (0,1]；`xs_zscore` 为逐日截面
 z-score（截面标准差≈0 时置 0）。panel scope 的截面 = 因子计算全域
