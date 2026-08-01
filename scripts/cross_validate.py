@@ -18,6 +18,23 @@ from collections import Counter
 
 import pandas as pd
 
+from btcore.constants import MIN_COMMISSION, STAMP_TAX_RATE
+from btcore.match import conditions as condition_registry
+from btcore.ml import conditions as ml_conditions
+
+# 引擎直写 trade_log 的固定 trigger（不经条件单注册表）
+_ENGINE_TRIGGERS = {"MANUAL", "TARGET", "CORPORATE"}
+
+
+def _expected_triggers() -> set[str]:
+    """预期 trigger = 引擎固定集 ∪ 条件单注册表（含自定义 handler）。
+
+    ml_conditions.register() 幂等，保证 ML_EXIT 在未走 strategy_loader 的
+    独立进程里也在预期集合内。
+    """
+    ml_conditions.register()
+    return _ENGINE_TRIGGERS | condition_registry.registered_condition_types()
+
 
 def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
     """加载回测结果。返回 (trades_df, daily_df, stats_dict)。"""
@@ -46,11 +63,11 @@ def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
     return trades, daily, stats, config, dict(run)
 
 
-def _min_commission_overhead(n_buys: int, capital: float) -> float:
-    """最低佣金导致的固定成本占比。每笔最低 5 元，超过万分之二的部分是惩罚。"""
+def _min_commission_overhead(n_buys: int, capital: float, min_commission: float) -> float:
+    """最低佣金导致的固定成本占比。每笔最低 min_commission 元。"""
     if capital <= 0:
         return 0.0
-    return (n_buys * 5.0) / capital
+    return (n_buys * min_commission) / capital
 
 
 def validate_trades(trades, config, strategy_name="", capital: float = 0):
@@ -79,13 +96,13 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
     trigger_dist = Counter(trades["trigger"].dropna())
     notes.append(f"触发类型分布: {dict(trigger_dist)}")
 
-    # 检查是否有预期外的 trigger 类型
-    expected_triggers = {"MANUAL", "TARGET", "STOP_LOSS", "TAKE_PROFIT",
-                         "TRAILING_TP", "LIMIT_BUY", "BREAKOUT_BUY",
-                         "CORPORATE", "ML_EXIT"}
-    unexpected = set(trigger_dist) - expected_triggers
+    # 预期集合 = 引擎固定 trigger ∪ 条件单注册表（自定义 handler 是
+    # 一等公民，condition_hunter/multi_model 的 DYNAMIC_STOP 等不应误报）
+    unexpected = set(trigger_dist) - _expected_triggers()
     if unexpected:
-        issues.append(f"UNEXPECTED_TRIGGER: 发现未预期的触发类型: {unexpected}")
+        notes.append(
+            f"非内置触发类型（自定义 handler，按 INFO 处理）: {sorted(unexpected)}"
+        )
 
     # 2. 检查买卖比例平衡
     if n_buys > 0 and n_sells > 0:
@@ -116,12 +133,15 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
         notes.append(f"CORPORATE: {len(corp)} 笔公司行为（分红/送转）")
 
     # 6. 小资金专项：交易磨损占比（动态阈值 = 最低佣金开销 + 2%）
+    # 成本口径从 run 的 config 读取（引擎费率可配置，硬编码 5 元/0.05% 会失真）
+    min_commission = float(config.get("min_commission", MIN_COMMISSION))
+    stamp_min = float(config.get("stamp_tax_rate", STAMP_TAX_RATE))
     capital = capital or config.get("initial_capital", 0) or 40000
     if capital > 0:
         cost_ratio = total_costs / capital
-        min_overhead = _min_commission_overhead(n_buys, capital)
+        min_overhead = _min_commission_overhead(n_buys, capital, min_commission)
         # 资本感知阈值：不可避免部分（双向最低佣金 + 印花税底） + 按资金规模的可变上限
-        _stamp_min = 0.0005  # 卖出印花税底
+        _stamp_min = stamp_min  # 卖出印花税底
         if capital <= 50000:
             _variable = 0.03
         elif capital <= 500000:
@@ -258,16 +278,25 @@ def main():
         print("统计指标")
         print("=" * 60)
         key_metrics = [
-            "total_return", "annual_return", "max_drawdown", "sharpe_ratio",
-            "calmar_ratio", "win_rate", "avg_holding_days",
+            ("total_return", "总收益率"),
+            ("annualized_return", "年化收益率"),
+            ("max_drawdown", "最大回撤"),
+            ("sharpe", "夏普比率"),
+            ("calmar", "Calmar 比率"),
+            ("win_rate", "日胜率"),
         ]
-        for k in key_metrics:
+        # 键名必须与 btcore/stats.py 实际输出对齐（历史版本用
+        # annual_return/sharpe_ratio 等旧键名，静默不打印）
+        for k, label in key_metrics:
             if k in stats:
                 v = stats[k]
                 if isinstance(v, float):
-                    print(f"  {k}: {v:.4f}")
+                    print(f"  {label}: {v:.4f}")
                 else:
-                    print(f"  {k}: {v}")
+                    print(f"  {label}: {v}")
+        avg_holding = stats.get("round_trip", {}).get("summary", {}).get("avg_holding_days")
+        if avg_holding is not None:
+            print(f"  平均持有天数: {float(avg_holding):.2f}")
 
         # 交易磨损
         friction = stats.get("trading_friction", {})

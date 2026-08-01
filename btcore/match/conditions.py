@@ -38,6 +38,11 @@ def register_buy_condition_handler(condition_type: str, handler):
     _BUY_DISPATCH[condition_type] = handler
 
 
+def registered_condition_types() -> set[str]:
+    """已注册的条件单类型（卖出 + 买入），供 cross_validate 等消费。"""
+    return set(_DISPATCH) | set(_BUY_DISPATCH)
+
+
 def validate_condition_types(conditions: list[dict]) -> None:
     """检查每个 condition 的 type 是否已注册、必填键是否齐全；未通过立即抛错。
 
