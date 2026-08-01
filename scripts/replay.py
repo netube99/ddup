@@ -10,13 +10,24 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description="回放回测交易决策")
     parser.add_argument("db", help="result.db 路径")
-    parser.add_argument("--run-id", type=int, default=1)
+    parser.add_argument("--run-id", type=int, default=None,
+                        help="run_id（缺省取最新 run）")
     parser.add_argument("--symbol", help="过滤股票代码")
     parser.add_argument("--date", help="过滤日期 YYYYMMDD")
     parser.add_argument("--list-symbols", action="store_true", help="列出有快照的日期")
     args = parser.parse_args()
 
     conn = sqlite3.connect(args.db)
+    if args.run_id is None:
+        try:
+            row = conn.execute("SELECT MAX(run_id) FROM runs").fetchone()
+        except sqlite3.OperationalError:
+            row = None  # 旧库无 runs 表，回退 run 1
+        if not row or row[0] is None:
+            print("结果库中无 run 记录", file=sys.stderr)
+            sys.exit(1)
+        args.run_id = row[0]
+
     query = "SELECT date, snapshot_json FROM debug_snapshots WHERE run_id = ?"
     params = [args.run_id]
     if args.date:

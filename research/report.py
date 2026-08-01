@@ -10,7 +10,6 @@
 """
 
 import html
-import re
 import sqlite3
 
 import numpy as np
@@ -20,15 +19,20 @@ from btcore import database, stats
 
 _PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"]
 _STOCK_NAME_CACHE: dict[str, str] = {}
+_STOCK_NAMES_LOADED = False
 
 
 def _load_stock_names() -> dict[str, str]:
-    """从 tushare market.db 加载 ts_code → 股票名称映射（含指数名）。"""
-    global _STOCK_NAME_CACHE
-    if _STOCK_NAME_CACHE:
+    """从 tushare market.db 加载 ts_code → 股票名称映射（含指数名）。
+
+    负结果也缓存（库缺失/查询失败时不再逐行重试连接）。
+    """
+    global _STOCK_NAME_CACHE, _STOCK_NAMES_LOADED
+    if _STOCK_NAMES_LOADED:
         return _STOCK_NAME_CACHE
     market_db = _market_db_path()
     if not market_db:
+        _STOCK_NAMES_LOADED = True
         return {}
     try:
         conn = sqlite3.connect(f"file:{market_db}?mode=ro", uri=True)
@@ -41,16 +45,17 @@ def _load_stock_names() -> dict[str, str]:
         conn.close()
     except Exception:
         pass
+    _STOCK_NAMES_LOADED = True
     return _STOCK_NAME_CACHE
 
 
 def _market_db_path() -> str | None:
-    from pathlib import Path
-    adapter = Path(__file__).resolve().parents[1] / "adapters" / "tushare.py"
-    with open(adapter) as f:
-        content = f.read()
-    m = re.search(r'_DEFAULT_DB_PATH\s*=\s*"([^"]+)"', content)
-    return m.group(1) if m else None
+    """默认行情库路径：直接 import adapter 函数（不再正则解析源码）。"""
+    try:
+        from adapters.tushare import get_default_db_path
+        return get_default_db_path()
+    except (ImportError, AttributeError):
+        return None
 
 
 def _benchmark_name(code: str | None) -> str:
@@ -86,6 +91,12 @@ def load_runs(db_path: str, run_ids: list[int] | None = None) -> list[dict]:
         runs = []
         for meta in runs_df.to_dict("records"):
             adf, tdf, stats_dict = database.read_run_data(conn, meta["run_id"])
+            benchmark_nav = None
+            benchmark_code = None
+            if isinstance(stats_dict, dict):
+                # benchmark_nav/benchmark_code 随 stats_json 落库（引擎侧写入）
+                benchmark_nav = stats_dict.pop("benchmark_nav", None)
+                benchmark_code = stats_dict.pop("benchmark_code", None)
             if stats_dict is None and not adf.empty:
                 stats_dict = stats.calculate_statistics(adf, tdf)
             runs.append({
@@ -93,6 +104,8 @@ def load_runs(db_path: str, run_ids: list[int] | None = None) -> list[dict]:
                 "account_daily": adf,
                 "trade_log": tdf,
                 "statistics": stats_dict or {},
+                "benchmark_nav": benchmark_nav,
+                "benchmark_code": benchmark_code,
             })
         return runs
     finally:
@@ -519,6 +532,8 @@ def generate_report_from_db(db_path: str, out_path: str, run_id: int | None = No
         "account_daily": run["account_daily"],
         "trade_log": run["trade_log"],
         "statistics": run["statistics"],
+        "benchmark_nav": run.get("benchmark_nav"),
+        "benchmark_code": run.get("benchmark_code"),
     }
     title = (
         f"回测报告 {meta.get('strategy', '')} "

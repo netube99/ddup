@@ -60,6 +60,10 @@ python scripts/run.py <策略YAML> --start YYYYMMDD --end YYYYMMDD \
 | `debug_snapshots` | debug 模式逐日决策快照（供 `replay.py`） |
 | `ml_predictions` | ML 模型逐日打分 |
 
+trade_log 的 `side` 除 BUY/SELL 外还有两类公司行为行：`DIV`（现金分红，shares=0）
+与 `STK_DIV`（送转增股，shares=送转后总股数，`trigger=CORPORATE`）。送转行是
+stats 往返盈亏 / Brinson 持仓重建 / ML 回合配对重建持股事实的必需输入，勿删。
+
 ```bash
 # 最简调用：内存运行 + 自动报告
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
@@ -82,10 +86,15 @@ python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
 | `factors` | 逗号分隔因子名（来自 `factors/library.yaml`），位置参数；使用 `--model` 时可省略 |
 | `--model` | ML 模型 ONNX 路径；模型分数物化为 `ml_<name>` 列后与因子同口径评估（仅支持 panel scope，详见 [ml_guide.md](./ml_guide.md)） |
 | `--start` / `--end` | **必填** |
-| `--universe` | 股票池：简称 `CSI300`/`CSI500`/`CSI1000`（对应 000300.SH/000905.SH/000852.SH）或其他指数代码（原样透传）；默认全市场。取成分快照并集（回溯范围含起始日前 45 天，覆盖成分调整滞后） |
+| `--universe` | 股票池：简称 `CSI300`/`CSI500`/`CSI1000`（对应 000300.SH/000905.SH/000852.SH）或其他指数代码（原样透传）；默认全市场。取成分快照并集为候选池，因子面板上再按 **point-in-time 成分**逐日过滤（与引擎逐日计算域、ml_train 训练域一致） |
 | `--forward` | 前瞻收益天数，默认 5 |
 | `--decay` | IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）；不能与非默认的 `--forward` 同用 |
 | `--n-quantiles` | 分层回测档数，默认 5 |
+
+**口径与引擎同源**：
+
+- 因子取值前伸 warmup 窗口（`fplan.main_days`，与引擎 preload 一致），滚动因子在评估窗口头部即有值，不再静默 NaN
+- 坍缩因子（市场广度，如 `pct_above_ma20`）走全市场流式 `compute_breadth`，与引擎广度面板同口径；被其他因子表达式引用时会 fail-fast 提示（不支持嵌套坍缩）
 
 **默认模式输出**（终端三段）：
 
@@ -160,7 +169,7 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 
 | 检查项 | 告警条件 |
 |--------|---------|
-| 交易触发类型分布 | 出现预期外 trigger（预期集合：MANUAL / TARGET / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / LIMIT_BUY / BREAKOUT_BUY / CORPORATE / ML_EXIT） |
+| 交易触发类型分布 | 出现预期外 trigger。预期集合 = 引擎固定集（MANUAL/TARGET/CORPORATE）∪ 条件单注册表（含策略自定义 handler，如 DYNAMIC_STOP）；注册表之外的 trigger 降级为 INFO 提示（自定义 handler 只在策略进程注册，独立运行本脚本看不到） |
 | 买卖比例平衡 | 卖出/买入比 > 3 或 < 0.3 |
 | 同日买卖冲突 | 同日同票既有 BUY 又有 SELL |
 | 交易磨损/资金比 | 超动态阈值（最低佣金开销×2 + 印花税底 + 按资金规模的可变上限）；资金 ≤5 万时降级为 INFO |
@@ -170,7 +179,7 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 | 现金非负 | 存在负现金日 |
 | 公司行为 / 卖出分类统计 | CORPORATE 笔数、按 trigger 分组的卖出次数/均额/总盈亏（INFO 输出） |
 
-同时打印 stats 中的关键指标与交易磨损明细。
+同时打印 stats 中的关键指标（键名与 stats 实际输出对齐：年化收益率/夏普/Calmar/平均持有天数等）与交易磨损明细；磨损阈值的最低佣金与印花税底从 run 的 config 读取（引擎费率可配置时不再失真）。
 
 ### 2.6 `sweep.py` — 参数扫描批量回测
 
@@ -196,9 +205,9 @@ params:
   config.max_positions: [5, 10]
 ```
 
-**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程调用 `run.py` 执行；失败组合打印 FAIL 并跳过，不中断扫描。
+**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程调用 `run.py` 执行（`--no-report` 关闭浪费的 HTML 生成）；失败组合打印 FAIL 并跳过，不中断扫描。
 
-**输出**：结果写入 `--out` 库的 `sweep_results` 表（`id, label, params_json, stats_json`，stats_json 内含 label 与 params 字段）；终端按 收益/Sharpe/MDD 列打印汇总表。
+**输出**：每组参数作为**标准 run** 写入 `--out` 库的 `runs` 表（`config_json` 含参数，`compare.py`/`report.py` 原生可读）；同时写 `sweep_results` 表（`id, label, params_json, stats_json`，stats_json 内含 label 与 params 字段）保留参数标签汇总；终端按 收益/Sharpe/MDD 列打印汇总表。
 
 参数展开逻辑可复用：
 
@@ -219,7 +228,7 @@ python scripts/replay.py <result.db> [--run-id N] [--symbol SYM] [--date YYYYMMD
 | 参数 | 说明 |
 |------|------|
 | `db` | 结果库路径，**必填** |
-| `--run-id` | 指定 run_id，默认 1 |
+| `--run-id` | 指定 run_id，缺省取**最新 run**（与其他 CLI 一致） |
 | `--symbol` | 过滤股票代码（该票当日无快照的日期跳过） |
 | `--date` | 过滤日期 YYYYMMDD |
 | `--list-symbols` | 按日期列出当日有快照的标的，不输出详细上下文 |
@@ -239,21 +248,24 @@ python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
 从行情数据库一次性导出 Brinson 归因所需 parquet，供 `brinson_attribute_from_files()` 离线归因（见 6.4）。
 
 ```bash
-python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data]
+python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
+    [--index 000300.SH] [--start YYYYMMDD --end YYYYMMDD] [--result-db 回测库]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `provider_db` | tushare 行情数据库路径，**必填** |
 | `--out` | 输出目录，默认 `brinson_data` |
+| `--index` | 基准指数代码，默认 `000300.SH`。**必须指定**：index_weight 表含多个指数，不过滤会把全部指数混成一个基准 |
+| `--start` / `--end` | 日期范围（可选，缺省导出全表） |
+| `--result-db` | 回测结果库；提供且同时给 `--start`/`--end` 时自动导出 `bars.parquet`（该库交易过的股票在区间内的 close/pct_chg） |
 
 | 输出文件 | 内容 | 结构 |
 |---------|------|------|
 | `industry_map.parquet` | 股票→申万 L1 行业 | 列 `ts_code, l1_name` |
 | `sw_returns.parquet` | 行业日收益 | index=trade_date，columns=行业名，值为小数（已除以 100） |
-| `benchmark_weights.parquet` | 基准行业权重 | index=trade_date，columns=行业名，每日归一化到和为 1 |
-
-bars 数据不在导出范围内，需自行从行情库或回测库导出（要求见 6.4）。
+| `benchmark_weights.parquet` | 基准行业权重（单指数） | index=trade_date，columns=行业名，每日归一化到和为 1 |
+| `bars.parquet` | 个股 bars（仅 `--result-db` 时导出） | MultiIndex (trade_date, symbol)，列 close/pct_chg |
 
 ### 2.9 开发/性能工具（一句话索引）
 
@@ -453,6 +465,13 @@ result = brinson_attribute(
 
 **数据不足时不抛异常**，返回 `{"error": "原因", "summary": {}, "industry_detail": {}, "daily": [], "exposure_summary": {}}`（如 trade_log 无记录、bars 为空、sw_daily 无数据等），调用方需先检查 `"error"` 键。
 
+**口径（2026-08 版本）**：
+
+- 持仓沿交易日逐日结转——无成交日不丢（买入持有 N 天贡献 N 天归因）；`summary.total_portfolio_return` 是逐日策略收益之和，与回测真实收益在同一量级
+- 基准行业权重快照（约每月 2 次）**向前填充到日频**：快照延续至下次调整，首个快照前的日期因无已知基准构成而排除
+- 基准收益按**全部基准行业**累加（含策略从未持有的行业）；`portfolio_return` 为全部持仓的市值加权收益，无行业映射/缺 bar 的部分计入 `unexplained`
+- `start/end` 与 run 实际区间不一致时告警：持仓自 run 起点重建（期初建仓不被丢失），归因统计按用户区间；数据来自旧版 dump（混指数）的 parquet 结果不可比，请重新导出
+
 ### 6.4 `brinson_attribute_from_files`（离线 parquet）
 
 ```python
@@ -475,7 +494,7 @@ result = brinson_attribute_from_files(
 | `benchmark_weights` | parquet，index=trade_date，columns=行业名，值 0~1 |
 | `bars` | 个股 bars parquet：MultiIndex `(trade_date, symbol)`，或含 `trade_date, symbol` 列（自动 set_index）；须含 `close, pct_chg` |
 
-前三个 parquet 用 `scripts/dump_brinson_data.py` 导出；bars 需自行导出。任一文件不存在抛 `FileNotFoundError`。返回值结构与 6.3 相同（含 `"error"` 键约定）。
+前三个 parquet 用 `scripts/dump_brinson_data.py` 导出（`--index` 指定基准指数）；提供 `--result-db` 与 `--start`/`--end` 时 dump 自动导出 `bars.parquet`，否则 bars 需自行导出。任一文件不存在抛 `FileNotFoundError`。返回值结构与 6.3 相同（含 `"error"` 键约定）。
 
 ---
 
@@ -499,8 +518,9 @@ python scripts/report.py results/v1.db --out results/v1_report.html
 ### 7.2 参数扫描与多 run 对比
 
 ```bash
-# 方式一：sweep 一键扫描（参数值列表展开）
+# 方式一：sweep 一键扫描（参数值列表展开；每组参数是标准 run，可直接 compare）
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
+python scripts/compare.py results/sweep.db --html results/sweep_compare.html
 
 # 方式二：手动多次 run 写入同一结果库（适用于策略文件不同的场景）
 python scripts/run.py cfg_top5.yaml  --start 20240101 --end 20240630 --out results/sweep.db --no-report
@@ -560,7 +580,7 @@ best = combine_factors(factor_df, fwd_ret, method="icir")  # 供策略使用
 | `python scripts/cross_validate.py <db>` | 交叉验证（退出码=问题数） |
 | `python scripts/sweep.py <sweep.yaml> --start D --end D` | 参数扫描 |
 | `python scripts/replay.py <db> [--symbol S] [--date D]` | 交易决策回放 |
-| `python scripts/dump_brinson_data.py <行情库> [--out dir]` | 导出 Brinson 归因数据 |
+| `python scripts/dump_brinson_data.py <行情库> [--index X] [--result-db db --start D --end E]` | 导出 Brinson 归因数据（单指数基准 + 可选 bars） |
 
 ### 研究库 API 速查
 
@@ -588,7 +608,7 @@ best = combine_factors(factor_df, fwd_ret, method="icir")  # 供策略使用
 | `--start / --end` | run, factor_eval, sweep, bench | YYYYMMDD 日期范围，必填 |
 | `--out` | run, sweep, report, dump_brinson_data | 输出路径（DB / HTML / 目录） |
 | `--report` / `--no-report` | run | HTML 报告路径（缺省 auto）/ 关闭报告 |
-| `--run-id` | report, cross_validate, replay | 指定 run（report/cross_validate 缺省最新，replay 默认 1） |
+| `--run-id` | report, cross_validate, replay | 指定 run（均缺省取最新） |
 | `--capital` | run, sweep, cross_validate | 初始资金（cross_validate 中用于动态阈值） |
 | `--universe` | factor_eval | CSI300/CSI500/CSI1000 或指数代码，默认全市场 |
 | `--forward` / `--decay` | factor_eval | 前瞻天数（默认 5）/ IC 衰减模式 |

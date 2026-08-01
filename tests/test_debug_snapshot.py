@@ -138,3 +138,62 @@ class TestEngineDebugMode:
             assert "total_value" in snap["account"]
         finally:
             conn.close()
+
+
+class TestReplayDefaultRun:
+    """replay.py --run-id 缺省取最新 run（与其他 CLI 一致）。"""
+
+    @staticmethod
+    def _run_engine(db_path, start, end):
+        from btcore.strategy import Strategy
+
+        class SimpleDebugStrategy(Strategy):
+            REQUIRED_FIELDS = ["open", "high", "low", "close", "vol", "adj_factor"]
+
+            def __init__(self, **kw):
+                super().__init__(config=kw.pop("config", {}), **kw)
+
+            def on_start(self, provider, first_date, end_date=None):
+                pass
+
+            def select(self, bars, snapshot, provider) -> dict:
+                return {"buy": [], "sell": []}
+
+            def calc_conditions(self, symbol, entry_price, bar, holding_days) -> list[dict]:
+                return []
+
+        provider = DataProvider(MockDataBackend())
+        strategy = SimpleDebugStrategy(
+            config={"max_positions": 5, "initial_capital": 100000},
+        )
+        engine = Engine(
+            strategy=strategy, provider=provider, db_path=db_path,
+            initial_capital=100000, debug=True,
+        )
+        engine.run(start, end)
+
+    def test_default_uses_latest_run(self, tmp_path):
+        import subprocess
+        import sys
+
+        db_path = str(tmp_path / "replay.db")
+        self._run_engine(db_path, "20240603", "20240605")
+        self._run_engine(db_path, "20240606", "20240607")
+
+        # 缺省 → 最新 run（20240606~07）
+        r = subprocess.run(
+            [sys.executable, "scripts/replay.py", db_path, "--list-symbols"],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert "20240606" in r.stdout
+        assert "20240603" not in r.stdout
+
+        # 显式 run 1 → 旧 run
+        r1 = subprocess.run(
+            [sys.executable, "scripts/replay.py", db_path, "--run-id", "1",
+             "--list-symbols"],
+            capture_output=True, text=True,
+        )
+        assert "20240603" in r1.stdout
+        assert "20240606" not in r1.stdout

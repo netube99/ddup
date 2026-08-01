@@ -176,7 +176,7 @@ breadth = compute_breadth("mkt_breadth20", backend, "20240101", "20240630")
 | 测试一个新想法是否有效 | `run.py` 单点 |
 | 已知方向有效，找最优参数 | `sweep.py` 网格扫描 |
 | 验证参数敏感性 | `sweep.py`（点路径语法展开参数空间，`--dry-run` 预览组合） |
-| 引擎/因子机制改动后回归 | `smoke_test_all.py` |
+| 引擎/因子机制改动后回归 | `pytest tests/ -q`（全量；引擎改动另跑 `check_anticorrupt.py`） |
 
 ### 4.5 因子研究四大陷阱
 
@@ -365,8 +365,8 @@ strategies/exploring/{strategy_name}/
 
 ### 8.3 代码质量检查
 - 每次修改后 `ast.parse()` 验证语法
-- 修改 `factors/library.yaml` 后跑 `python scripts/smoke_test_all.py`
-  （基于 fixtures 的冒烟测试集，无参数，直接运行）
+- 修改 `factors/library.yaml` 后跑 `uv run pytest tests/ -q`
+  （因子库/物化机制由 pytest 全量覆盖，无需额外冒烟脚本）
 - 新策略 `REQUIRED_FIELDS` 必须声明所有命令式访问的列（未声明的列
   不会 preload，`select()` 中访问即 KeyError）
 - `factor_specs` 中仅用于 `calc_conditions`/`on_tick` 但不参与排名的因子，

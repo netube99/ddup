@@ -199,9 +199,8 @@ idx_factor_pro（基准）等表映射 + aux_tables（moneyflow/cyq_perf/margin_
 | sweep.py | :47 | 参数扫描批量回测（点路径语法展开参数空间） |
 | replay.py | :10 | 交易决策回放（消费 debug_snapshots） |
 | cross_validate.py | :213 | 回测结果交叉验证（validate_trades :56 / validate_daily :178） |
-| check_anticorrupt.py | :205 | 反破坏 linter（7 项结构检查，提交前必过） |
+| check_anticorrupt.py | :205 | 反破坏 linter（13 项结构检查，提交前必过） |
 | dump_fixtures.py / dump_brinson_data.py | :54 / :10 | fixtures 再生成 / 归因数据导出 |
-| smoke_test_all.py | :523 | 改进项冒烟测试集 |
 | bench_universe_preload.py | :70 | universe preload 性能基准 |
 
 ---

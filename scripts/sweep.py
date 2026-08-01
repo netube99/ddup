@@ -3,6 +3,9 @@
 
 用法:
     python scripts/sweep.py sweep_config.yaml --start 20240101 --end 20240630 --out sweep_result.db
+
+每组参数作为标准 run 写入 --out 库的 runs 表（config_json 含参数），
+compare.py / report.py 原生可读；sweep_results 表保留参数标签汇总。
 """
 
 import argparse
@@ -88,14 +91,15 @@ def main():
             with open(tmp_config, "w") as f:
                 yaml.dump(base_config, f, allow_unicode=True)
 
-            # 运行回测
-            tmp_db = tmpdir / f"result_{i}.db"
+            # 运行回测：每组参数作为标准 run 写入同一输出库（runs 表，
+            # compare.py/report.py 原生可读）；同时生成 HTML 报告纯属浪费
             cmd = [
                 sys.executable, "scripts/run.py",
                 str(tmp_config),
                 "--start", args.start,
                 "--end", args.end,
-                "--out", str(tmp_db),
+                "--out", str(out_path),
+                "--no-report",
             ]
             if args.capital is not None:
                 cmd.extend(["--capital", str(args.capital)])
@@ -105,21 +109,20 @@ def main():
                 print(f"  FAIL: {result.stderr[:200]}")
                 continue
 
-            # 聚合结果：读取 stats_json，附加参数标签
+            # 聚合结果：读取刚写入的 run 的 stats_json，附加参数标签
             try:
-                tmp_conn = sqlite3.connect(str(tmp_db))
-                stats_json = tmp_conn.execute(
-                    "SELECT stats_json FROM runs WHERE run_id = 1"
+                out_conn = sqlite3.connect(str(out_path))
+                row = out_conn.execute(
+                    "SELECT stats_json FROM runs "
+                    "ORDER BY run_id DESC LIMIT 1"
                 ).fetchone()
-                tmp_conn.close()
 
-                if stats_json:
-                    stats = json.loads(stats_json[0])
+                if row and row[0]:
+                    stats = json.loads(row[0])
                     stats["label"] = label
                     stats["params"] = {str(k): v for k, v in params.items()}
 
-                    # 写入输出数据库
-                    out_conn = sqlite3.connect(str(out_path))
+                    # 汇总表（兼容旧 CLI 输出；归因/对比请直接用 runs 表）
                     out_conn.execute(
                         "CREATE TABLE IF NOT EXISTS sweep_results ("
                         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -132,12 +135,12 @@ def main():
                          json.dumps(stats, default=str)),
                     )
                     out_conn.commit()
-                    out_conn.close()
 
                     total_return = stats.get("total_return", 0)
                     sharpe = stats.get("sharpe", 0)
                     mdd = stats.get("max_drawdown", 0)
                     print(f"  OK: return={total_return:.1%} sharpe={sharpe:.2f} mdd={mdd:.1%}")
+                out_conn.close()
             except Exception as e:
                 print(f"  ERROR aggregating: {e}")
 
