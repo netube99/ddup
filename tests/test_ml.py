@@ -22,17 +22,21 @@ from tests.conftest import MockDataBackend
 
 def _write_meta(path, **over):
     meta = {
-        "version": 2,
+        "version": 3,
         "name": path.stem,
         "features": {"factors": ["mom20"], "raw": ["turnover_rate"]},
         "state_features": [],
         "post_transform": "xs_rank",
         "label": {"type": "xs_fwdret", "horizon": 5},
         "train_window": ["20240101", "20240630"],
-        "scaler_mean": [0.0, 0.0],
-        "scaler_std": [1.0, 1.0],
     }
     meta.update(over)
+    n_feat = (
+        len(meta["features"]["factors"]) + len(meta["features"]["raw"])
+        + len(meta["state_features"])
+    )
+    meta.setdefault("scaler_mean", [0.0] * n_feat)
+    meta.setdefault("scaler_std", [1.0] * n_feat)
     path.write_text(json.dumps(meta))
 
 
@@ -83,6 +87,22 @@ class TestModelSpec:
         art.write_bytes(b"x")
         _write_meta(tmp_path / "a.meta.json", version=1)
         with pytest.raises(ValueError, match="meta 版本"):
+            ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
+
+    def test_old_meta_v2_rejected(self, tmp_path):
+        """v2 meta（ret_from_entry 旧口径）一律拒绝——必须重新训练。"""
+        art = tmp_path / "a.onnx"
+        art.write_bytes(b"x")
+        _write_meta(tmp_path / "a.meta.json", version=2)
+        with pytest.raises(ValueError, match="需要 version=3"):
+            ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
+
+    def test_scaler_dim_mismatch_rejected(self, tmp_path):
+        """scaler 维度与特征契约不一致 = 静默错分，加载期 fail-fast。"""
+        art = tmp_path / "a.onnx"
+        art.write_bytes(b"x")
+        _write_meta(tmp_path / "a.meta.json", scaler_mean=[0.0, 0.0, 0.0])
+        with pytest.raises(ValueError, match="scaler_mean 维度"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
     def test_yaml_meta_feature_mismatch(self, tmp_path):
@@ -187,6 +207,20 @@ class TestLoaderIntegration:
         ok = _validate_conditions({"model_exit": [{"model": "m", "threshold": 0.6}]})
         assert ok["model_exit"][0]["model"] == "m"
 
+    def test_model_exit_post_transform_warns(self, tmp_path, caplog):
+        """model_exit 引用 post_transform != none 的模型时告警（阈值语义错位）。"""
+        art = tmp_path / "m.onnx"
+        art.write_bytes(b"x")
+        _write_meta(tmp_path / "m.meta.json", state_features=["hold_days"],
+                    post_transform="xs_rank")
+        with caplog.at_level(logging.WARNING, logger="btcore.strategy_loader"):
+            build_strategy(
+                self._cls(),
+                {"conditions": {"model_exit": [{"model": "m", "threshold": 0.6}]}},
+                models={"m": {"artifact": str(art)}},
+            )
+        assert any("post_transform" in r.message for r in caplog.records)
+
 
 # ── holding scope 标签重放 / scaler 口径（无 ONNX 依赖）──
 
@@ -240,6 +274,136 @@ class TestGuardSamplesBasis:
         mean2, std2 = _fit_scaler(np.full((3, 1), np.nan))
         assert mean2[0] == 0.0 and std2[0] == 1.0
 
+    def test_fit_scaler_inf_robust(self):
+        """±inf 在 scaler 拟合前归一为 NaN，不污染 mean/std。"""
+        from btcore.ml.trainer import _fit_scaler
+
+        x = np.array([[1.0, np.inf], [3.0, 2.0], [5.0, np.nan]])
+        mean, std = _fit_scaler(x)
+        assert np.isfinite(mean).all() and np.isfinite(std).all()
+        assert mean[1] == pytest.approx(2.0)
+
+    def test_pit_training_domain(self):
+        """PIT 训练域：每行取 ≤ 当日最近成分快照；训练域 = 引擎逐日计算域。"""
+        from btcore.ml.dataset import apply_pit_membership
+
+        idx = pd.MultiIndex.from_tuples(
+            [(d, s) for d in ["20240603", "20240604", "20240605"]
+             for s in ["A", "B", "C"]],
+            names=["trade_date", "symbol"],
+        )
+        panel = pd.DataFrame({"mom20": [1.0] * 9}, index=idx)
+        members = {"20240603": {"A", "B"}, "20240605": {"A", "B", "C"}}
+        out = apply_pit_membership(panel, members)
+        # 0603/0604 按 0603 快照（C 不在）；0605 按当日快照（C 在）
+        assert set(out.loc["20240603"].index) == {"A", "B"}
+        assert set(out.loc["20240604"].index) == {"A", "B"}
+        assert set(out.loc["20240605"].index) == {"A", "B", "C"}
+        # 无成员配置 → 原样返回
+        assert len(apply_pit_membership(panel, None)) == len(panel)
+
+
+class TestTradePairRounds:
+    """extract_trade_pairs 回合语义：不限买入 trigger、多买多卖、残缺跳过。"""
+
+    @staticmethod
+    def _db(tmp_path, rows):
+        p = tmp_path / "trades.db"
+        conn = sqlite3.connect(p)
+        conn.execute(
+            "CREATE TABLE trade_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " date TEXT, symbol TEXT, side TEXT, trigger TEXT, price REAL,"
+            " shares INTEGER, net_amount REAL)"
+        )
+        for date, sym, side, trig, price, shares in rows:
+            net = price * shares * (1 if side == "SELL" else -1)
+            conn.execute(
+                "INSERT INTO trade_log (date, symbol, side, trigger, price,"
+                " shares, net_amount) VALUES (?,?,?,?,?,?,?)",
+                (date, sym, side, trig, price, shares, net),
+            )
+        conn.commit()
+        conn.close()
+        return str(p)
+
+    def test_target_buy_round_paired(self, tmp_path):
+        """TARGET 买入回合不再静默蒸发。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "TARGET", 10.0, 100),
+            ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
+        ])
+        pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        r = pairs.iloc[0]
+        assert r["trigger"] == "TREND_BREAK" and r["pnl"] == -100.0
+
+    def test_condition_buy_round_paired(self, tmp_path):
+        """条件买入回合（AGENTS.md 推荐触发范式）同样计入。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "BREAKOUT_BUY", 10.0, 100),
+            ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
+        ])
+        assert len(extract_trade_pairs(db)) == 1
+
+    def test_partial_sells_one_round(self, tmp_path):
+        """买 1000 两次部分卖 500/500 → 1 回合，pnl 为两笔合计，trigger 取末笔。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 1000),
+            ("20240105", "X", "SELL", "MANUAL", 9.0, 500),
+            ("20240110", "X", "SELL", "TREND_BREAK", 8.0, 500),
+        ])
+        pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        r = pairs.iloc[0]
+        assert r["pnl"] == -1500.0  # 9000 + 4000 - 10000（费用不计）
+        assert r["trigger"] == "TREND_BREAK"  # 末笔卖出
+        assert r["buy_date"] == "20240102" and r["sell_date"] == "20240110"
+
+    def test_pyramiding_weighted_avg_price(self, tmp_path):
+        """回合内多次买入：buy_price 为股数加权均价。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            ("20240103", "X", "BUY", "MANUAL", 12.0, 100),
+            ("20240110", "X", "SELL", "MANUAL", 11.0, 200),
+        ])
+        pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        assert pairs.iloc[0]["buy_price"] == pytest.approx(11.0)
+        assert pairs.iloc[0]["pnl"] == pytest.approx(0.0)
+
+    def test_dangling_sell_skipped_with_warning(self, tmp_path, caplog):
+        """卖无买：跳过并告警（静默丢弃会产出错误标签）。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "SELL", "MANUAL", 9.0, 100),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 0
+        assert any("卖出无对应买入" in r.message for r in caplog.records)
+
+    def test_oversell_round_skipped(self, tmp_path, caplog):
+        """卖出超过买入股数：残缺回合跳过并告警。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            ("20240110", "X", "SELL", "MANUAL", 9.0, 150),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 0
+        assert any("卖出股数超过买入" in r.message for r in caplog.records)
+
 
 # ── ONNX 相关用例 ──
 
@@ -262,7 +426,7 @@ from btcore.strategy_tools import (  # noqa: E402
 
 
 def _make_model(tmp_path, name="m", n_features=2, state=(), post="none"):
-    """训练一个可复现的小模型并导出 ONNX + meta v2。"""
+    """训练一个可复现的小模型并导出 ONNX + meta v3。"""
     from xgboost import XGBClassifier, XGBRegressor
 
     rng = np.random.RandomState(7)
@@ -382,6 +546,78 @@ class TestRuntime:
         )
         assert state["hold_days"] == 7.0
         assert state["ret_from_entry"] == pytest.approx(0.2)
+
+    def test_ret_from_entry_raw_price_basis(self):
+        """ret_from_entry 裸价口径：复权因子/除权日不产生假信号。"""
+        from tests.conftest import make_bar, make_holding
+
+        h = make_holding(entry_price=10.0, holding_days=5)
+        # adj=3（历史分红）走平市场：旧 hfq 口径 +200%，裸价口径应为 0
+        st = ml_runtime.compute_state_features(
+            ["ret_from_entry"], make_bar(close=10.0, close_hfq=30.0), h,
+        )
+        assert st["ret_from_entry"] == pytest.approx(0.0)
+        # 除权日裸价不动 → 特征不变（hfq 口径会跳变 2.0 → 1.85）
+        st2 = ml_runtime.compute_state_features(
+            ["ret_from_entry"], make_bar(close=10.0, close_hfq=28.5), h,
+        )
+        assert st2["ret_from_entry"] == pytest.approx(0.0)
+        # 缺 close_hfq 列时口径不再翻转
+        st3 = ml_runtime.compute_state_features(
+            ["ret_from_entry"], {"close": 10.0}, h,
+        )
+        assert st3["ret_from_entry"] == pytest.approx(0.0)
+        # 真实收益仍正确
+        st4 = ml_runtime.compute_state_features(
+            ["ret_from_entry"], make_bar(close=12.0, close_hfq=36.0), h,
+        )
+        assert st4["ret_from_entry"] == pytest.approx(0.2)
+
+    def test_holding_scores_batch_matches_single(self, tmp_path):
+        """批量推理与逐持仓单行推理逐值一致，缺失护栏同行为。"""
+        art = _make_model(
+            tmp_path, name="g", n_features=4,
+            state=("hold_days", "ret_from_entry"),
+        )
+        spec = ModelSpec.from_dict("g", {"artifact": str(art)}, str(tmp_path))
+        from tests.conftest import make_bar, make_holding
+
+        bars = [
+            make_bar(close=11.0, close_hfq=11.0, mom20=1.0, turnover_rate=1.0),
+            make_bar(close=10.5, close_hfq=10.5, mom20=0.5, turnover_rate=0.8),
+        ]
+        holds = [
+            make_holding(entry_price=10.0, holding_days=5),
+            make_holding(entry_price=9.0, holding_days=2),
+        ]
+        batch = ml_runtime.holding_scores_batch(spec, bars, holds)
+        single = [
+            ml_runtime.holding_score(spec, b, h) for b, h in zip(bars, holds)
+        ]
+        for a, b in zip(batch, single):
+            if a is None or b is None:
+                assert a is None and b is None
+            else:
+                assert a == pytest.approx(b, abs=1e-9)
+        # 缺失过半的行在批量路径同样返回 None（3/4 缺失，模型输入 4 维）
+        art2 = tmp_path / "g2.onnx"
+        art2.write_bytes(art.read_bytes())
+        _write_meta(
+            tmp_path / "g2.meta.json", name="g2",
+            features={"factors": ["mom20"],
+                      "raw": ["turnover_rate", "pe_ttm"]},
+            state_features=["hold_days"], post_transform="none",
+        )
+        spec2 = ModelSpec.from_dict("g2", {"artifact": str(art2)}, str(tmp_path))
+        bad_bar = {"trade_date": "20240603"}
+        assert ml_runtime.holding_scores_batch(spec2, [bad_bar], holds[0:1]) == [None]
+
+    def test_inf_inputs_treated_missing(self, tmp_path):
+        """±inf（除零因子）在推理侧归一为 0（= 缺失中性），不产生发散分数。"""
+        art = _make_model(tmp_path)
+        spec = ModelSpec.from_dict("m", {"artifact": str(art)}, str(tmp_path))
+        out = ml_runtime._run_batch(spec, np.array([[np.inf, -np.inf]]))
+        assert np.isfinite(out).all()
 
     def test_flat_post_transform(self):
         s = pd.Series({"A": 1.0, "B": 3.0, "C": 2.0})

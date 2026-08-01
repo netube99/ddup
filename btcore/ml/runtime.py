@@ -49,9 +49,9 @@ def _apply_scaler(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
         std = np.asarray(spec.scaler_std, dtype=np.float32)
         arr = (arr - mean) / np.where(std > 1e-10, std, 1.0)
     elif spec.scaler_mean:
-        logger.warning(
-            "模型 %s scaler 维度 %d != 特征维度 %d，跳过缩放",
-            spec.name, len(spec.scaler_mean), arr.shape[1],
+        raise RuntimeError(
+            f"模型 {spec.name} scaler 维度 {len(spec.scaler_mean)} != 特征维度 "
+            f"{arr.shape[1]}——meta 与特征契约不一致（加载期校验应已拦截）"
         )
     return arr
 
@@ -59,12 +59,12 @@ def _apply_scaler(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
 def _run_batch(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
     """批量推理，返回 1-D 分数：分类取正类概率，回归取预测值。
 
-    缺失值（NaN）在 scaler 之后填 0 —— 标准化空间的 0 = 训练段均值，
-    缺失被解释为中性的"平均水准"。若在 scaler 之前填 0，缺失会映射成
-    远离均值的极端输入，让缺失模式主导分数。
+    缺失值（NaN）与 ±inf 在 scaler 之后填 0 —— 标准化空间的 0 = 训练段
+    均值，缺失/发散被解释为中性的"平均水准"（训练侧把 ±inf 归一为 NaN，
+    两侧同口径）。若在 scaler 之前填 0，缺失会映射成远离均值的极端输入。
     """
     arr = _apply_scaler(spec, arr.astype(np.float32, copy=False))
-    arr = np.nan_to_num(arr, nan=0.0)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     sess = _get_session(spec.artifact)
     input_name = sess.get_inputs()[0].name
     outputs = sess.run(None, {input_name: arr})
@@ -140,14 +140,16 @@ def compute_state_features(names: list[str], bar: dict, holding) -> dict[str, fl
     """账户态特征统一计算公式（训练侧重放与引擎推理共用）。
 
     hold_days: 引擎维护的持仓交易日数。
-    ret_from_entry: 当日 hfq 收盘 / 买入均价 - 1（hfq 口径，与排名一致）。
+    ret_from_entry: 当日裸收盘 / 买入均价 - 1（裸价口径 = 账户市值盈亏，
+    现金分红另入账户不计入；买入均价是裸成交价，hfq 收盘与之混用会被
+    复权因子污染——除权日/历史分红票特征凭空跳变，违反价格体系契约）。
     """
     out: dict[str, float] = {}
     for n in names:
         if n == "hold_days":
             out[n] = float(holding.holding_days)
         elif n == "ret_from_entry":
-            close = bar_get(bar, "close_hfq", None) or bar_get(bar, "close", None)
+            close = bar_get(bar, "close", 0.0)
             ep = holding.entry_price
             out[n] = (float(close) / ep - 1.0) if (close and ep > 0) else 0.0
         else:
@@ -155,11 +157,8 @@ def compute_state_features(names: list[str], bar: dict, holding) -> dict[str, fl
     return out
 
 
-def holding_score(spec: ModelSpec, bar: dict, holding) -> float | None:
-    """holding scope 模型对单个持仓推理；特征缺失过半返回 None。
-
-    缺失特征保留 NaN 进 _run_batch，在 scaler 之后填 0（= 训练段均值）。
-    """
+def _feature_vector(spec: ModelSpec, bar: dict, holding) -> tuple[np.ndarray, int]:
+    """单持仓特征向量（市场特征 + 账户态），缺失保留 NaN，返回 (向量, 缺失数)。"""
     state = compute_state_features(spec.state_features, bar, holding)
     values: list[float] = []
     nan_count = 0
@@ -172,7 +171,29 @@ def holding_score(spec: ModelSpec, bar: dict, holding) -> float | None:
             nan_count += 1
         else:
             values.append(float(v))
-    if nan_count > len(values) * 0.5:
-        return None
-    arr = np.array([values], dtype=np.float32)
-    return float(_run_batch(spec, arr)[0])
+    return np.array(values, dtype=np.float32), nan_count
+
+
+def holding_scores_batch(
+    spec: ModelSpec, bars: list[dict], holdings: list
+) -> list[float | None]:
+    """决策时点对全部持仓一次性批量推理（避免逐持仓单行 ONNX 调用）。
+
+    缺失特征保留 NaN 进 _run_batch，在 scaler 之后填 0（= 训练段均值）；
+    缺失过半的行返回 None（无分数，下游截面 rank 置末位）。
+    """
+    if not bars:
+        return []
+    rows = []
+    guards = []
+    for bar, holding in zip(bars, holdings):
+        vec, nan_count = _feature_vector(spec, bar, holding)
+        rows.append(vec)
+        guards.append(nan_count > len(vec) * 0.5)
+    scores = _run_batch(spec, np.stack(rows))
+    return [None if g else float(s) for s, g in zip(scores, guards)]
+
+
+def holding_score(spec: ModelSpec, bar: dict, holding) -> float | None:
+    """单持仓推理（批量 API 的单元素特例，供测试与单点调用）。"""
+    return holding_scores_batch(spec, [bar], [holding])[0]

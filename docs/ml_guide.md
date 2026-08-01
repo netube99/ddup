@@ -118,7 +118,7 @@ conditions:
 产出物（写到 `artifact` 声明路径）：
 
 - `<name>.onnx` — XGBoost ONNX 模型（panel 回归 / holding 二分类）
-- `<name>.meta.json` — meta v2：特征契约 + scaler + 评估指标 + sha256（勿手写）
+- `<name>.meta.json` — meta v3：特征契约 + scaler + 评估指标 + sha256（勿手写）
 
 导出时自动做 sklearn 原始模型 vs 导出 ONNX 的输出一致性校验（含 scaler 路径，
 max diff > 1e-4 则导出失败）。
@@ -177,7 +177,9 @@ trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
 
 账户态特征定义（训练/推理同一公式）：`hold_days` = 引擎维护的持仓交易日数
 （成交当日 decision 时点为 1，逐交易日 +1；训练侧重放按市场交易日位置
-计算，与引擎逐日一致）；`ret_from_entry` = 当日 hfq 收盘 / 买入均价 − 1。
+计算，与引擎逐日一致）；`ret_from_entry` = 当日裸收盘 / 买入均价 − 1
+（裸价口径 = 账户市值盈亏，现金分红另行入账不计入；买入均价是裸成交价，
+hfq 收盘与之混用会被复权因子污染）。
 
 ### 3.2 `conditions.model_exit`（策略 YAML）
 
@@ -194,11 +196,11 @@ conditions:
 - 与 `stop_loss_pct` 等规则共存时按 ConditionBuilder 生成顺序求值，
   同一持仓首条触发的条件单成交后不再评估后续
 
-### 3.3 model_meta.json（v2，训练导出，勿手写）
+### 3.3 model_meta.json（v3，训练导出，勿手写）
 
 | 键 | 说明 |
 |----|------|
-| `version` | 固定 2，其他版本加载期报错 |
+| `version` | 固定 3（v2 因 ret_from_entry 改为裸价口径被拒绝，需重新训练导出） |
 | `name` / `scope` | 模型名 / 推导出的 scope（`panel` / `holding`） |
 | `features` | `{factors, raw}` — 特征契约；输入向量列序 = factors + raw + state_features |
 | `state_features` | 账户态特征列表；非空即 holding scope |
@@ -292,7 +294,7 @@ strategies/my_strategy/
   strategy.py              # 零 ML 感知（panel）/ ConditionBuilder 委托（model_exit）
   ml_model/
     alpha_xs.onnx          # 训练导出（artifact 声明路径）
-    alpha_xs.meta.json     # 特征契约 + scaler + 指标（meta v2）
+    alpha_xs.meta.json     # 特征契约 + scaler + 指标（meta v3）
 ```
 
 ---

@@ -189,7 +189,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 因子物化规划与两路供给 | `btcore/factors/plan.py` | `docs/factor_library.md` |
 | 物化公共子表达式消除（CSE） | `btcore/factors/cse.py` | `docs/factor_library.md` |
 | 多因子合成（滚动 IC/ICIR 加权） | `research/composite.py` | `docs/cli_and_research.md` |
-| ML 子系统（panel/holding 双 scope、同源物化、model_exit、meta v2 契约） | `btcore/ml/` | `docs/ml_guide.md` |
+| ML 子系统（panel/holding 双 scope、同源物化、model_exit、meta v3 契约） | `btcore/ml/` | `docs/ml_guide.md` |
 | 因子评估（IC/分层/相关性） | `research/factor_eval.py` | `docs/cli_and_research.md` |
 | Brinson 行业归因 | `research/attribution.py` | `docs/cli_and_research.md` |
 | 策略 YAML 加载 | `btcore/strategy_loader.py` | `docs/strategy_guide.md` |

@@ -1,4 +1,4 @@
-"""ModelSpec — 策略 YAML `models` 节与 model_meta.json v2 的解析/校验。
+"""ModelSpec — 策略 YAML `models` 节与 model_meta.json v3 的解析/校验。
 
 模型对引擎而言是抽象的打分公式：引擎不认识模型的意图（选股/离场/
 市场状态……），只负责数据管线的唯一性与因果正确。唯一的区分是
@@ -30,7 +30,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-META_VERSION = 2
+META_VERSION = 3
+# v3：ret_from_entry 从 hfq 收盘/裸买入价改为裸价口径（价格体系契约），
+# 旧 v2 meta 一律拒绝，含该特征的模型必须重新训练
 
 SCOPE_PANEL = "panel"
 SCOPE_HOLDING = "holding"
@@ -181,6 +183,22 @@ class ModelSpec:
                 f"支持: {list(POST_TRANSFORMS)}"
             )
 
+        # scaler 维度必须等于特征契约维度（meta 与特征不一致 = 静默错分，
+        # fail-fast；旧版/手改 meta 在此拦截）
+        scaler_mean = list(meta.get("scaler_mean", []))
+        scaler_std = list(meta.get("scaler_std", []))
+        n_feat = len(features) + len(raw_features) + len(state_features)
+        if scaler_mean and len(scaler_mean) != n_feat:
+            raise ValueError(
+                f"models.{name} scaler_mean 维度 {len(scaler_mean)} != 特征维度 "
+                f"{n_feat}——meta 与特征契约不一致（请重新训练导出）"
+            )
+        if scaler_std and len(scaler_std) != n_feat:
+            raise ValueError(
+                f"models.{name} scaler_std 维度 {len(scaler_std)} != 特征维度 "
+                f"{n_feat}——meta 与特征契约不一致（请重新训练导出）"
+            )
+
         return cls(
             name=name,
             artifact=str(p),
@@ -188,8 +206,8 @@ class ModelSpec:
             raw_features=raw_features,
             state_features=state_features,
             post_transform=post_transform,
-            scaler_mean=list(meta.get("scaler_mean", [])),
-            scaler_std=list(meta.get("scaler_std", [])),
+            scaler_mean=scaler_mean,
+            scaler_std=scaler_std,
             meta=meta,
         )
 

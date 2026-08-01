@@ -646,20 +646,29 @@ class Engine:
                 )
 
     def _inject_holding_model_scores(self, bars_dict: dict) -> None:
-        """holding scope 模型逐持仓求值并注入 bar dict（原地）。"""
+        """holding scope 模型逐持仓求值并注入 bar dict（原地，批量推理）。"""
         for spec in self._holding_models:
-            scores: dict[str, float] = {}
-            for symbol, holding in self.account.holdings.items():
-                bar = bars_dict.get(symbol)
-                if bar is None:
-                    continue
-                score = ml_runtime.holding_score(spec, bar, holding)
-                if score is not None:
-                    scores[symbol] = score
-            scores = ml_runtime.apply_post_transform_flat(
-                pd.Series(scores), spec.post_transform
+            items = [
+                (symbol, bars_dict[symbol], holding)
+                for symbol, holding in self.account.holdings.items()
+                if symbol in bars_dict
+            ]
+            if not items:
+                continue
+            scores = ml_runtime.holding_scores_batch(
+                spec,
+                [bar for _, bar, _ in items],
+                [holding for _, _, holding in items],
+            )
+            score_map = {
+                symbol: s
+                for (symbol, _, _), s in zip(items, scores)
+                if s is not None
+            }
+            score_map = ml_runtime.apply_post_transform_flat(
+                pd.Series(score_map), spec.post_transform
             ).to_dict()
-            for symbol, score in scores.items():
+            for symbol, score in score_map.items():
                 bars_dict[symbol][spec.column] = score
 
     def _write_ml_predictions(self, conn, today: str, bars_dict: dict) -> None:

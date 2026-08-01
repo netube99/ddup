@@ -1,6 +1,6 @@
-"""ONNX 导出 — model + scaler + meta v2 落盘，sklearn/ONNX 输出一致性校验。
+"""ONNX 导出 — model + scaler + meta v3 落盘，sklearn/ONNX 输出一致性校验。
 
-meta v2 是训练与推理的特征契约（见 btcore.ml.spec.ModelSpec）：
+meta v3 是训练与推理的特征契约（见 btcore.ml.spec.ModelSpec）：
 feature_order = factors + raw + state_features，双方严格按此列序取向量。
 """
 
@@ -27,7 +27,7 @@ def export_model(
     train_window: list[str],
     verify_rows: np.ndarray | None = None,
 ) -> tuple[str, str]:
-    """导出 ONNX 模型 + meta v2，返回 (onnx_path, meta_path)。
+    """导出 ONNX 模型 + meta v3，返回 (onnx_path, meta_path)。
 
     Args:
         result: trainer 的训练产物。
@@ -94,13 +94,10 @@ def _verify(spec, result: TrainResult, onnx_path: Path, meta: dict,
     )
     onnx_out = ml_runtime._run_batch(runtime_spec, rows)
 
-    x = np.nan_to_num(
-        (rows - np.asarray(meta["scaler_mean"], dtype=np.float32)) / np.where(
-            np.asarray(meta["scaler_std"], dtype=np.float32) > 1e-10,
-            np.asarray(meta["scaler_std"], dtype=np.float32), 1.0,
-        ),
-        nan=0.0,
-    )
+    # sklearn 侧应用与推理侧完全相同的变换（_apply_scaler + 缺失/发散填 0），
+    # 不重复内联第三份 scaler 数学，避免口径漂移
+    x = ml_runtime._apply_scaler(runtime_spec, rows)
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     if spec.state_features:
         sk_out = result.model.predict_proba(x)[:, 1]
     else:

@@ -52,8 +52,10 @@ def time_split_masks(
 def _fit_scaler(x_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """缺失感知 StandardScaler，返回 (mean, std)。
 
-    nanmean/nanstd 只在非缺失值上拟合；全缺失或零方差列回退 mean=0/std=1。
+    nanmean/nanstd 只在非缺失值上拟合；±inf 归一为 NaN（除零因子表达式），
+    与 build_panel 的清洗同口径；全缺失或零方差列回退 mean=0/std=1。
     """
+    x_train = np.where(np.isinf(x_train), np.nan, x_train)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # 全缺失列的 nanmean 告警
         mean = np.nanmean(x_train, axis=0)

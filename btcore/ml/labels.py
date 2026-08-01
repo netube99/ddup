@@ -4,17 +4,17 @@ panel 模型：xs_forward_return — 每日截面内 N 日前向收益（hfq 口
 pct rank ∈ (0,1]，消除市场 beta，跨日可比；同时返回原始前向收益
 （供分层评估，逐日单调等价于 rank 标签）。
 
-holding scope 模型：trend_break — 从回测结果库 trade_log FIFO 配对买卖，
-持仓期间逐日打标：未来 lookahead 个交易日内触发 TREND_BREAK 且净亏损 = 正样本。
-账户态特征（hold_days / ret_from_entry）按持仓区间重放，
-公式与引擎推理侧共用 btcore.ml.runtime.compute_state_features；
-hold_days 按市场交易日口径（引擎逐日 +1，成交当日 decision 时点为 1），
-缺失特征保留 NaN，由 trainer 在 scaler 之后填 0（= 训练段均值）。
+holding scope 模型：trend_break — 从回测结果库 trade_log 重构完整持仓
+回合（不限买入 trigger），持仓期间逐日打标：未来 lookahead 个交易日内
+触发 TREND_BREAK 且净亏损 = 正样本。账户态特征（hold_days /
+ret_from_entry）按持仓区间重放，公式与引擎推理侧共用
+btcore.ml.runtime.compute_state_features；hold_days 按市场交易日口径
+（引擎逐日 +1，成交当日 decision 时点为 1），缺失特征保留 NaN，由
+trainer 在 scaler 之后填 0（= 训练段均值）。
 """
 
 import logging
 import sqlite3
-from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -42,49 +42,71 @@ def xs_forward_return(panel: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 
 def extract_trade_pairs(result_db_path: str) -> pd.DataFrame:
-    """从结果库 trade_log FIFO 配对买卖，返回持仓回合表。
+    """从结果库 trade_log 重构完整持仓回合表（回合 = 持仓 0 → 归 0）。
 
-    列: symbol, buy_date, sell_date, buy_price, pnl, trigger, holding_days。
+    买入不限 trigger（MANUAL / TARGET / 条件买入均计入——此前只认
+    MANUAL 会把 target_value 与条件买入策略的回合静默蒸发成空标签集）；
+    回合内多买多卖按股数累计，buy_price = 加权均价，pnl = 回合全部净额
+    之和，trigger = 最后一笔卖出的 trigger（TREND_BREAK 判定依据）。
+    残缺回合（卖无买 / 卖出超买 / 期末未平仓）跳过并告警——静默丢弃
+    会产出错误标签，告警是下限。
+
+    列: symbol, buy_date, sell_date, buy_price, pnl, trigger。
     """
     db = sqlite3.connect(result_db_path)
-    buys = defaultdict(list)
-    for row in db.execute(
-        "SELECT symbol, date, price, shares, turnover, net_amount "
-        "FROM trade_log WHERE side='BUY' AND trigger='MANUAL' ORDER BY date"
-    ):
-        buys[row[0]].append(
-            dict(zip(["date", "price", "shares", "turnover", "net_amount"], row[1:]))
-        )
-    sells = [
-        dict(zip(
-            ["symbol", "date", "price", "shares", "turnover", "net_amount", "trigger"],
-            row,
-        ))
-        for row in db.execute(
-            "SELECT symbol, date, price, shares, turnover, net_amount, trigger "
-            "FROM trade_log WHERE side='SELL' ORDER BY date"
-        )
-    ]
+    rows = db.execute(
+        "SELECT symbol, date, side, trigger, price, shares, net_amount "
+        "FROM trade_log ORDER BY date, id"
+    ).fetchall()
     db.close()
 
-    buy_queue = {k: list(v) for k, v in buys.items()}
-    pairs = []
-    for sell in sells:
-        sym = sell["symbol"]
-        if sym not in buy_queue or not buy_queue[sym]:
-            continue
-        buy = buy_queue[sym].pop(0)
-        hd = (pd.to_datetime(sell["date"]) - pd.to_datetime(buy["date"])).days
-        pairs.append({
-            "symbol": sym,
-            "buy_date": buy["date"],
-            "sell_date": sell["date"],
-            "buy_price": buy["price"],
-            "pnl": round(sell["net_amount"] + buy["net_amount"], 2),
-            "trigger": sell["trigger"],
-            "holding_days": hd,
-        })
-    return pd.DataFrame(pairs)
+    open_rounds: dict[str, dict] = {}
+    rounds: list[dict] = []
+    for symbol, date, side, trigger, price, shares, net_amount in rows:
+        if side == "BUY":
+            r = open_rounds.get(symbol)
+            if r is None:
+                r = open_rounds[symbol] = {
+                    "symbol": symbol, "shares": 0, "buy_date": date,
+                    "buy_shares": 0, "buy_cost": 0.0, "pnl": 0.0,
+                    "sell_date": None, "trigger": None,
+                }
+            r["shares"] += shares
+            r["buy_shares"] += shares
+            r["buy_cost"] += shares * price
+            r["pnl"] += net_amount
+        else:  # SELL
+            r = open_rounds.get(symbol)
+            if r is None:
+                logger.warning(
+                    "[ML标签] %s %s 卖出无对应买入，残缺回合跳过", date, symbol,
+                )
+                continue
+            r["shares"] -= shares
+            r["pnl"] += net_amount
+            r["sell_date"] = date
+            r["trigger"] = trigger
+            if r["shares"] <= 0:
+                del open_rounds[symbol]
+                if r["shares"] < 0:
+                    logger.warning(
+                        "[ML标签] %s %s 卖出股数超过买入（超卖 %d 股），"
+                        "残缺回合跳过", date, symbol, -r["shares"],
+                    )
+                    continue
+                rounds.append({
+                    "symbol": symbol,
+                    "buy_date": r["buy_date"],
+                    "sell_date": r["sell_date"],
+                    "buy_price": round(r["buy_cost"] / r["buy_shares"], 4),
+                    "pnl": round(r["pnl"], 2),
+                    "trigger": r["trigger"],
+                })
+    for symbol, r in open_rounds.items():
+        logger.warning(
+            "[ML标签] %s 期末未平仓回合跳过（%d 股）", symbol, r["shares"],
+        )
+    return pd.DataFrame(rounds)
 
 
 def build_guard_samples(
@@ -107,14 +129,17 @@ def build_guard_samples(
     # 日历日（约 1.43 倍漂移，且与引擎逐日 +1 的口径不一致）
     cal = panel.index.get_level_values("trade_date").unique().sort_values()
     date_pos = {d: k for k, d in enumerate(cal)}
+    # 预按 symbol 分组：避免每回合对全面板构造布尔掩码（O(回合数 × 面板)）
+    groups = {
+        sym: g for sym, g in panel.groupby(level="symbol", sort=False)
+    }
     for pos in pairs_df.itertuples(index=False):
         sym = pos.symbol
-        mask = (
-            (panel.index.get_level_values("symbol") == sym)
-            & (panel.index.get_level_values("trade_date") >= pos.buy_date)
-            & (panel.index.get_level_values("trade_date") <= pos.sell_date)
-        )
-        pos_bars = panel.loc[mask].sort_index(level="trade_date")
+        g = groups.get(sym)
+        if g is None:
+            continue
+        dts = g.index.get_level_values("trade_date")
+        pos_bars = g[(dts >= pos.buy_date) & (dts <= pos.sell_date)]
         if len(pos_bars) < 3:
             continue
 

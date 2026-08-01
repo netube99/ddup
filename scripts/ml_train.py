@@ -1,4 +1,4 @@
-"""ML 模型训练 CLI — 与引擎同一物化路径，产出 ONNX + meta v2。
+"""ML 模型训练 CLI — 与引擎同一物化路径，产出 ONNX + meta v3。
 
 用法:
     # panel scope（无账户态特征）：标签 = horizon 日前向收益的截面排名
@@ -23,11 +23,12 @@ scope 由 state_features 自动推导，与引擎一致。模型的意图（分�
           factors: [roc_5, cci_z, close_vs_ma20]
           raw: [turnover_rate, pe_ttm]
           # state: [hold_days, ret_from_entry]   # holding scope
-        # post_transform: xs_rank                # 可选，训练/推理同一声明
 
 产出物写到 artifact 声明的路径（相对策略目录）：
     <name>.onnx        XGBoost ONNX 模型
-    <name>.meta.json   特征契约 + scaler + 评估指标（version=2）
+    <name>.meta.json   特征契约 + scaler + 评估指标（version=3）
+    # 后变换用 --post-transform 指定（YAML 里写 post_transform 无效，
+    # 训练/推理统一以 meta 为准）
 """
 
 import argparse
@@ -113,32 +114,42 @@ def main() -> int:
         return 1
     print(f"后端: {type(backend).__name__}")
 
-    # 训练域：index_universe 成分并集，未配置则全市场
+    # 训练域：index_universe 成分并集，未配置则全市场；
+    # 面板构建后再按 point-in-time 成分过滤（训练域 = 引擎逐日计算域）
     symbols = None
+    pit_members = None
     index_codes = (doc.get("filter_rules") or {}).get("index_universe", [])
     if index_codes and hasattr(backend, "get_index_members"):
         snaps = backend.get_index_members(list(index_codes), args.start, args.end)
         if snaps:
             symbols = sorted(set().union(*snaps.values()))
-            print(f"训练域: {len(symbols)} 只（index_universe 并集）")
+            pit_members = {str(d): set(v) for d, v in snaps.items()}
+            print(f"训练域: {len(symbols)} 只（index_universe 并集，PIT 过滤）")
 
     benchmark = (doc.get("config") or {}).get("benchmark")
 
     try:
         if is_holding:
-            return _train_holding(args, spec, backend, symbols, library, benchmark)
-        return _train_panel(args, spec, backend, symbols, library, benchmark)
+            return _train_holding(
+                args, spec, backend, symbols, library, benchmark, pit_members,
+            )
+        return _train_panel(
+            args, spec, backend, symbols, library, benchmark, pit_members,
+        )
     except (ValueError, RuntimeError) as e:
         print(f"错误: {e}")
         return 1
 
 
-def _train_panel(args, spec, backend, symbols, library, benchmark) -> int:
+def _train_panel(
+    args, spec, backend, symbols, library, benchmark, pit_members=None,
+) -> int:
     print(f"panel 模型: {len(spec.features)} 因子 + {len(spec.raw_features)} raw, "
           f"horizon={args.horizon}, post_transform={spec.post_transform}")
     panel = dataset.build_panel(
         backend, symbols, args.start, args.end, spec, library, benchmark,
     )
+    panel = dataset.apply_pit_membership(panel, pit_members)
     label_df = labels.xs_forward_return(panel, args.horizon)
     result = train_panel(panel, spec.feature_order, label_df, args.horizon)
     print(f"样本: train={result.n_train} test={result.n_test}")
@@ -160,7 +171,9 @@ def _train_panel(args, spec, backend, symbols, library, benchmark) -> int:
     return 0
 
 
-def _train_holding(args, spec, backend, symbols, library, benchmark) -> int:
+def _train_holding(
+    args, spec, backend, symbols, library, benchmark, pit_members=None,
+) -> int:
     pairs_df = labels.extract_trade_pairs(args.db)
     if pairs_df.empty:
         print("错误: trade_log 中没有可配对的交易回合")
@@ -178,6 +191,7 @@ def _train_holding(args, spec, backend, symbols, library, benchmark) -> int:
     panel = dataset.build_panel(
         backend, trade_symbols, args.start, args.end, spec, library, benchmark,
     )
+    panel = dataset.apply_pit_membership(panel, pit_members)
     samples = labels.build_guard_samples(panel, pairs_df, spec, args.lookahead)
     if samples.empty:
         print("错误: 样本构建为空")

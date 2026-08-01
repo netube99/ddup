@@ -10,6 +10,7 @@ btcore.factors.plan 的同一组函数——训练面板与回测面板逐列一
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 from btcore.factors import plan as factor_plan
@@ -93,8 +94,40 @@ def build_panel(
     # 裁掉 warmup，返回训练区间
     dates = bars_df.index.get_level_values("trade_date")
     result = bars_df.loc[(dates >= start) & (dates <= end)]
+    # ±inf（因子表达式除零等）归一为 NaN，并入既有缺失体系：scaler 缺失感知
+    # 拟合，推理侧 nan_to_num 把缺失/发散填 0（= 训练段均值），两侧同口径
+    result = result.replace([np.inf, -np.inf], np.nan)
     logger.info(
         "训练面板: %d 行, %d 只, %s ~ %s",
         len(result), result.index.get_level_values("symbol").nunique(), start, end,
     )
     return result
+
+
+def apply_pit_membership(
+    panel: pd.DataFrame, members_by_date: dict | None,
+) -> pd.DataFrame:
+    """按 point-in-time 成分过滤训练面板（训练域 = 引擎逐日计算域）。
+
+    members_by_date: get_index_members 的 {快照日期: {symbol, ...}}；每行取
+    ≤ 当日最近的成分快照（与 filters._attach_index_universe 同口径）。
+    未配置 index_universe 时返回原面板。
+    """
+    if not members_by_date:
+        return panel
+    members_by_date = {str(d): set(v) for d, v in members_by_date.items()}
+    snap_dates = np.array(sorted(members_by_date), dtype=object)
+    dts = panel.index.get_level_values("trade_date").to_numpy(dtype=object)
+    syms = panel.index.get_level_values("symbol")
+    snap_idx = snap_dates.searchsorted(dts, side="right") - 1
+    mask = np.zeros(len(panel), dtype=bool)
+    for k, d in enumerate(snap_dates):
+        rows_k = np.flatnonzero(snap_idx == k)
+        if rows_k.size:
+            mask[rows_k] = syms.take(rows_k).isin(members_by_date[d])
+    panel = panel[mask]
+    if panel.empty:
+        raise RuntimeError(
+            "PIT 训练域过滤后为空——index_universe 快照与训练窗口无交集"
+        )
+    return panel

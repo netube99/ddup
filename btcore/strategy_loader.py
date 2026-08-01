@@ -96,6 +96,14 @@ def build_strategy(
                 f"conditions.model_exit 引用了未声明的模型 {rule['model']!r}，"
                 f"models 节中已声明: {sorted(declared_models)}"
             )
+        m = next((s for s in model_specs if s.name == rule["model"]), None)
+        if m is not None and m.post_transform != "none":
+            logger.warning(
+                "conditions.model_exit 引用模型 %s 的 post_transform=%s——"
+                "阈值比较作用于变换后分数，持仓数过小时截面 rank/zscore 退化"
+                "（单持仓 xs_rank 恒为 1.0，每次都会触发），建议 none",
+                m.name, m.post_transform,
+            )
 
     specs = _resolve_factor_specs(factor_specs or [], library, all_columns)
     used_ml = {s["name"] for s in specs if s["name"].startswith("ml_")}
