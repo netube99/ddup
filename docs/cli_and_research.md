@@ -1,21 +1,18 @@
 # CLI 与独立研究工具指南
 
-ddup 提供两类用户可编程接口：**CLI 脚本**（`scripts/`，命令行直接调用）和**研究工具库**（`research/`，Python import 后使用）。CLI 侧重一键式工作流，研究库侧重可组合的纯函数 API——两者可混用，也可仅用 CLI 完成从因子评估到回测报告的全流程。
+ddup 提供两类用户接口：**CLI 脚本**（`scripts/`，命令行调用）和**研究工具库**（`research/`，Python import 后使用）。CLI 侧重一键式工作流；研究库为可组合的纯函数 API。两者可混用。
 
 ---
 
 ## 1. 快速开始
 
-五分钟跑通从因子评估到回测报告的完整流水线：
+前置条件：已按 [backend_guide.md](./backend_guide.md) 配置行情数据库，已按 [factor_library.md](./factor_library.md) 在 `factors/library.yaml` 中定义因子。
 
 ```bash
-# 0. 前置条件：已按 backend_guide 配置好 adapters/tushare.py（或自有后端）
-#    已按 factor_library.md 在 factors/library.yaml 中定义因子
-
-# 1. 因子评估：验证你的因子有区分力
+# 1. 因子评估：验证因子有区分力
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 
-# 2. 运行回测
+# 2. 运行回测并落盘结果库
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
     --start 20240101 --end 20240630 --out result.db
 
@@ -25,45 +22,50 @@ python scripts/cross_validate.py result.db
 # 4. 生成 HTML 报告
 python scripts/report.py result.db --out report.html
 
-# 5. 参数扫描后多 run 对比（每 run 使用不同 --out 或不同策略）
+# 5. 多次回测写入同一结果库后做多 run 对比
 python scripts/compare.py result.db --html compare.html
 ```
 
 ---
 
-## 2. CLI 工具详解
+## 2. CLI 工具
 
 ### 2.1 `run.py` — 运行回测
 
 ```bash
 python scripts/run.py <策略YAML> --start YYYYMMDD --end YYYYMMDD \
-    [--capital N] [--out result.db] [--report report.html] [--no-report]
+    [--capital N] [--out result.db] [--report report.html | auto] [--no-report]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `yaml` | 策略 YAML 配置文件路径（位置参数） |
-| `--start` | 回测开始日期，YYYYMMDD 格式，**必填** |
-| `--end` | 回测结束日期，YYYYMMDD 格式，**必填** |
-| `--capital` | 初始资金（覆盖 YAML config 中的设置），float |
-| `--out` | 回测结果库路径，默认 `:memory:`（内存库，不落盘） |
-| `--report` | HTML 报告输出路径。缺省 `auto`（生成到 `<策略目录>/reports/<yaml名>_<起>_<止>.html`） |
+| `yaml` | 策略 YAML 配置路径（位置参数） |
+| `--start` / `--end` | 回测起止日期 YYYYMMDD，**必填** |
+| `--capital` | 初始资金 float，覆盖 YAML config |
+| `--out` | 结果库 SQLite 路径；缺省为内存库，不落盘 |
+| `--report` | HTML 报告路径。缺省 `auto`：生成到 `<策略目录>/reports/<yaml名>_<起>_<止>.html`（该目录已在 `.gitignore`）；`--report` 裸写（不带值）等价于 `auto` |
 | `--no-report` | 关闭报告生成 |
 
-**数据库依赖**：行情数据从 `adapters/tushare.py` 的 `_DEFAULT_DB_PATH` 读取，不提供运行时切换数据源的参数——项目假定一次只对接一个数据库。
+行情数据由 `adapters/tushare.py` 的 `_DEFAULT_DB_PATH` 决定，不提供运行时切换数据源的参数。
 
-**输出**：终端打印核心统计指标（总收益、年化、夏普、最大回撤、成交笔数等），同时：
-- `--out` 指定路径时落盘 SQLite 结果库（含 `runs`、`account_daily`、`trade_log` 表）
-- `--report auto` 时生成 HTML 报告到策略目录的 `reports/` 子目录（该目录已在 `.gitignore` 中）
+**输出**：终端打印 statistics 全部统计指标（嵌套分组递归展开）与成交笔数；`--out` 指定时写入结果库；非 `--no-report` 时生成 HTML 报告（内容见 2.3）。
 
-示例：
+**结果库结构**（多个 CLI 与研究库共用，同一库多次运行按 `run_id` 累积）：
+
+| 表 | 内容 |
+|----|------|
+| `runs` | 每 run 一行：run_id、策略名、起止日期、初始资金、config_json、stats_json、status |
+| `account_daily` | 逐日现金/总资产/盈亏/持仓数（按 run_id） |
+| `trade_log` | 成交明细：date、symbol、side、trigger、price、shares、turnover、commission、stamp_tax、transfer_fee、slippage_amount、net_amount、reason |
+| `debug_snapshots` | debug 模式逐日决策快照（供 `replay.py`） |
+| `ml_predictions` | ML 模型逐日打分 |
 
 ```bash
 # 最简调用：内存运行 + 自动报告
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
     --start 20240603 --end 20240628
 
-# 落盘结果库，后续可离线生成报告/对比
+# 落盘结果库，后续离线生成报告/对比
 python scripts/run.py strategies/my_strategy/config.yaml \
     --start 20240101 --end 20240630 --out results/my_run.db --no-report
 ```
@@ -71,43 +73,40 @@ python scripts/run.py strategies/my_strategy/config.yaml \
 ### 2.2 `factor_eval.py` — 因子评估
 
 ```bash
-python scripts/factor_eval.py <因子列表> \
-    --start YYYYMMDD --end YYYYMMDD \
-    [--universe CSI300] [--forward N] [--decay 1,3,5,10,20] [--n-quantiles N]
+python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
+    [--universe CSI300] [--forward N | --decay 1,3,5,10,20] [--n-quantiles N]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `factors` | 逗号分隔的因子名（来自 `factors/library.yaml`），位置参数，**必填** |
-| `--start` | 开始日期，**必填** |
-| `--end` | 结束日期，**必填** |
-| `--universe` | 股票池，支持简称 `CSI300`/`CSI500`/`CSI1000` 或代码 `000300.SH` 等，默认全市场 |
-| `--forward` | 前瞻收益天数（默认 5，即一周）。与 `--decay` 互斥 |
-| `--decay` | 多前瞻期 IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）。与 `--forward` 互斥 |
-| `--n-quantiles` | 分层回测分档数（默认 5） |
+| `factors` | 逗号分隔因子名（来自 `factors/library.yaml`），位置参数；使用 `--model` 时可省略 |
+| `--model` | ML 模型 ONNX 路径；模型分数物化为 `ml_<name>` 列后与因子同口径评估（仅支持 panel scope，详见 [ml_guide.md](./ml_guide.md)） |
+| `--start` / `--end` | **必填** |
+| `--universe` | 股票池：简称 `CSI300`/`CSI500`/`CSI1000`（对应 000300.SH/000905.SH/000852.SH）或其他指数代码（原样透传）；默认全市场。取成分快照并集（回溯范围含起始日前 45 天，覆盖成分调整滞后） |
+| `--forward` | 前瞻收益天数，默认 5 |
+| `--decay` | IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）；不能与非默认的 `--forward` 同用 |
+| `--n-quantiles` | 分层回测档数，默认 5 |
 
-**输出**：
+**默认模式输出**（终端三段）：
 
-- **默认模式**（三部分，终端打印）：
-  1. **IC 汇总表** — 每个因子的 Pearson IC 均值、ICIR、胜率、Rank IC
-  2. **分层回测** — 每档累计收益 + 多空收益（最高档-最低档）
-  3. **因子相关性矩阵** — 截面 Pearson 相关系数均值（≥2 个因子时）
-- **`--decay` 模式**：输出每个因子随前瞻期变化的 IC 衰减曲线表格，含 RankIC 趋势总结（↘ 衰减 / ↗ 增强）。分层回测仍使用默认 `--forward=5d`。
+1. **IC 汇总** — 每因子的 Pearson IC 均值、ICIR、胜率、RankIC、RankIR、有效天数
+2. **分层回测** — 每档累计收益（Q1=因子值最低档）+ 多空收益（最高档-最低档）
+3. **因子相关性矩阵** — 截面 Pearson 相关系数按日均值（≥2 个因子时）
 
-示例：
+**`--decay` 模式输出**：每因子一张 horizon × 指标衰减表（IC / IC IR / IC Win / RankIC / RankIR / Win / 天数）+ RankIC 首末 horizon 趋势总结（衰减/增强）。分层回测与相关性矩阵仍输出（分层固定用 `--forward` 默认 5d）。
 
 ```bash
-# 评估单个因子
+# 单因子
 python scripts/factor_eval.py mom20 --start 20240101 --end 20240630
 
 # 多因子 + 沪深300成分池
 python scripts/factor_eval.py mom20,vol_z,ep_z --start 20240101 --end 20240630 --universe CSI300
 
 # 月度前瞻 + 10 档分层
-python scripts/factor_eval.py roe_z,gross_margin_z --start 20240101 --end 20240630 \
-    --forward 20 --n-quantiles 10
+python scripts/factor_eval.py mom_60d,turnover_z \
+    --start 20240101 --end 20240630 --forward 20 --n-quantiles 10
 
-# IC 衰减曲线：观察因子 alpha 随持有期变长的衰减速度
+# IC 衰减曲线
 python scripts/factor_eval.py cci_z,turnover_z \
     --start 20240101 --end 20240630 --decay 1,3,5,10,20
 ```
@@ -120,23 +119,13 @@ python scripts/report.py <结果库.db> [--run-id N] --out report.html
 
 | 参数 | 说明 |
 |------|------|
-| `db` | 回测结果库路径，位置参数，**必填** |
-| `--run-id` | 指定 run_id，缺省取最新一次 |
+| `db` | 结果库路径，**必填** |
+| `--run-id` | 指定 run_id，缺省取最新 run |
 | `--out` | HTML 输出路径，**必填** |
 
-**输出**：单文件 HTML 报告，含净值曲线（内联 SVG）、回撤曲线、月度收益、基准对比、交易磨损、持仓复杂度、往返交易汇总、卖出来源归因、个股盈亏贡献 Top10、成交明细。
+输出单文件 HTML（内联 SVG，零依赖，离线可读），章节：核心指标、净值曲线（含基准叠加）、回撤曲线、月度收益、基准对比（Alpha/Beta/信息比率/跟踪误差）、交易磨损与成本拆解、持仓管理复杂度、往返交易汇总、卖出来源归因、个股盈亏贡献 Top10、成交明细。
 
-老 run（stats_json 为 NULL 或无此列）先经 schema 迁移补写 stats_json，若无则现场用 `stats.calculate_statistics` 重算后生成报告。
-
-示例：
-
-```bash
-# 最新 run
-python scripts/report.py result.db --out report.html
-
-# 指定 run
-python scripts/report.py result.db --run-id 3 --out run3_report.html
-```
+老 run 无 stats_json 时自动迁移并现场重算统计指标（无基准数据时基准对比章节为空）。结果库中没有可用 run 时抛 `ValueError`。
 
 ### 2.4 `compare.py` — 多 run 对比
 
@@ -146,25 +135,13 @@ python scripts/compare.py <结果库.db> [--runs 1,2,3] [--html compare.html]
 
 | 参数 | 说明 |
 |------|------|
-| `db` | 回测结果库路径，位置参数，**必填** |
-| `--runs` | 逗号分隔的 run_id 列表，缺省全部 |
+| `db` | 结果库路径，**必填** |
+| `--runs` | 逗号分隔 run_id 列表，缺省全部 |
 | `--html` | 对比 HTML 报告输出路径（可选） |
 
-**输出**：
-- 终端打印关键指标对比表（总收益、年化、夏普、最大回撤、Calmar、胜率、成交笔数、换手率、交易成本、年化磨损等）
-- `--html` 时生成对比报告：元信息表 + 指标对比表 + 归一化净值叠加曲线
-
-注意：至少需要 2 个 run。
-
-示例：
-
-```bash
-# 终端对比全部 run
-python scripts/compare.py result.db
-
-# 指定 runs + HTML 报告
-python scripts/compare.py result.db --runs 1,2,3 --html compare.html
-```
+- 终端打印对比表，指标行：总收益率、年化收益率、夏普比率、最大回撤、Calmar 比率、日胜率、成交笔数、区间换手率、总交易成本、年化磨损拖累、单日最大成交笔数
+- `--html` 生成对比报告：元信息表 + 指标对比表 + 归一化净值叠加曲线
+- 不足 2 个 run 时报错退出（退出码 1）
 
 ### 2.5 `cross_validate.py` — 交叉验证
 
@@ -174,51 +151,43 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 
 | 参数 | 说明 |
 |------|------|
-| `db_path` | 结果库路径，位置参数，**必填** |
-| `--run-id` | 指定 run_id |
-| `--strategy` | 策略名称（仅用于输出标注） |
-| `--capital` | 初始资金（用于动态阈值计算，0=自动从 config 读取） |
+| `db_path` | 结果库路径，**必填** |
+| `--run-id` | 指定 run_id，缺省取最新 run |
+| `--strategy` | 策略名（仅用于输出标注） |
+| `--capital` | 初始资金，用于磨损动态阈值；默认 0 = 从 run 的 config 读取，再兜底 40000 |
 
-**验证维度**：
+**退出码 = 发现的问题数**（0 = 通过），可直接用于脚本断言。
 
-| 检查项 | 说明 |
-|--------|------|
-| 交易触发类型分布 | 检查是否有未预期的 trigger 类型 |
-| 买卖比例平衡 | 卖出/买入比严重偏离 1 时告警 |
-| 同日买卖冲突 | 同日同票既买又卖 |
-| 小资金交易磨损 | 按资金规模使用动态阈值检查成本占比合理性 |
-| 单笔金额合理度 | 小单过多触发最低佣金的告警（≥10 万资金时） |
-| 交易频率 | 日均 >10 笔告警 |
-| 持仓上限 | 最大持仓数是否超 config.max_positions |
-| 现金非负 | 是否存在负现金日 |
-| 公司行为统计 | 分红/送转等 CORPORATE 触发笔数（INFO 输出） |
-| 卖出分类统计 | 按 trigger 分组统计卖出的次数、平均金额、总盈亏 |
+| 检查项 | 告警条件 |
+|--------|---------|
+| 交易触发类型分布 | 出现预期外 trigger（预期集合：MANUAL / TARGET / STOP_LOSS / TAKE_PROFIT / TRAILING_TP / LIMIT_BUY / BREAKOUT_BUY / CORPORATE / ML_EXIT） |
+| 买卖比例平衡 | 卖出/买入比 > 3 或 < 0.3 |
+| 同日买卖冲突 | 同日同票既有 BUY 又有 SELL |
+| 交易磨损/资金比 | 超动态阈值（最低佣金开销×2 + 印花税底 + 按资金规模的可变上限）；资金 ≤5 万时降级为 INFO |
+| 小单买入 | 资金 ≥10 万且 >50% 买入触发最低佣金 5 元 |
+| 交易频率 | 日均成交 > 10 笔 |
+| 持仓上限 | 最大持仓数超 `config.max_positions` |
+| 现金非负 | 存在负现金日 |
+| 公司行为 / 卖出分类统计 | CORPORATE 笔数、按 trigger 分组的卖出次数/均额/总盈亏（INFO 输出） |
 
-示例：
-
-```bash
-python scripts/cross_validate.py result.db --strategy rolling_ranker
-```
+同时打印 stats 中的关键指标与交易磨损明细。
 
 ### 2.6 `sweep.py` — 参数扫描批量回测
 
-基于 YAML 路径语法展开参数空间，批量运行回测并汇总结果到 SQLite 数据库。
-
 ```bash
-python scripts/sweep.py <sweep_config.yaml> \
-    --start YYYYMMDD --end YYYYMMDD \
-    [--out sweep_result.db] [--dry-run]
+python scripts/sweep.py <sweep_config.yaml> --start YYYYMMDD --end YYYYMMDD \
+    [--out sweep_result.db] [--capital N] [--dry-run]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `sweep_config` | sweep 配置文件路径，位置参数，**必填** |
-| `--start` | 回测起始日期，**必填** |
-| `--end` | 回测结束日期，**必填** |
-| `--out` | 汇总输出数据库路径，默认 `sweep_result.db` |
-| `--dry-run` | 仅打印参数组合，不实际运行回测 |
+| `sweep_config` | sweep 配置 YAML，**必填** |
+| `--start` / `--end` | **必填** |
+| `--out` | 汇总输出数据库，默认 `sweep_result.db` |
+| `--capital` | 初始资金，透传给每次 run（覆盖 YAML config） |
+| `--dry-run` | 仅打印参数组合，不运行 |
 
-**sweep 配置文件格式**：
+sweep 配置格式——`params` 键为 `.` 分隔的 YAML 嵌套路径，值为候选列表，取笛卡尔积：
 
 ```yaml
 base: strategies/examples/rolling_ranker/config.yaml
@@ -227,368 +196,231 @@ params:
   config.max_positions: [5, 10]
 ```
 
-- `base`：基础策略 YAML 路径
-- `params`：以 `.` 分隔的 YAML 嵌套路径为键，参数值列表为值；所有参数取笛卡尔积
+**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程调用 `run.py` 执行；失败组合打印 FAIL 并跳过，不中断扫描。
 
-**输出**：每组参数组合调用 `run.py` 执行，结果汇总到 `sweep_results` 表（`id, label, params_json, stats_json`）。终端按收益/Sharpe/最大回撤列对齐输出汇总表。
+**输出**：结果写入 `--out` 库的 `sweep_results` 表（`id, label, params_json, stats_json`，stats_json 内含 label 与 params 字段）；终端按 收益/Sharpe/MDD 列打印汇总表。
 
-示例：
+参数展开逻辑可复用：
 
-```bash
-# 预览参数组合
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --dry-run
-
-# 执行扫描
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
-
-# 脚本内复用参数展开逻辑
+```python
 from scripts.sweep import expand_params
-combos = expand_params({"top_k": [3, 5], "max_positions": [5, 10]})
-# → [(label, {"top_k": 3, "max_positions": 5}), ...]
+combos = expand_params({"config.top_k": [3, 5], "config.max_positions": [5, 10]})
+# → [("top_k=3, max_positions=5", {"config.top_k": 3, ...}), ...]
 ```
 
 ### 2.7 `replay.py` — 交易决策回放
 
-从 debug 模式产出的 `debug_snapshots` 表回放回测每日决策上下文，用于定位特定标的在某交易日的买卖依据。
+从 debug 模式写入的 `debug_snapshots` 表回放每日决策上下文，用于定位某标的在某交易日的买卖依据。
 
 ```bash
-python scripts/replay.py <result.db> \
-    [--run-id N] [--symbol SYMBOL] [--date YYYYMMDD] [--list-symbols]
+python scripts/replay.py <result.db> [--run-id N] [--symbol SYM] [--date YYYYMMDD] [--list-symbols]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `db` | 结果库路径，位置参数，**必填** |
+| `db` | 结果库路径，**必填** |
 | `--run-id` | 指定 run_id，默认 1 |
-| `--symbol` | 过滤股票代码 |
+| `--symbol` | 过滤股票代码（该票当日无快照的日期跳过） |
 | `--date` | 过滤日期 YYYYMMDD |
-| `--list-symbols` | 按日期列出有快照的标的（不输出详细上下文） |
+| `--list-symbols` | 按日期列出当日有快照的标的，不输出详细上下文 |
 
-**输出**：按日期分组输出当日账户状态（现金、总资产、持仓数）、pending 买卖名单与条件单、每个持仓的股数/入场价/持仓天数/最新价/因子列值。
+**详细模式输出**（按日期分组）：当日账户状态（现金/总资产/持仓数）、pending 买卖名单与买入条件单、每个持仓的股数/入场价/持仓天数/最新价/因子列值（最多 5 个）。
 
-**前提条件**：回测时需启用 debug 模式（`Engine(strategy, provider, debug=True)`）才会写入 `debug_snapshots` 表；需要落盘结果库（`db_path` 不为 `:memory:`）。
-
-示例：
+**前提**：回测时启用 debug 模式（`Engine(..., debug=True)`）且结果库落盘。无匹配快照时打印错误并以退出码 1 退出。
 
 ```bash
-# 列出某日的快照标的
 python scripts/replay.py result.db --date 20240605 --list-symbols
-
-# 回放某只股票的全部交易决策
 python scripts/replay.py result.db --symbol 000001.SZ
-
-# 定位特定日期的完整上下文
 python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
 ```
 
-### 2.8 `bench_universe_preload.py` — 性能基准
+### 2.8 `dump_brinson_data.py` — Brinson 归因数据导出
 
-对比全市场 preload 与指数成分并集 preload 的性能差异。适用于 tuning `get_universe` 策略。
+从行情数据库一次性导出 Brinson 归因所需 parquet，供 `brinson_attribute_from_files()` 离线归因（见 6.4）。
 
 ```bash
-python scripts/bench_universe_preload.py --start YYYYMMDD --end YYYYMMDD \
-    [--yaml path] [--skip-load] [--skip-engine]
+python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `--start` | 开始日期，**必填** |
-| `--end` | 结束日期，**必填** |
-| `--yaml` | 策略 YAML 路径，默认 `strategies/examples/rolling_ranker/config.yaml` |
-| `--skip-load` | 跳过数据加载层基准 |
-| `--skip-engine` | 跳过端到端基准 |
-
-基准分两层：数据加载层（行数/耗时/内存）和端到端（`engine.run` 耗时）。指数并集取沪深300+中证500+中证1000 成分并集。
-
-示例：
-
-```bash
-python scripts/bench_universe_preload.py --start 20240603 --end 20250630
-```
-
-### 2.9 `dump_fixtures.py` — Fixtures 生成
-
-从真实数据库重新生成测试 fixtures（`tests/fixtures/*.parquet`）。数据库有更新或结构调整时使用。
-
-```bash
-python scripts/dump_fixtures.py
-```
-
-无参数，输出到 `tests/fixtures/`，生成 `bars.parquet`、`dividends.parquet`、`st.parquet`、`limits.parquet`、`components.parquet`、`benchmark_bars.parquet`、`trade_cal.parquet` 及辅助表 `moneyflow.parquet` / `cyq_perf.parquet` / `margin_detail.parquet`。
-
-### 2.10 `dump_brinson_data.py` — Brinson 归因数据导出
-
-从 tushare provider 数据库一次性导出 Brinson 归因所需的 parquet 文件，后续可离线调用 `brinson_attribute_from_files()` 进行归因分析。
-
-```bash
-python scripts/dump_brinson_data.py <provider_db> [--out brinson_data]
-```
-
-| 参数 | 说明 |
-|------|------|
-| `provider_db` | tushare provider 数据库路径，位置参数，**必填** |
+| `provider_db` | tushare 行情数据库路径，**必填** |
 | `--out` | 输出目录，默认 `brinson_data` |
 
-**输出文件**：
+| 输出文件 | 内容 | 结构 |
+|---------|------|------|
+| `industry_map.parquet` | 股票→申万 L1 行业 | 列 `ts_code, l1_name` |
+| `sw_returns.parquet` | 行业日收益 | index=trade_date，columns=行业名，值为小数（已除以 100） |
+| `benchmark_weights.parquet` | 基准行业权重 | index=trade_date，columns=行业名，每日归一化到和为 1 |
 
-| 文件 | 内容 | 结构 |
-|------|------|------|
-| `industry_map.parquet` | 股票→行业映射 | `ts_code, l1_name` |
-| `sw_returns.parquet` | 申万行业日收益 | `index=trade_date, columns=行业名, values=小数` |
-| `benchmark_weights.parquet` | 基准行业权重 | `index=trade_date, columns=行业名, values=0~1` |
+bars 数据不在导出范围内，需自行从行情库或回测库导出（要求见 6.4）。
 
-输出文件直接作为 `brinson_attribute_from_files()` 的输入。bars 数据需从回测数据库或行情数据库单独导出（至少含 `trade_date, symbol, close, pct_chg`）。
+### 2.9 开发/性能工具（一句话索引）
 
-示例：
-
-```bash
-python scripts/dump_brinson_data.py /path/to/tushare.db --out brinson_data
-```
-
-### 2.11 `check_anticorrupt.py` — 反破坏检查
-
-提交前必须通过的架构约束检查，防止被移除的设计模式重新引入。
-
-```bash
-python scripts/check_anticorrupt.py
-```
-
-检查项目：
-
-| 约束 | 说明 |
+| 工具 | 用途 |
 |------|------|
-| 因子库无内置因子 | `btcore/factors/builtin.py` 不得存在 |
-| engine 不 import builtin | engine.py 不得 import factors.builtin |
-| Holding 无 last_adj_factor | types.py 的 Holding 不得有此字段 |
-| Strategy ABC 无行为开关 | 不得有 take_profit_mode 等分支属性 |
-| 因子层无旧 API | btcore/factors/__init__.py 不得暴露 Factor / FactorPipeline 等 |
-| btcore 不依赖用户层 | btcore/ 不得 import strategies/ / factors/ / adapters/ |
-| factors 层限制依赖 | factors/ 仅可依赖 btcore.factors |
+| `bench_universe_preload.py --start D --end D [--yaml path] [--skip-load] [--skip-engine]` | 性能基准：全市场 preload vs 沪深300+中证500+中证1000 成分并集 preload，分数据加载层（行数/耗时/内存）与端到端（engine.run 耗时）两层；调优 `get_universe` 时使用 |
+| `dump_fixtures.py` | 从真实行情库重新生成 `tests/fixtures/*.parquet` 测试 fixtures（无参数；数据库结构或数据更新后使用） |
+| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数；开发工具） |
 
 ---
 
-## 3. 研究工具库 — 因子评估
+## 3. 研究库 — 因子评估（`research.factor_eval`）
 
-`research.factor_eval` 提供纯函数式因子评估 API，所有指标计算是无状态的——输入 `pd.Series`，输出标量或 Series。
+纯函数、无状态：输入 `(trade_date, symbol)` MultiIndex 面板 Series，输出标量/Series/DataFrame。日期索引名默认 `"trade_date"`，可用 `date_col` 参数改。
 
 ### 3.1 `calc_ic` / `summarize_ic`
 
 ```python
-from research.factor_eval import calc_ic, summarize_ic
+ic, rank_ic = calc_ic(factor_values, forward_returns, date_col="trade_date")
+# ic:      每日截面 Pearson IC (Series, index=trade_date)；输入 dropna 后为空则返回空 Series
+# rank_ic: 每日截面 Spearman Rank IC
 
-# factor_values: MultiIndex (trade_date, symbol) 的因子值 Series
-# forward_returns: 同结构的未来收益 Series
-ic, rank_ic = calc_ic(factor_values, forward_returns)
-# ic: 每日 Pearson IC (Series, index=trade_date)
-# rank_ic: 每日 Spearman Rank IC
-# date_col: 日期列名，默认 "trade_date"
-
-pearson_stats = summarize_ic(ic)
-# {"ic_mean": ..., "ic_std": ..., "icir": ..., "ic_positive_ratio": ..., "n_days": ...}
-spearman_stats = summarize_ic(rank_ic)
+stats = summarize_ic(ic)
+# {"ic_mean", "ic_std", "icir", "ic_positive_ratio", "n_days"}
+# 空输入返回全 0 dict
 ```
 
 ### 3.2 `calc_layered_returns`
 
 ```python
-from research.factor_eval import calc_layered_returns
-
-# n_quantiles: 分档数，默认 5
-# 返回 {q: cumulative_return_series}，q=1 为最低档，q=N 为最高档
-# date_col: 日期列名，默认 "trade_date"
 layers = calc_layered_returns(factor_values, forward_returns, n_quantiles=5)
-
-# 多空收益 = 最高档累计 - 最低档累计
-# 注：当某些分位因数据不足被合并（duplicates="drop"）时，max/min 取实际存在的极端分位
-long_short = layers[max(layers)].iloc[-1] - layers[min(layers)].iloc[-1]
+# 返回 {q: 累计收益 Series}；q=1 为因子值最低档，q=N 为最高档
+# 每档每日等权持有；数据不足的分位被合并时（duplicates="drop"）档位少于 N
+# 多空收益 = layers[max(layers)].iloc[-1] - layers[min(layers)].iloc[-1]
 ```
 
 ### 3.3 `calc_factor_corr`
 
 ```python
-from research.factor_eval import calc_factor_corr
-
-# factor_df: MultiIndex (date, symbol) 宽表，每列一个因子
-# 返回因子间平均截面 Pearson 相关矩阵
-corr_matrix = calc_factor_corr(factor_df)
+corr = calc_factor_corr(factor_df)
+# factor_df: MultiIndex 宽表，每列一个因子
+# 返回因子间平均截面 Pearson 相关矩阵（按日求 corr 再取均值；样本 <3 的日期跳过）
+# 因子 <2 列返回空 DataFrame；无有效日返回 NaN 矩阵
 ```
 
 ### 3.4 `calc_ic_decay`
 
 ```python
-from research.factor_eval import calc_ic_decay
-
-# factor_values: MultiIndex (trade_date, symbol) 的因子值 Series
-# close_hfq: 同结构的后复权收盘价 Series
-# horizons: 前瞻天数列表，如 [1, 3, 5, 10, 20]
-# 返回 DataFrame，index=horizon，列为各指标
-decay_df = calc_ic_decay(factor_values, close_hfq, [1, 3, 5, 10, 20])
-#          ic_mean  ic_ir  ic_win  rank_ic_mean  rank_ic_ir  rank_ic_win  n_days
-# horizon
-# 1       0.0234  0.452   0.612        0.0198      0.387        0.598     118
-# 3       0.0312  0.601   0.645        0.0276      0.531        0.632     117
-# 5       0.0298  0.573   0.628        0.0251      0.488        0.619     116
-# ...
+decay = calc_ic_decay(factor_values, close_hfq, [1, 3, 5, 10, 20])
+# close_hfq: 同结构的后复权收盘价 Series（内部自行计算各 horizon 前瞻收益）
+# 返回 DataFrame，index=horizon，列为：
 ```
-
-对每个 horizon 计算 forward returns 并汇总 IC / Rank IC 统计量，输出一张 `horizon × 指标` 的衰减汇总表。用于判断因子 alpha 的衰减速度——IC 随前瞻期拉长是否迅速衰减，以及 Rank IC 的稳定性。
 
 | 返回列 | 含义 |
 |--------|------|
-| `ic_mean` | 该前瞻期的 Pearson IC 均值 |
-| `ic_ir` | IC 信息比率（IC_mean / IC_std） |
-| `ic_win` | IC > 0 的交易日占比 |
-| `rank_ic_mean` | Spearman Rank IC 均值 |
-| `rank_ic_ir` | Rank IC 信息比率 |
-| `rank_ic_win` | Rank IC > 0 的交易日占比 |
+| `ic_mean` / `ic_ir` / `ic_win` | 该前瞻期 Pearson IC 均值 / 信息比率 / IC>0 天数占比 |
+| `rank_ic_mean` / `rank_ic_ir` / `rank_ic_win` | Spearman Rank IC 同口径 |
 | `n_days` | 有效截面天数 |
 
+用途：判断因子 alpha 随持有期拉长的衰减速度与 Rank IC 稳定性。
+
 ---
 
-## 4. 研究工具库 — 报告生成
+## 4. 研究库 — 报告生成（`research.report`）
 
-`research.report` 负责生成单文件 HTML 报告，纯 Python + 内联 SVG，零第三方依赖，离线可读。
-
-### 4.1 `generate_report`
+单文件 HTML，内联 SVG，零第三方依赖。HTML 章节同 2.3。
 
 ```python
-from research.report import generate_report
+from research.report import (
+    generate_report, generate_report_from_db, generate_compare_report,
+    load_runs, build_compare_table,
+)
 
-# result: engine.run() 的返回 dict
-#   {"account_daily": pd.DataFrame, "trade_log": pd.DataFrame, "statistics": dict, ...}
-# out_path: HTML 输出路径
-# title: 可选标题
-generate_report(result, "report.html", title="我的策略报告")
-```
+# engine.run() 返回 dict → HTML（result 必须含 statistics 键，引擎 run() 自动计算）
+generate_report(result, "report.html", title="我的策略报告")  # title 可选
 
-注意：`result` 必须包含 `statistics`（含 `total_return`、`sharpe`、`max_drawdown` 等），引擎 `run()` 自动计算。
-
-### 4.2 `generate_report_from_db`
-
-```python
-from research.report import generate_report_from_db
-
-# 从结果库离线生成，无需重新运行回测
-# run_id 缺省取最新 run
+# 从结果库离线生成；run_id 缺省取最新 run
 generate_report_from_db("result.db", "report.html", run_id=1)
-```
 
-老 run（stats_json 为 NULL 或无此列）先经 schema 迁移补写 stats_json，若无则现场用 `stats.calculate_statistics` 重算。
-
-### 4.3 `generate_compare_report`
-
-```python
-from research.report import generate_compare_report
-
-# run_ids 缺省取全部 run
+# 多 run 对比 HTML；run_ids 缺省取全部
 generate_compare_report("result.db", "compare.html", run_ids=[1, 2, 3])
-```
 
-### 4.4 `load_runs` / `build_compare_table`
-
-```python
-from research.report import load_runs, build_compare_table
-
-# 加载所有 run 的完整数据（meta + account_daily + trade_log + statistics）
-runs = load_runs("result.db")
+# 加载 run 列表；每项 {"meta", "account_daily", "trade_log", "statistics"}
+# 老 run 无 stats_json 时现场重算（此时无基准对比与期末持仓浮盈数据）
 runs = load_runs("result.db", run_ids=[1, 2])
 
-# 构建关键指标对比表（供 CLI 和自定义分析共用）
+# 构建指标对比表（compare.py 与对比 HTML 共用）
 header, rows = build_compare_table(runs)
-# header: ["指标", "run1 strategy", "run2 strategy", ...]
-# rows: [["总收益率", "12.34%", "-5.67%", ...], ...]
+# header: ["指标", "run1 <策略名>", "run2 <策略名>", ...]
+# rows:   [["总收益率", "12.34%", "-5.67%", ...], ...]（指标集同 2.4）
 ```
 
 ---
 
-## 5. 研究工具库 — 多因子合成
+## 5. 研究库 — 多因子合成（`research.composite`）
 
-`research.composite` 对标 hikyuu ICMultiFactor 的滚动 IC 加权思路，将多个因子合成为单一截面得分。
+将多个因子按滚动 IC/ICIR 加权合成为单一截面得分。
 
 ### 5.1 `combine_factors`
 
 ```python
-from research.composite import combine_factors
-
-# factor_df: MultiIndex (trade_date, symbol) 宽表，每列一个因子值
-# forward_returns: 同结构的未来收益（ic/icir 法用于权重估计，equal 法不需要）
-# method: "equal" | "ic" | "icir"
-# window: IC 估计滚动窗口（交易日），默认 60
-# min_periods: 窗口最少有效观测数，默认 max(2, window//2)
-# 返回 composite 得分 Series（同索引），前 ~window 日为 NaN（warmup）
 composite = combine_factors(
-    factor_df,
-    forward_returns,
-    method="icir",   # 推荐：IC/IC_std 加权的信息比率
-    window=60,
+    factor_df,         # MultiIndex (trade_date, symbol) 宽表，每列一个因子
+    forward_returns,   # 同结构前瞻收益（仅 ic/icir 法用于权重估计）
+    method="icir",     # "equal" | "ic" | "icir"
+    window=60,         # IC 估计滚动窗口（交易日）
+    min_periods=None,  # 窗口最少有效观测数，默认 max(2, window//2)
 )
+# 返回 composite 得分 Series（同索引，name="composite"）；ic/icir 法前 ~window 日为 NaN
+#（warmup，等权 equal 法无窗口依赖）；method 非法时抛 ValueError
 ```
-
-**合成方法说明**：
 
 | 方法 | 权重逻辑 | 适用场景 |
 |------|---------|---------|
-| `equal` | 等权加总截面 zscore | 快速 baseline |
+| `equal` | 等权平均截面 zscore | 快速 baseline |
 | `ic` | 滚动 IC 均值加权 | IC 稳定的因子 |
-| `icir` | 滚动 ICIR 加权（IC_mean / IC_std） | 推荐：同时考虑稳定性和方向 |
+| `icir` | 滚动 ICIR（IC_mean/IC_std）加权 | 推荐：兼顾方向与稳定性 |
 
-**前视保护**：t 日权重仅使用 ≤ t-1 日的 IC 估计（rolling 后 `shift(1)`），t 日 IC 依赖 t 日后才能实现的收益，不用于当日权重。
+行为契约：
 
-因子值在合成前自动做截面 zscore 标准化（去极值/中性化等深度预处理应在因子表达式内用 `winsorize`/`neutralize` 算子完成）。
+- 合成前每因子自动做截面 zscore 标准化（去极值/中性化等深度预处理应在因子表达式内用 `winsorize`/`neutralize` 算子完成）
+- **前视保护**：t 日权重只用 ≤ t-1 日的 IC 估计（rolling 后 shift(1)）
+- 权重按绝对值归一化；某因子当日无 IC 时权重补 0，全部因子无 IC 的日子保持 NaN
 
 ### 5.2 `evaluate_composite`
 
 ```python
-from research.composite import evaluate_composite
-
-# 对合成因子做 IC + 分层回测评估
-# n_quantiles: 分层数，默认 10
 result = evaluate_composite(composite, forward_returns, n_quantiles=10)
-# {"ic": {...}, "rank_ic": {...}, "layered": {q: cumulative_series, ...}}
+# {"ic": summarize_ic dict, "rank_ic": 同左,
+#  "layered": {分位: 累计收益 Series}}
 ```
 
 ---
 
-## 6. 研究工具库 — Brinson 行业归因
+## 6. 研究库 — Brinson 行业归因（`research.attribution`）
 
-`research.attribution` 提供 Brinson 归因分解，将策略相对于基准的超额收益拆分为**行业配置效应**、**选股效应**和**交互效应**。
+将策略相对基准的超额收益分解为**行业配置效应**、**选股效应**、**交互效应**。
 
-### 6.1 `brinson_attribute`
+### 6.1 `brinson_attribute`（连接数据库）
 
 ```python
-from research.attribution import brinson_attribute
-
 result = brinson_attribute(
-    db_path="result.db",          # 回测 DB（含 trade_log 表）
-    provider_db="/path/to/market.db",  # 数据库（只读），含 index_member_all / sw_daily / index_weight
+    db_path="result.db",                # 回测结果库（含 trade_log）
+    provider_db="/path/to/market.db",   # 行情数据库（只读打开）
     start="20240601",
     end="20240701",
-    index_code="000300.SH",       # 基准指数，默认 "000300.SH"
+    index_code="000300.SH",             # 基准指数，默认 000300.SH
+    run_id=None,                        # 缺省取最新 run
 )
-
-print(f"配置效应: {result['summary']['allocation_effect']:.4%}")
-print(f"选股效应: {result['summary']['selection_effect']:.4%}")
-print(f"交互效应: {result['summary']['interaction_effect']:.4%}")
-print(f"超额收益: {result['summary']['total_excess_return']:.4%}")
 ```
 
 ### 6.2 数据依赖
 
-| 数据 | 来源表 | 用途 |
-|------|--------|------|
-| 行业映射 | `index_member_all` | ts_code → 申万行业 (`l1_name`) |
-| 行业收益 | `sw_daily` | L1 行业指数日收益率 (`pct_change`) |
-| 基准权重 | `index_weight` | 基准指数成分股权重 |
-| 策略持仓 | 回测 DB `trade_log` | 回放重建每日持仓，结合 `stk_factor_pro` 的 close 算市值 |
+| 数据 | 行情库表 | 用途 |
+|------|---------|------|
+| 行业映射 | `index_member_all` | ts_code → 申万 L1 行业（l1_name） |
+| 行业收益 | `sw_daily` | L1 行业指数日收益率 |
+| 基准权重 | `index_weight` | 基准成分股权重（聚合到行业并归一化） |
+| 个股行情 | `stk_factor_pro` | close/pct_chg，用于持仓市值与个股收益 |
+| 策略持仓 | 回测库 `trade_log` | 回放重建每日持仓 |
 
-### 6.3 结果解读
-
-返回值结构：
+### 6.3 返回结构
 
 ```python
 {
     "summary": {
-        "total_portfolio_return": ...,   # 策略累计收益
+        "total_portfolio_return": ...,   # 策略累计收益（逐日求和口径）
         "total_benchmark_return": ...,   # 基准累计收益
         "total_excess_return": ...,      # 超额收益
         "allocation_effect": ...,        # 行业配置贡献
@@ -596,232 +428,170 @@ print(f"超额收益: {result['summary']['total_excess_return']:.4%}")
         "interaction_effect": ...,       # 交互效应
         "unexplained": ...,              # 未解释残差
     },
-    "industry_detail": {
+    "industry_detail": {                 # 按行业分解，键为行业名
         "银行": {
-            "avg_portfolio_weight": ...,
-            "avg_benchmark_weight": ...,
-            "active_weight": ...,        # 主动权重 = portfolio - benchmark
-            "portfolio_return": ...,     # 该行业策略累计收益
-            "benchmark_return": ...,     # 该行业基准累计收益
-            "allocation_effect": ...,
-            "selection_effect": ...,
+            "avg_portfolio_weight": ..., "avg_benchmark_weight": ...,
+            "active_weight": ...,        # 平均主动权重
+            "portfolio_return": ...,     # 策略在该行业的累计收益贡献
+            "benchmark_return": ...,
+            "allocation_effect": ..., "selection_effect": ...,
             "interaction_effect": ...,
-            "total_contribution": ...,
-        },
-        ...
+            "total_contribution": ...,   # 三效应之和
+        }, ...
     },
-    "daily": [{...}],                    # 逐日 Brinson 分解
-    "exposure_summary": {                # 行业暴露概览
-        "max_single_industry_weight": ...,
-        "max_single_industry_name": ...,
-        "effective_n_industries": ...,   # 有效行业数 = 1/Σ(w²)
-        "top3_industries": [...],
+    "daily": [                           # 逐日分解
+        {"date", "portfolio_return", "benchmark_return", "excess_return",
+         "allocation", "selection", "interaction"}, ...
+    ],
+    "exposure_summary": {
+        "max_single_industry_weight": ..., "max_single_industry_name": ...,
+        "effective_n_industries": ...,   # 有效行业数 = 1/Σ(w²)，按平均权重
+        "top3_industries": [{"name": ..., "weight": ...}, ...],
     },
 }
 ```
 
-### 6.4 从本地文件归因
+**数据不足时不抛异常**，返回 `{"error": "原因", "summary": {}, "industry_detail": {}, "daily": [], "exposure_summary": {}}`（如 trade_log 无记录、bars 为空、sw_daily 无数据等），调用方需先检查 `"error"` 键。
 
-如果不希望每次归因都连接外部数据库，可以先用 `scripts/dump_brinson_data.py` 导出
-parquet 文件，然后用 `brinson_attribute_from_files()` 离线运行：
+### 6.4 `brinson_attribute_from_files`（离线 parquet）
 
 ```python
-from research.attribution import brinson_attribute_from_files
-
 result = brinson_attribute_from_files(
     result_db="backtest_output/run.db",
     industry_map="brinson_data/industry_map.parquet",
     sw_returns="brinson_data/sw_returns.parquet",
     benchmark_weights="brinson_data/benchmark_weights.parquet",
     bars="brinson_data/bars.parquet",
-    run_id=1,
-    benchmark_code="000300.SH",
+    run_id=1,                        # 默认 1（注意：不是"最新"）
+    benchmark_code="000300.SH",      # 仅用于日志标注
 )
 ```
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `result_db` | str | 回测结果数据库路径 |
-| `industry_map` | str | 行业映射 parquet，columns: `ts_code, l1_name` |
-| `sw_returns` | str | 申万行业日收益 parquet，index=date, columns=行业名 |
-| `benchmark_weights` | str | 基准行业权重 parquet，index=date, columns=行业名 |
-| `bars` | str | 个股 bars parquet，MultiIndex `(trade_date, symbol)`，含 `close, pct_chg` |
-| `run_id` | int | 回测 run_id，默认 1 |
-| `benchmark_code` | str | 基准指数代码，默认 `"000300.SH"` |
+| 参数 | 说明 |
+|------|------|
+| `result_db` | 回测结果库路径 |
+| `industry_map` | parquet，须含 `ts_code, l1_name` 列（否则 ValueError） |
+| `sw_returns` | parquet，index=trade_date，columns=行业名，值为小数 |
+| `benchmark_weights` | parquet，index=trade_date，columns=行业名，值 0~1 |
+| `bars` | 个股 bars parquet：MultiIndex `(trade_date, symbol)`，或含 `trade_date, symbol` 列（自动 set_index）；须含 `close, pct_chg` |
 
-返回值结构与 `brinson_attribute()` 相同。如果任何 parquet 文件不存在，抛出
-`FileNotFoundError`。使用前先用 `scripts/dump_brinson_data.py` 准备数据，再自行从回测
-数据库导出 bars parquet（至少含 `trade_date, symbol, close, pct_chg` 列）。
+前三个 parquet 用 `scripts/dump_brinson_data.py` 导出；bars 需自行导出。任一文件不存在抛 `FileNotFoundError`。返回值结构与 6.3 相同（含 `"error"` 键约定）。
 
 ---
 
 ## 7. 典型工作流
 
-### 7.1 因子研究 → 策略编写 → 回测 → 验证 → 报告
+### 7.1 因子研究 → 策略 → 回测 → 验证 → 报告
 
 ```bash
-# 1. 因子初筛：快速看 IC/分层，初筛有区分力的因子
-python scripts/factor_eval.py mom20,mom60,vol_z,rsi_14 \
+# 因子初筛：IC / 分层 / 相关性一次看全
+python scripts/factor_eval.py mom20,mom_60d,vol_z,ep_z \
     --start 20230101 --end 20240630 --universe CSI300
-
-# 2. 因子相关性：排除高度共线因子（>0.7 考虑去重）
-python scripts/factor_eval.py mom20,mom60,vol_z --start 20230101 --end 20240630
-
-# 3. 编写策略 YAML + Python 类（按 strategy_guide.md）
-
-# 4. 运行回测
+# 衰减速度（决定调仓频率）
+python scripts/factor_eval.py mom20 --start 20230101 --end 20240630 --decay 1,3,5,10,20
+# 按 strategy_guide.md 编写策略后：
 python scripts/run.py strategies/my_strategy/config.yaml \
     --start 20240101 --end 20240630 --out results/v1.db
-
-# 5. 交叉验证
 python scripts/cross_validate.py results/v1.db --strategy my_strategy
-
-# 6. 生成报告
 python scripts/report.py results/v1.db --out results/v1_report.html
 ```
 
 ### 7.2 参数扫描与多 run 对比
 
-**方法一：sweep.py 一键扫描**（推荐，适用于按参数值列表展开的场景）
-
-```yaml
-# sweep.yaml
-base: strategies/my_strategy/config.yaml
-params:
-  config.top_k: [5, 10, 20]
-  config.max_positions: [5, 10]
-```
-
 ```bash
+# 方式一：sweep 一键扫描（参数值列表展开）
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
-```
 
-**方法二：手动多次 run.py**（适用于策略文件不同的场景）
-
-```bash
-# 多个参数组合共享同一个结果库（多次 run 默认追加新 run_id）
-python scripts/run.py strategies/my_strategy/config.yaml \
-    --start 20240101 --end 20240630 --out results/sweep.db --no-report
-python scripts/run.py strategies/my_strategy/config_top10.yaml \
-    --start 20240101 --end 20240630 --out results/sweep.db --no-report
-python scripts/run.py strategies/my_strategy/config_top20.yaml \
-    --start 20240101 --end 20240630 --out results/sweep.db --no-report
-
-# 终端对比
-python scripts/compare.py results/sweep.db
-
-# HTML 对比报告（归一化净值叠加曲线一目了然）
+# 方式二：手动多次 run 写入同一结果库（适用于策略文件不同的场景）
+python scripts/run.py cfg_top5.yaml  --start 20240101 --end 20240630 --out results/sweep.db --no-report
+python scripts/run.py cfg_top10.yaml --start 20240101 --end 20240630 --out results/sweep.db --no-report
 python scripts/compare.py results/sweep.db --html results/sweep_compare.html
 ```
 
-### 7.3 归因分析流程
-
-如果想知道策略超额收益到底来自押对行业还是选对个股，在回测后运行 Brinson 归因：
+### 7.3 Brinson 归因
 
 ```python
-# research_script.py
 from research.attribution import brinson_attribute
 
-result = brinson_attribute(
-    "results/v1.db",
-    "/path/to/market.db",
-    "20240101", "20240630",
-)
+result = brinson_attribute("results/v1.db", "/path/to/market.db", "20240101", "20240630")
+if "error" in result:
+    raise RuntimeError(result["error"])
 
-# 看总览
 s = result["summary"]
 print(f"超额={s['total_excess_return']:.2%} "
-      f"(配置={s['allocation_effect']:.2%} "
-      f"选股={s['selection_effect']:.2%})")
+      f"(配置={s['allocation_effect']:.2%} 选股={s['selection_effect']:.2%})")
 
-# 看哪些行业贡献最大
-for ind, d in sorted(
-    result["industry_detail"].items(),
-    key=lambda kv: abs(kv[1]["total_contribution"]), reverse=True
-)[:5]:
-    print(f"  {ind}: 总贡献={d['total_contribution']:.2%} "
+for ind, d in sorted(result["industry_detail"].items(),
+                     key=lambda kv: abs(kv[1]["total_contribution"]), reverse=True)[:5]:
+    print(f"{ind}: 贡献={d['total_contribution']:.2%} "
           f"(配置={d['allocation_effect']:.2%} 选股={d['selection_effect']:.2%})")
 
-# 行业暴露度
 exp = result["exposure_summary"]
 print(f"最大单行业: {exp['max_single_industry_name']} "
-      f"({exp['max_single_industry_weight']:.1%}), "
-      f"有效行业数: {exp['effective_n_industries']}")
+      f"({exp['max_single_industry_weight']:.1%}), 有效行业数: {exp['effective_n_industries']}")
 ```
 
 ### 7.4 多因子合成研究
 
 ```python
-# composite_research.py
-import pandas as pd
-from research.factor_eval import calc_ic, summarize_ic
 from research.composite import combine_factors, evaluate_composite
 
-# 假设已有因子 DataFrame 和前瞻收益
-# factor_df: MultiIndex (trade_date, symbol), columns=[mom20, vol_z, ep_z]
-# fwd_ret: MultiIndex (trade_date, symbol) Series
-
-# 对比三种合成方法
+# factor_df: MultiIndex (trade_date, symbol) 宽表; fwd_ret: 同结构前瞻收益 Series
 for method in ["equal", "ic", "icir"]:
     comp = combine_factors(factor_df, fwd_ret, method=method)
     ev = evaluate_composite(comp, fwd_ret)
     print(f"{method}: IC={ev['ic']['ic_mean']:.4f}  IR={ev['ic']['icir']:.2f}")
 
-# 用最佳合成方法输出得分供策略使用
-best = combine_factors(factor_df, fwd_ret, method="icir")
+best = combine_factors(factor_df, fwd_ret, method="icir")  # 供策略使用
 ```
 
 ---
 
-## 8. 参考速查表
+## 8. 速查表
 
 ### CLI 命令速查
 
 | 命令 | 作用 |
 |------|------|
-| `python scripts/run.py <yaml> --start DATE --end DATE` | 运行回测 |
-| `python scripts/factor_eval.py <factors> --start DATE --end DATE` | 因子 IC/分层/相关性 |
-| `python scripts/report.py <db> --out report.html` | 单 run 报告 |
-| `python scripts/compare.py <db> [--html compare.html]` | 多 run 对比 |
-| `python scripts/cross_validate.py <db>` | 交叉验证 |
-| `python scripts/sweep.py <sweep.yaml> --start DATE --end DATE` | 参数扫描批量回测 |
-| `python scripts/replay.py <db> [--symbol SYM] [--date DATE]` | 交易决策回放 |
-| `python scripts/bench_universe_preload.py --start DATE --end DATE` | 性能基准 |
-| `python scripts/dump_brinson_data.py <provider_db>` | 导出 Brinson 归因数据 |
-| `python scripts/dump_fixtures.py` | 更新测试 fixtures |
-| `python scripts/check_anticorrupt.py` | 架构约束检查 |
+| `python scripts/run.py <yaml> --start D --end D [--out db]` | 运行回测 |
+| `python scripts/factor_eval.py <factors> --start D --end D` | 因子 IC/分层/相关性 |
+| `python scripts/report.py <db> [--run-id N] --out x.html` | 单 run 报告 |
+| `python scripts/compare.py <db> [--runs 1,2] [--html x.html]` | 多 run 对比 |
+| `python scripts/cross_validate.py <db>` | 交叉验证（退出码=问题数） |
+| `python scripts/sweep.py <sweep.yaml> --start D --end D` | 参数扫描 |
+| `python scripts/replay.py <db> [--symbol S] [--date D]` | 交易决策回放 |
+| `python scripts/dump_brinson_data.py <行情库> [--out dir]` | 导出 Brinson 归因数据 |
 
 ### 研究库 API 速查
 
-| 模块 | 函数 | 输入 | 输出 |
-|------|------|------|------|
-| `research.factor_eval` | `calc_ic(fv, fwd)` | 因子值 Series, 前瞻收益 Series | (IC Series, RankIC Series) |
-| | `summarize_ic(ic)` | IC Series | dict{ic_mean, icir, ...} |
-| | `calc_layered_returns(fv, fwd)` | 因子值, 前瞻收益 | {分位: 累计收益 Series} |
-| | `calc_factor_corr(df)` | 因子宽表 DataFrame | 相关矩阵 DataFrame |
-| | `calc_ic_decay(fv, close, horizons)` | 因子值, 收盘价, 前瞻天数列表 | 衰减汇总 DataFrame (horizon × 指标) |
-| `research.report` | `generate_report(result, path)` | engine.run() 返回, 路径 | 写入 HTML |
-| | `generate_report_from_db(db, path)` | DB 路径, 输出路径 | 写入 HTML |
-| | `generate_compare_report(db, path)` | DB 路径, 输出路径 | 写入 HTML |
-| | `load_runs(db)` | DB 路径 | [run dict, ...] |
-| | `build_compare_table(runs)` | [run dict, ...] | (header, rows) |
-| `research.composite` | `combine_factors(df, fwd, method)` | 因子宽表, 前瞻收益, 方法 | 合成得分 Series |
-| | `evaluate_composite(comp, fwd)` | 合成得分, 前瞻收益 | {ic, rank_ic, layered} |
-| `research.attribution` | `brinson_attribute(db, pdb, start, end, index_code, run_id)` | 回测DB, 库路径, 日期, 基准代码, run_id | 完整归因 dict |
-| | `brinson_attribute_from_files(result_db, industry_map, ...)` | 结果DB路径, 4个parquet路径, run_id | 完整归因 dict |
+| 模块 | 函数 | 输入 → 输出 |
+|------|------|------------|
+| `research.factor_eval` | `calc_ic(fv, fwd)` | 因子值, 前瞻收益 → (IC Series, RankIC Series) |
+| | `summarize_ic(ic)` | IC Series → dict{ic_mean, ic_std, icir, ic_positive_ratio, n_days} |
+| | `calc_layered_returns(fv, fwd, n_quantiles)` | → {分位: 累计收益 Series} |
+| | `calc_factor_corr(df)` | 因子宽表 → 相关矩阵 |
+| | `calc_ic_decay(fv, close_hfq, horizons)` | → horizon × 指标 DataFrame |
+| `research.report` | `generate_report(result, path, title?)` | engine.run() 返回 → HTML |
+| | `generate_report_from_db(db, path, run_id?)` | → HTML |
+| | `generate_compare_report(db, path, run_ids?)` | → HTML |
+| | `load_runs(db, run_ids?)` | → [{meta, account_daily, trade_log, statistics}] |
+| | `build_compare_table(runs)` | → (header, rows) |
+| `research.composite` | `combine_factors(df, fwd, method, window, min_periods)` | → 合成得分 Series |
+| | `evaluate_composite(comp, fwd, n_quantiles)` | → {ic, rank_ic, layered} |
+| `research.attribution` | `brinson_attribute(db, pdb, start, end, index_code?, run_id?)` | → 归因 dict |
+| | `brinson_attribute_from_files(result_db, industry_map, sw_returns, benchmark_weights, bars, run_id?, benchmark_code?)` | → 归因 dict |
 
 ### 常见参数速查
 
-| 参数 | 出现工具 | 含义 |
+| 参数 | 出现位置 | 含义 |
 |------|---------|------|
-| `--start / --end` | run, factor_eval, bench | YYYYMMDD 日期范围 |
-| `--out` | run, report | 输出路径（DB 或 HTML） |
-| `--report` | run | HTML 报告路径或 `auto` |
-| `--run-id` | report, cross_validate | 指定 run |
-| `--universe` | factor_eval | CSI300/CSI500/CSI1000 |
-| `--forward` | factor_eval | 前瞻天数，默认 5（与 --decay 互斥） |
-| `--decay` | factor_eval | IC 衰减模式，逗号分隔天数如 `1,3,5,10,20` |
-| `--n-quantiles` | factor_eval | 分层数，默认 5 |
-| `--capital` | run, cross_validate | 初始资金 |
-| `window` | composite.combine_factors | IC 滚动窗口，默认 60 |
-| `method` | composite.combine_factors | equal/ic/icir |
+| `--start / --end` | run, factor_eval, sweep, bench | YYYYMMDD 日期范围，必填 |
+| `--out` | run, sweep, report, dump_brinson_data | 输出路径（DB / HTML / 目录） |
+| `--report` / `--no-report` | run | HTML 报告路径（缺省 auto）/ 关闭报告 |
+| `--run-id` | report, cross_validate, replay | 指定 run（report/cross_validate 缺省最新，replay 默认 1） |
+| `--capital` | run, sweep, cross_validate | 初始资金（cross_validate 中用于动态阈值） |
+| `--universe` | factor_eval | CSI300/CSI500/CSI1000 或指数代码，默认全市场 |
+| `--forward` / `--decay` | factor_eval | 前瞻天数（默认 5）/ IC 衰减模式 |
+| `--n-quantiles` | factor_eval | 分层档数，默认 5 |
+| `--dry-run` | sweep | 仅打印参数组合 |
+| `method` / `window` | combine_factors | equal/ic/icir；IC 滚动窗口默认 60 |
