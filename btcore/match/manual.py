@@ -32,6 +32,7 @@ def manual_sell(account, bars: dict, sell_symbols: list,
     trades = []
     for symbol in sell_symbols:
         if symbol not in account.holdings:
+            logger.info("卖出名单含未持仓标的 %s, 跳过", symbol)
             continue
         holding = account.holdings[symbol]
         bar = bars.get(symbol)
@@ -82,7 +83,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
                max_positions: int, limits_fn, costs_fn, slip_fn,
                weights_map: dict | None = None,
                quiet: bool = False) -> list:
-    """手动买入（仅新标的）。持仓数达 max_positions 后跳过后续买入。
+    """手动买入（仅新标的）。持仓数达 max_positions 后只记 INFO、不拦截。
 
     weights_map 为 None 时等权（总资产的 1/max_positions）；否则按
     总资产 × weights_map[symbol] 分配每笔买入金额。
@@ -98,6 +99,10 @@ def manual_buy(account, bars: dict, buy_symbols: list,
     trades = []
     for idx, symbol in enumerate(eligible):
         n_left = len(eligible) - idx
+        # 循环内实时复查（引擎 _compute_pending 已查重，这里兜底）：
+        # 名单重复或前一笔已成交时跳过，避免重复扣款 + 持仓覆盖
+        if symbol in account.holdings:
+            continue
         if len(account.holdings) >= max_positions:
             logger.info("持仓数已达 max_positions=%d, 继续买入 %s",
                         max_positions, symbol)

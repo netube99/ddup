@@ -11,9 +11,8 @@
 下一级 target_allocator 展示 target_value / 时间门控自管理。
 """
 
-from btcore.filters import StockFilter
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 
 class RollingRanker(Strategy):
@@ -29,13 +28,9 @@ class RollingRanker(Strategy):
     REQUIRED_FIELDS: list[str] = []
 
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 5))
         self._cooldown_days = int(self.config.get("cooldown_days", 3))
-
-        self._filter = StockFilter(
-            provider.backend, first_date, self.FILTER_RULES, end_date=end_date
-        )
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
         # 冷却期 map：symbol → 冷却截止日 (YYYYMMDD int)
         self._cooldown: dict[str, int] = {}
@@ -74,8 +69,8 @@ class RollingRanker(Strategy):
         for s in expired:
             del self._cooldown[s]
 
-        # 清理已平仓标的的 trailing high 锚点（ConditionBuilder 内部状态）
-        self._cond.prune(set(snapshot.holdings.keys()))
+        # 清理已平仓标的的 trailing high 锚点（基类默认 on_tick 负责）
+        super().on_tick(bars, snapshot, provider)
 
     # ── select: 每日买卖决策 ──────────────────────────────────────────────
     def select(self, bars, account_snapshot, provider) -> dict:
@@ -85,7 +80,7 @@ class RollingRanker(Strategy):
         date_str = next(iter(bars.values())).get("trade_date", "")
 
         # 截面过滤
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
 
         # 因子打分
         df = bars_to_df(filtered)

@@ -7,9 +7,12 @@ import pandas as pd
 import pytest
 
 from btcore.factors.library import resolve_spec
+from btcore.provider import DataProvider
+from btcore.strategy import Strategy
 from btcore.strategy_loader import build_strategy, load_strategy
 from btcore.strategy_tools import eval_factor_specs
 from strategies.examples.rolling_ranker import RollingRanker
+from tests.conftest import MockDataBackend
 
 EXAMPLE_YAML = "strategies/examples/rolling_ranker/config.yaml"
 
@@ -300,6 +303,76 @@ class TestBuildStrategy:
         """未声明 materialize_only → 缺省 False。"""
         spec = resolve_spec({"factor": "mom20", "weight": 2.0})
         assert spec["materialize_only"] is False
+
+    def test_build_strategy_validates_conditions_programmatic(self):
+        """程序化路径的 conditions 与 YAML 路径同样 fail-fast（两路径等价）。"""
+        with pytest.raises(ValueError, match="未知 conditions 键"):
+            build_strategy(
+                RollingRanker,
+                config={"conditions": {"stop_loss": 0.1}},  # typo: 少 _pct
+            )
+
+    def test_build_strategy_does_not_mutate_config(self):
+        """models_meta 等改写只落在副本上，不污染调用方 dict。"""
+        cfg = {"initial_capital": 100000}
+        strategy = build_strategy(RollingRanker, config=cfg)
+        assert cfg == {"initial_capital": 100000}
+        assert strategy.config["initial_capital"] == 100000
+
+    def test_resolve_spec_rejects_bad_types(self):
+        """weight/ascending/materialize_only 类型严格化：字符串不再被 bool() 误转。"""
+        with pytest.raises(ValueError, match="weight"):
+            resolve_spec({"factor": "mom20", "weight": "0.5"})
+        with pytest.raises(ValueError, match="ascending"):
+            resolve_spec({"factor": "mom20", "ascending": "false"})
+        with pytest.raises(ValueError, match="materialize_only"):
+            resolve_spec({"factor": "mom20", "materialize_only": "true"})
+
+
+class TestBaseDefaultWiring:
+    """Strategy 基类默认接线：声明式配置名实相符。"""
+
+    class DeclarativeOnly(Strategy):
+        """只实现 select 的策略：on_start / calc_conditions / on_tick 全用基类默认。"""
+
+        def select(self, bars, account_snapshot, provider):
+            return {"buy": [], "sell": []}
+
+    def test_default_calc_conditions_delegates_conditions(self):
+        """conditions 声明 → 默认 calc_conditions 翻译为条件单。"""
+        s = self.DeclarativeOnly(config={"conditions": {"stop_loss_pct": 0.1}})
+        conds = s.calc_conditions("000001.SZ", 10.0, {"close": 10.0}, 5)
+        assert conds == [{"type": "STOP_LOSS", "price": 9.0}]
+
+    def test_on_start_builds_filter_from_filter_rules(self):
+        """FILTER_RULES 声明 → 默认 on_start 构建 StockFilter。"""
+        s = self.DeclarativeOnly(config={}, filter_rules={"exclude_st": True})
+        provider = DataProvider(MockDataBackend())
+        s.on_start(provider, "20240601", "20240630")
+        assert s._filter is not None
+        result = s.filter_bars({"000001.SZ": {"close": 10.0}}, "20240603")
+        assert isinstance(result, dict)
+
+    def test_no_filter_rules_filter_bars_passthrough(self):
+        s = self.DeclarativeOnly(config={})
+        s.on_start(DataProvider(MockDataBackend()), "20240601", "20240630")
+        assert s._filter is None
+        bars = {"000001.SZ": {"close": 10.0}}
+        assert s.filter_bars(bars, "20240603") is bars
+
+    def test_filter_bars_fails_fast_when_on_start_not_wired(self):
+        """覆盖 on_start 却忘记 super()：filter_bars 报错而非静默失效。"""
+
+        class NoSuper(Strategy):
+            def select(self, bars, account_snapshot, provider):
+                return {"buy": [], "sell": []}
+
+            def on_start(self, provider, first_date, end_date=None):
+                pass  # 忘记 super().on_start()
+
+        s = NoSuper(config={}, filter_rules={"exclude_st": True})
+        with pytest.raises(RuntimeError, match="super"):
+            s.filter_bars({"000001.SZ": {"close": 10.0}}, "20240603")
 
 
 # ── factor_universe 加载测试 ──

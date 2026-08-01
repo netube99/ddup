@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+from collections import Counter
 
 import pandas as pd
 
@@ -13,6 +14,27 @@ from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
 
 logger = logging.getLogger(__name__)
+
+# select() / on_tick() 返回 dict 的已知键；其余键被忽略并告警（防 typo 静默失效）
+_SELECT_KEYS = frozenset({
+    "buy", "sell", "buy_conditions", "target_value",
+    "sell_shares", "buy_weights",
+})
+
+
+def _check_symbol_list(symbols: list, which: str) -> None:
+    """select() 名单校验：必须是非空字符串列表且无重复。
+
+    重复 symbol 会导致 manual_buy 双重扣款、持仓被覆盖（账户恒等式破坏），
+    这里 fail-fast 而不是让撮合层静默腐化账户。
+    """
+    bad = [s for s in symbols if not isinstance(s, str)]
+    if bad:
+        raise ValueError(f"select() 的 {which} 名单含非字符串元素: {bad!r}")
+    dups = sorted({s for s, n in Counter(symbols).items() if n > 1})
+    if dups:
+        raise ValueError(f"select() 的 {which} 名单含重复 symbol: {dups}")
+
 
 # 数据契约必需列（REQUIRED_BAR_COLUMNS）已下沉至 btcore.factors.plan，
 # 与训练侧/研究脚本共享同一定义
@@ -115,17 +137,9 @@ class Engine:
             raise ValueError(
                 f"execution_price 只支持 'open'/'close': {execution_price!r}"
             )
-        self.account = types.Account(
-            cash=self.initial_capital,
-            initial_capital=self.initial_capital,
-            slippage_ticks=slippage_ticks,
-            order_volume_ratio=(
-                float(self.order_volume_ratio)
-                if self.order_volume_ratio is not None else None
-            ),
-            execution_price=execution_price,
-        )
-        self.account.total_value = self.initial_capital
+        self._slippage_ticks = slippage_ticks
+        self._execution_price = execution_price
+        self.account = self._make_account()
         self.pending_actions = {"buy": [], "sell": []}
         self._debug = debug
         # ML 模型（strategy_loader 依据 YAML models 节挂接；未配置为空列表）
@@ -140,16 +154,40 @@ class Engine:
         self._saved_cash: float | None = None
         self._saved_holdings: dict | None = None
 
+    def _make_account(self) -> types.Account:
+        """新建干净账户（初始资金口径）。run() 每次重跑时用于幂等重置。"""
+        account = types.Account(
+            cash=self.initial_capital,
+            initial_capital=self.initial_capital,
+            slippage_ticks=self._slippage_ticks,
+            order_volume_ratio=(
+                float(self.order_volume_ratio)
+                if self.order_volume_ratio is not None else None
+            ),
+            execution_price=self._execution_price,
+        )
+        account.total_value = self.initial_capital
+        return account
+
     def run(self, start: str, end: str) -> dict:
-        # 重置 run_id: 同一实例重复 run 时, 若本次在 write_run 前抛异常,
-        # except 分支不能拿到上一次 run 的 id 去误标 failed
+        # 幂等：重复 run 从头重置账户与待处理指令（run_id 重置同理，
+        # 本次在 write_run 前抛异常时 except 分支不会误标上一次 run）
         self.run_id = 0
+        self.account = self._make_account()
+        self.pending_actions = {"buy": [], "sell": []}
         self._warn_in_sample_overlap(start, end)
         conn = database.init_backtest_db(self.db_path)
         try:
             calendar = self.provider.get_calendar(start, end)
             if not calendar:
                 raise ValueError("日历为空")
+
+            # 前视钳制提前到 preload 阶段：get_universe / on_start 内的
+            # provider 查询以首日前一交易日为锚（首个模拟日决策时点口径），
+            # 钩子里传未来日期也拿不到未来数据
+            self.provider.set_as_of(
+                self.provider._prev_trading_day(calendar[0]) or calendar[0]
+            )
 
             factor_symbols = self.strategy.get_factor_universe(self.provider, start, end)
             trade_symbols = self.strategy.get_universe(self.provider, start, end)
@@ -431,7 +469,7 @@ class Engine:
 
     def _compute_pending(self, calc_date: str, bars_dict: dict | None = None,
                          trades: list | None = None):
-        self.provider._as_of_date = calc_date
+        self.provider.set_as_of(calc_date)
 
         for holding in self.account.holdings.values():
             holding.holding_days += 1
@@ -469,14 +507,44 @@ class Engine:
             on_tick_result = on_tick(bars_dict, snapshot, self.provider)
 
         actions = self.strategy.select(bars_dict, snapshot, self.provider)
+        if not isinstance(actions, dict):
+            raise ValueError(
+                f"select() 必须返回 dict，得到 {type(actions).__name__}: {actions!r}"
+            )
+        unknown = set(actions) - _SELECT_KEYS
+        if unknown:
+            logger.warning(
+                "select() 返回未知键（将被忽略，可能是 typo）: %s", sorted(unknown)
+            )
 
-        # 合并 on_tick 返回的 buy_conditions
-        if on_tick_result is not None and on_tick_result.get("buy_conditions"):
-            existing_conds = actions.setdefault("buy_conditions", [])
-            existing_conds.extend(on_tick_result["buy_conditions"])
+        # 合并 on_tick 返回的 buy_conditions（同样校验返回类型与未知键）
+        if on_tick_result is not None:
+            if not isinstance(on_tick_result, dict):
+                raise ValueError(
+                    "on_tick() 必须返回 dict 或 None，得到 "
+                    f"{type(on_tick_result).__name__}: {on_tick_result!r}"
+                )
+            tick_unknown = set(on_tick_result) - _SELECT_KEYS
+            if tick_unknown:
+                logger.warning(
+                    "on_tick() 返回未知键（将被忽略，可能是 typo）: %s",
+                    sorted(tick_unknown),
+                )
+            if on_tick_result.get("buy_conditions"):
+                existing_conds = actions.setdefault("buy_conditions", [])
+                existing_conds.extend(on_tick_result["buy_conditions"])
 
-        buy = set(actions.get("buy", []))
-        sell = set(actions.get("sell", []))
+        buy_list = actions.get("buy", [])
+        sell_list = actions.get("sell", [])
+        if not isinstance(buy_list, list) or not isinstance(sell_list, list):
+            raise ValueError(
+                f"select() 的 buy/sell 必须是 list: "
+                f"buy={buy_list!r} sell={sell_list!r}"
+            )
+        _check_symbol_list(buy_list, "buy")
+        _check_symbol_list(sell_list, "sell")
+        buy = set(buy_list)
+        sell = set(sell_list)
         if buy & sell:
             raise ValueError(f"同日买卖冲突: {buy & sell}")
         target_value = actions.get("target_value") or {}

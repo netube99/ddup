@@ -1,8 +1,10 @@
 """引擎加固项测试：max_positions 硬上限、非法价格防护、涨跌停舍入、
 rebalance 零碎股清仓、run 异常状态落库。"""
 
+import logging
 import sqlite3
 
+import pandas as pd
 import pytest
 
 from btcore.costs import calc_trade_costs
@@ -172,3 +174,148 @@ def test_run_marks_failed_on_exception(tmp_path):
     finally:
         conn.close()
     assert status == "failed"
+
+
+# ── select() 协议加固: 名单查重 / 返回类型 / 未知键 / 前视钳制 ──
+
+
+class _DuckStrategy:
+    """最小鸭子策略：select/on_tick 返回可注入结果。"""
+
+    config = {}
+
+    def __init__(self, actions=None, tick_result=None):
+        self._actions = actions if actions is not None else {"buy": [], "sell": []}
+        self._tick_result = tick_result
+
+    def get_universe(self, provider, start, end):
+        return None
+
+    def get_factor_universe(self, provider, start, end):
+        return None
+
+    def on_start(self, provider, first_date, end_date=None):
+        pass
+
+    def on_fills(self, trades, provider):
+        pass
+
+    def on_tick(self, bars, snapshot, provider):
+        return self._tick_result
+
+    def select(self, bars, account_snapshot, provider):
+        return dict(self._actions)
+
+    def calc_conditions(self, symbol, entry_price, bar, holding_days):
+        return []
+
+
+def _make_engine(strategy):
+    provider = DataProvider(MockDataBackend())
+    return Engine(strategy, provider, db_path=":memory:")
+
+
+def test_buy_duplicate_symbols_raise():
+    """buy 名单重复 symbol → 决策时点 ValueError（双重扣款 + 持仓覆盖的前置拦截）。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"buy": ["000001.SZ", "000001.SZ"], "sell": []}
+    ))
+    with pytest.raises(ValueError, match="重复 symbol"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_sell_duplicate_symbols_raise():
+    engine = _make_engine(_DuckStrategy(
+        actions={"buy": [], "sell": ["000001.SZ", "000001.SZ"]}
+    ))
+    with pytest.raises(ValueError, match="重复 symbol"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_select_non_dict_raises():
+    class NotDict(_DuckStrategy):
+        def select(self, bars, account_snapshot, provider):
+            return None
+
+    engine = _make_engine(NotDict())
+    with pytest.raises(ValueError, match="必须返回 dict"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_select_unknown_key_warns(caplog):
+    """select 返回未知键（typo 如 buy_condition）→ WARNING 而不是静默失效。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"buy": [], "sell": [], "buy_condition": ["000001.SZ"]}
+    ))
+    with caplog.at_level(logging.WARNING):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+    assert "未知键" in caplog.text
+
+
+def test_on_tick_non_dict_raises():
+    engine = _make_engine(_DuckStrategy(tick_result=[]))
+    with pytest.raises(ValueError, match="on_tick"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_condition_missing_price_fails_fast():
+    """条件单缺必填键（STOP_LOSS 无 price）→ 决策时点 ValueError，不拖到次日撮合。"""
+
+    class NoPriceCond(_DuckStrategy):
+        def calc_conditions(self, symbol, entry_price, bar, holding_days):
+            return [{"type": "STOP_LOSS"}]
+
+    engine = _make_engine(NoPriceCond())
+    engine.account.holdings["000001.SZ"] = make_holding(
+        symbol="000001.SZ", shares=1000
+    )
+    with pytest.raises(ValueError, match="缺必填键"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_provider_clamp_blocks_future():
+    """set_as_of 后 provider 查询端被钳制；未钳制时同一查询可读到未来。"""
+    provider = DataProvider(MockDataBackend())
+    idx = pd.MultiIndex.from_tuples(
+        [(d, "000001.SZ") for d in ("20240501", "20240603", "20240604", "20240605")],
+        names=["trade_date", "symbol"],
+    )
+    df = pd.DataFrame({"close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+    provider.attach_bars(df)
+
+    unclamped = provider.get_historical_bars(None, "20240610", lookback_days=1000)
+    assert {"20240604", "20240605"} <= set(
+        unclamped.index.get_level_values("trade_date")
+    )
+
+    provider.set_as_of("20240604")
+    clamped = provider.get_historical_bars(None, "20240610", lookback_days=1000)
+    dates = set(clamped.index.get_level_values("trade_date"))
+    assert dates == {"20240501", "20240603"}
+
+
+def test_on_start_runs_with_clamped_asof():
+    """run() 在 on_start 前已钳制 provider（前视窗口闭合）。"""
+    seen = {}
+
+    def check(provider):
+        seen["as_of"] = provider._as_of_date
+
+    strategy = _DuckStrategy()
+    strategy.on_start = lambda provider, first_date, end_date=None: check(provider)
+    engine = _make_engine(strategy)
+    engine.run("20240603", "20240607")
+    assert seen["as_of"] is not None
+    assert seen["as_of"] <= "20240603"
+
+
+def test_run_idempotent_second_run_resets_account():
+    """同一实例二次 run() 从头重置账户，两次结果完全一致。"""
+    strategy = _DuckStrategy(actions={"buy": ["000001.SZ"], "sell": []})
+    engine = _make_engine(strategy)
+    engine.run("20240603", "20240607")
+    assert engine.account.cash < engine.initial_capital  # 发生了买入
+    first = (engine.account.cash, len(engine.account.holdings))
+    engine.run("20240603", "20240607")
+    second = (engine.account.cash, len(engine.account.holdings))
+    assert first == second

@@ -45,6 +45,11 @@ def eval_factor_specs(
     for spec in factor_specs or []:
         name = spec["name"]
         if spec.get("materialize_only"):
+            if name not in df.columns:
+                raise ValueError(
+                    f"因子列 {name!r} 不在截面数据里——引擎未物化"
+                    "（策略缺少 FACTOR_NODES？请经 strategy_loader 加载）"
+                )
             factor_df[name] = df[name]
             continue
         if name not in df.columns:
@@ -75,7 +80,8 @@ class ConditionBuilder:
     支持的规则（值均为比例，∈ (0,1)）：
       stop_loss_pct   → STOP_LOSS    价格 = 成本价 * (1 - pct)
       take_profit_pct → TAKE_PROFIT  价格 = 成本价 * (1 + pct)
-      trailing_pct    → TRAILING_TP  价格 = 持仓期间最高价 * (1 - pct)，最高价由本类逐日跟踪
+      trailing_pct    → TRAILING_TP  价格 = 持仓期间最高收盘价 * (1 - pct)，
+                        最高收盘价由本类逐日跟踪（触发仍在盘中 low）
       model_exit      → ML_EXIT      [{model, threshold}]：bar 中 ml_<model> 分数
                           >= threshold 时触发（分数由引擎物化/注入，含义由策略定义）
     """

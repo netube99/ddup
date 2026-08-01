@@ -18,11 +18,19 @@ logger = logging.getLogger(__name__)
 
 _DISPATCH: dict = {}
 _BUY_DISPATCH: dict = {}
+# 条件单类型 → 必填键（validate_condition_types 提前校验，T 日 fail-fast）
+_REQUIRED_KEYS: dict[str, frozenset[str]] = {}
 
 
-def register_condition_handler(condition_type: str, handler):
-    """注册条件卖出 handler: handler(holding, cond, bar) -> (executed, fill_price, log_params)。"""
+def register_condition_handler(condition_type: str, handler, required_keys=None):
+    """注册条件卖出 handler: handler(holding, cond, bar) -> (executed, fill_price, log_params)。
+
+    required_keys: 该类型条件单 dict 的必填键（如 {"price"}），
+    缺键会在 _compute_pending 阶段立即报错，而不是拖到次日撮合时 KeyError。
+    """
     _DISPATCH[condition_type] = handler
+    if required_keys:
+        _REQUIRED_KEYS[condition_type] = frozenset(required_keys)
 
 
 def register_buy_condition_handler(condition_type: str, handler):
@@ -31,10 +39,10 @@ def register_buy_condition_handler(condition_type: str, handler):
 
 
 def validate_condition_types(conditions: list[dict]) -> None:
-    """检查每个 condition 的 type 是否已注册；未注册立即抛错。
+    """检查每个 condition 的 type 是否已注册、必填键是否齐全；未通过立即抛错。
 
-    设计 §2.4 步 6: 未注册 type 在 _compute_pending 阶段快速失败,
-    不等到次日撮合时才发现。
+    设计 §2.4 步 6: 未注册 type / 缺必填键在 _compute_pending 阶段快速失败,
+    不等到次日撮合时才发现（handler 直取 cond["price"] 会 KeyError 崩 run）。
     """
     for cond in conditions:
         ctype = cond.get("type", "")
@@ -42,6 +50,15 @@ def validate_condition_types(conditions: list[dict]) -> None:
             raise ValueError(
                 f"未注册的条件单类型: {ctype!r}, 已注册: {list(_DISPATCH)}"
             )
+        missing = _REQUIRED_KEYS.get(ctype, frozenset()) - set(cond)
+        if missing:
+            raise ValueError(
+                f"条件单 {ctype} 缺必填键: {sorted(missing)} "
+                f"(完整条件单: {cond!r})"
+            )
+        price = cond.get("price")
+        if ctype in _REQUIRED_KEYS and not is_valid_price(price):
+            raise ValueError(f"条件单 {ctype}.price 必须是正数: {price!r}")
 
 
 def validate_buy_condition_types(orders: list[dict]) -> None:
@@ -153,11 +170,11 @@ def handle_take_profit(holding, cond: dict, bar) -> tuple:
     return False, 0.0, {"trigger_price": target_price}
 
 
-register_condition_handler("STOP_LOSS", handle_stop_loss)
-register_condition_handler("TAKE_PROFIT", handle_take_profit)
+register_condition_handler("STOP_LOSS", handle_stop_loss, required_keys={"price"})
+register_condition_handler("TAKE_PROFIT", handle_take_profit, required_keys={"price"})
 # TRAILING_TP 成交规则与 STOP_LOSS 相同: cond["price"] 由策略每日更新为
 # highest_seen * (1 - trailing_pct)
-register_condition_handler("TRAILING_TP", handle_stop_loss)
+register_condition_handler("TRAILING_TP", handle_stop_loss, required_keys={"price"})
 
 
 # ── 条件买入（T 日 select 声明, T+1 盘中触发, 单日有效）──

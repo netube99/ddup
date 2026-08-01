@@ -141,11 +141,23 @@ def resolve_spec(spec: dict, library: dict | None = None) -> dict:
         raise ValueError(f"factor_specs 条目缺少 factor 键: {spec!r}")
     lib = library if library is not None else load_library()
     _get_spec(name, lib)
+    weight = spec.get("weight", 1.0)
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)) \
+            or weight != weight:
+        raise ValueError(f"factor_specs 条目 weight 必须是有限数值: {weight!r}")
+    ascending = spec.get("ascending", False)
+    if not isinstance(ascending, bool):
+        raise ValueError(f"factor_specs 条目 ascending 必须是 bool: {ascending!r}")
+    materialize_only = spec.get("materialize_only", False)
+    if not isinstance(materialize_only, bool):
+        raise ValueError(
+            f"factor_specs 条目 materialize_only 必须是 bool: {materialize_only!r}"
+        )
     return {
         "name": name,
-        "weight": float(spec.get("weight", 1.0)),
-        "ascending": bool(spec.get("ascending", False)),
-        "materialize_only": bool(spec.get("materialize_only", False)),
+        "weight": weight,
+        "ascending": ascending,
+        "materialize_only": materialize_only,
     }
 
 

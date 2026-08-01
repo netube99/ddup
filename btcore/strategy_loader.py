@@ -23,6 +23,7 @@ from pathlib import Path
 import yaml
 
 from btcore.factors.library import load_library, resolve_closure, resolve_spec
+from btcore.filters import INDEX_LOOKBACK_DAYS
 from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL, parse_models
 from btcore.strategy import Strategy
 
@@ -64,6 +65,13 @@ def build_strategy(
         完整的 Strategy 实例（含 FACTOR_SPECS / FACTOR_NODES / MODEL_SPECS /
         FILTER_RULES）。
     """
+    # 不污染调用方 dict：models_meta 注入与 conditions 校验改写只落在副本上
+    config = dict(config)
+
+    # conditions 键校验（YAML 路径与程序化路径统一 fail-fast）
+    if config.get("conditions"):
+        config["conditions"] = _validate_conditions(config["conditions"])
+
     # 加载因子库：str → load_library；dict → 直接用；None → 默认路径
     if factor_library is None:
         library = load_library()
@@ -167,10 +175,10 @@ def load_strategy(path: str) -> Strategy:
     factor_specs = doc.get("factor_specs")
     filter_rules = doc.get("filter_rules")
 
-    # conditions 在 YAML 中是顶层键，合并进 config
+    # conditions 在 YAML 中是顶层键，合并进 config（键校验在 build_strategy 内统一做）
     conditions = doc.get("conditions")
     if conditions:
-        config["conditions"] = _validate_conditions(conditions)
+        config["conditions"] = conditions
 
     yaml_dir = str(Path(path).parent)
     return build_strategy(
@@ -206,7 +214,7 @@ def _attach_index_universe(strategy: Strategy, filter_rules: dict) -> None:
                 )
             return None
         lookback = (
-            date.fromisoformat(start) - timedelta(days=45)
+            date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
         ).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(codes, lookback, end)
         if not snapshots:
@@ -239,7 +247,7 @@ def _attach_factor_universe(strategy: Strategy, filter_rules: dict) -> None:
                 )
             return None
         lookback = (
-            date.fromisoformat(start) - timedelta(days=45)
+            date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
         ).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(codes, lookback, end)
         if not snapshots:

@@ -1,5 +1,7 @@
 """测试 StockFilter 行业过滤（exclude_industries）。"""
 
+import logging
+
 from btcore.filters import StockFilter
 
 
@@ -200,6 +202,27 @@ class TestSoftFallback:
                         {**self._BASE, "index_universe": ["000300.SH"]})
         assert "白名单规则不生效" in caplog.text
         assert set(f.filter(self._bars(), "20240603")) == set(self._bars())
+
+
+class TestDefaultsOff:
+    """未声明规则 = 不过滤、不告警（与 __init__ 加载条件、列裁剪语义一致）。"""
+
+    def test_empty_rules_no_filter_no_warning(self, caplog):
+        backend = StubBackend(st_map={"20240603": {"600036.SH"}})
+        f = StockFilter(backend, "20240601", {})
+        bars = {s: make_bar(s) for s in ("600036.SH", "600519.SH")}
+        with caplog.at_level(logging.WARNING):
+            assert set(f.filter(bars, "20240603")) == {"600036.SH", "600519.SH"}
+        assert caplog.text == ""
+
+    def test_partial_rules_no_spurious_loss_warning(self, caplog):
+        """只声明 min_price 时，不触发"请显式声明 exclude_loss"的误导告警。"""
+        backend = StubBackend(st_map={"20240603": {"600036.SH"}})
+        f = StockFilter(backend, "20240601", {"min_price": 5.0})
+        bars = {s: make_bar(s) for s in ("600036.SH", "600519.SH")}
+        with caplog.at_level(logging.WARNING):
+            assert set(f.filter(bars, "20240603")) == {"600036.SH", "600519.SH"}
+        assert "exclude_loss" not in caplog.text
 
 
 class TestExcludeST:

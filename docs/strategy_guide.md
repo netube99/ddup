@@ -1,6 +1,6 @@
 # 策略设计指南
 
-ddup 策略系统由两部分构成：**YAML 配置**声明因子引用、过滤规则和条件单；**Python 策略类**实现 `on_start` / `select` / `calc_conditions` 三个核心方法。引擎负责 preload、因子物化、撮合和结果落库——策略代码只描述买卖决策。
+ddup 策略系统由两部分构成：**YAML 配置**声明因子引用、过滤规则和条件单；**Python 策略类**实现 `select` 核心决策方法（`on_start` / `calc_conditions` 有基类默认实现，覆盖时才需自己写）。引擎负责 preload、因子物化、撮合和结果落库——策略代码只描述买卖决策。
 
 ---
 
@@ -34,22 +34,21 @@ conditions:
 **strategy.py**：
 
 ```python
-from btcore.filters import StockFilter
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 class MyStrategy(Strategy):
     def on_start(self, provider, first_date, end_date=None):
+        # 基类接线：FILTER_RULES → self._filter、conditions → self._cond
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 5))
-        self._filter = StockFilter(provider.backend, first_date, self.FILTER_RULES, end_date=end_date)
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
     def select(self, bars, account_snapshot, provider):
         if not bars:
             return {"buy": [], "sell": []}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
 
         df = bars_to_df(filtered)
         _, score = eval_factor_specs(df, self.FACTOR_SPECS)
@@ -59,8 +58,7 @@ class MyStrategy(Strategy):
 
         return {"buy": sorted(target - current), "sell": sorted(current - target)}
 
-    def calc_conditions(self, symbol, entry_price, bar, holding_days):
-        return self._cond.calc(symbol, entry_price, bar, holding_days)
+    # calc_conditions 未覆盖：基类默认实现把 YAML conditions 节翻译为条件单
 ```
 
 **运行**：
@@ -100,11 +98,11 @@ on_start (一次)
 
 | 职责 | 方式 | 说明 |
 |------|------|------|
-| 必须实现 | `on_start(provider, first_date, end_date)` | 初始化过滤器、状态字典、注册自定义 handler |
 | 必须实现 | `select(bars, snapshot, provider)` → dict | 每日买卖决策 |
-| 必须实现 | `calc_conditions(symbol, entry_price, bar, holding_days)` → list[dict] | 每个持仓每日的条件单 |
+| 可选覆盖 | `on_start(provider, first_date, end_date)` | 默认已构建 `self._filter`（FILTER_RULES 非空时）；覆盖需 `super().on_start(...)` |
+| 可选覆盖 | `calc_conditions(symbol, entry_price, bar, holding_days)` → list[dict] | 默认委托 `self._cond.calc()` 翻译 YAML conditions；覆盖需自行处理 `self._cond` |
 | 可选实现 | `on_fills(trades, provider)` | 感知成交 → 冷却期、状态跟踪 |
-| 可选实现 | `on_tick(bars, snapshot, provider)` → dict \| None | 每日状态维护 + 非调仓日条件买单 |
+| 可选实现 | `on_tick(bars, snapshot, provider)` → dict \| None | 每日状态维护 + 非调仓日条件买单；默认实现负责 `ConditionBuilder.prune()`，覆盖时请 `super().on_tick(...)` |
 | 可选覆盖 | `get_universe(provider, start, end)` → list[str] \| None | 自定义交易域 |
 | 可选覆盖 | `get_factor_universe(provider, start, end)` → list[str] \| None | 自定义因子计算域 |
 | 声明式 | `REQUIRED_FIELDS: list[str]` | 声明 `select()` 中命令式访问的列 |
@@ -151,13 +149,14 @@ class MyStrategy(Strategy):
 
 ### 3.2 `on_start(self, provider, first_date, end_date=None)`
 
-**必须实现。** 回测开始前调用一次。在此初始化所有策略状态：
+**可选覆盖。** 基类默认实现：`FILTER_RULES` 非空时构建 `StockFilter` 挂到 `self._filter`。回测开始前调用一次。覆盖时在此初始化所有策略状态：
 
-- 创建 `StockFilter`：`StockFilter(provider.backend, first_date, self.FILTER_RULES, end_date=end_date)`
-- 创建 `ConditionBuilder`：`ConditionBuilder(self.config.get("conditions", {}))`
+- 先调用 `super().on_start(provider, first_date, end_date)` 以构建 `self._filter`
 - 注册自定义条件单 handler（见 §5.2.3）
 - 解析自定义 config 参数：`self._top_k = int(self.config.get("top_k", 5))`
 - 初始化状态字典：冷却期 map、持仓跟踪 dict、市场状态变量
+
+> 覆盖但忘记 `super().on_start(...)` 时，`filter_bars()` 会在 `FILTER_RULES` 非空时直接报错（fail-fast），而不是让过滤规则静默失效。
 
 ### 3.3 `select(self, bars, account_snapshot, provider)` → dict
 
@@ -201,16 +200,16 @@ class MyStrategy(Strategy):
 
 ### 3.4 `calc_conditions(self, symbol, entry_price, bar, holding_days)` → list[dict]
 
-**必须实现。** 引擎对**每个持仓每日**调用。返回条件单 dict 列表；空列表 = 该持仓无条件单。
+**可选覆盖。** 基类默认实现委托 `ConditionBuilder.calc()`（把 YAML `conditions` 节翻译为条件单）。引擎对**每个持仓每日**调用。返回条件单 dict 列表；空列表 = 该持仓无条件单。
 
 - `symbol` — 股票代码
 - `entry_price` — 入场均价（公司行为调整后）
 - `bar` — 该 symbol 当日 bar dict
 - `holding_days` — 持仓天数（含本日）
 
-每条条件单至少包含 `type`（str）；其余键由对应 handler 自行定义（内置止损/止盈 handler 消费 `price`，`ML_EXIT` 消费 `model`/`score`，自定义 handler 可定义任意键）。引擎按**列表顺序**评估，首条触发生效后不再检查后续条件。返回的 `type` 在决策时点即校验——未注册的类型当天就报错，不会拖到次日撮合。
+每条条件单至少包含 `type`（str）；其余键由对应 handler 自行定义（内置止损/止盈 handler 消费 `price`，`ML_EXIT` 消费 `model`/`score`，自定义 handler 可定义任意键）。引擎按**列表顺序**评估，首条触发生效后不再检查后续条件。返回的 `type` 在决策时点即校验——未注册的类型或缺必填键（如内置类型的 `price`）当天就报错，不会拖到次日撮合。
 
-简便用法：委托 `ConditionBuilder.calc()`（见 §5.2.1）。
+覆盖扩展：先 `conds = self._cond.calc(symbol, entry_price, bar, holding_days)` 拿默认条件单，再增删改（如 `holding_days` 自适应、替换 `STOP_LOSS`）。
 
 ### 3.5 `on_fills(self, trades, provider)`
 
@@ -393,7 +392,7 @@ conditions:
 
 - 前三项必须是 `(0, 1)` 内的数值，否则加载时报错；未知 `conditions` 键直接 `ValueError`。
 - `model_exit` 是 `[{model, threshold}]` 列表：`model` 必须在 `models` 节已声明（缺省 `threshold=0.5`，须 ∈ (0,1)）；引用未声明模型在加载时 `ValueError`。
-- 所有规则由 `ConditionBuilder` 翻译为条件单 dict，策略在 `calc_conditions` 中经 `self._cond.calc()` 委托。
+- 所有规则由 `ConditionBuilder` 翻译为条件单 dict，基类默认 `calc_conditions` 已委托 `self._cond.calc()`（见 §3.4）；覆盖 `calc_conditions` 时自行 `self._cond.calc()` 取默认条件单再增删改。
 
 ### 4.6 `factor_library`
 
@@ -600,7 +599,7 @@ register_buy_condition_handler("MY_BUY", my_buy_handler)
 | ML 分数列 | `ml_<model>` | panel 模型物化列；holding 模型在决策时点注入持仓 bar（见 ml_guide） |
 | 扩展字段 | 后端 `extra_fields` 登记的列（`pe_ttm`、`turnover_rate` 等） | 需经 `REQUIRED_FIELDS` 声明保留 |
 
-**前视保护**：`select()` 中经 `provider.get_historical_bars()` 查询历史数据时，引擎钳制查询端到当前模拟日之前——策略传未来日期也拿不到未来数据。
+**前视保护**：`select()` / `on_tick()` 中经 `provider.get_historical_bars()` 查询历史数据时，引擎钳制查询端到当前模拟日之前——策略传未来日期也拿不到未来数据。钳制从 preload 阶段（`get_universe` / `on_start`）即生效：钩子内查询同样以首日前一交易日为锚。
 
 ---
 
@@ -610,7 +609,7 @@ register_buy_condition_handler("MY_BUY", my_buy_handler)
 
 ### 6.1 Level 0：裸因子轮动 — `strategies/examples/bare_bones/`
 
-**目标**：最简策略完整骨架。三板斧：`StockFilter` 过滤 → `eval_factor_specs` 打分 → `ConditionBuilder` 条件单。代码即 §1 快速开始的形态，无 `on_fills`、无 `buy_weights`，每日全量轮动。
+**目标**：最简策略完整骨架。基类默认接线（`filter_rules` → `filter_bars()` 过滤，`conditions` → 默认 `calc_conditions` 条件单）+ `eval_factor_specs` 打分。代码即 §1 快速开始的形态，无 `on_fills`、无 `buy_weights`，每日全量轮动。
 
 ### 6.2 Level 1：进阶轮动 — `strategies/examples/rolling_ranker/`
 
@@ -776,16 +775,20 @@ for sym in current - target:
 |------|------|------|
 | 访问未在 `REQUIRED_FIELDS` 声明的列 | `KeyError` | 列名加入 `REQUIRED_FIELDS` |
 | 忘记 `register_condition_handler` 就使用自定义 type | 决策时点 `ValueError: 未注册的条件单类型` | 在 `on_start` 中注册 |
+| `buy`/`sell` 名单含重复 symbol | 决策时点 `ValueError`（重复买入会双重扣款+持仓覆盖） | 名单去重 |
+| `select` 返回键名 typo（如 `buy_condition`） | 决策时点 WARNING，该键静默忽略 | 对照 §3.3 键表检查 |
+| 条件单缺必填键（内置类型缺 `price`） | 决策时点 `ValueError` | 内置类型必须给数值 price |
 | `target_value` 与 `buy`/`sell`/`buy_conditions` 同日混用 | `ValueError` | 二选一 |
 | `sell_shares` 包含不在 `sell` 中的 symbol | `ValueError` | 确保键是 `sell` 子集 |
 | `buy_weights` 键与 `buy` 列表不一致 / 权重和 > 1 | `ValueError` | 键精确匹配，权重和 ≤ 1 |
 | `buy_conditions` 的 symbol 与 buy/sell 名单重叠 | `ValueError` | 条件买单只挂名单外标的 |
 | 条件买单同时填 `value` 和 `shares`，或都不填 | `ValueError` | 恰填一个 |
-| 忘记 `ConditionBuilder.prune()` | trailing 状态泄漏到已平仓标的 | 在 `on_tick` 或 `select` 中调用 |
+| 覆盖 `on_tick` 却忘记 `ConditionBuilder.prune()` | trailing 状态泄漏到已平仓标的 | 调用 `super().on_tick(...)` 或自行 prune |
+| 覆盖 `on_start` 却忘记 `super().on_start(...)`（且声明了 filter_rules） | `filter_bars()` 直接报错 | on_start 先调 super |
 | 条件单 `price` 填 `None` 但自定义 handler 未计算价格 | handler 收到 None | 内置类型必须给数值 price；自定义 handler 自行计算 |
 | 把每日状态更新写在 `select()` 的调仓 early-return 之后 | 非调仓日状态不更新 | 状态更新移到 `on_tick` |
 | 指望 `max_positions` 拦截超额买入 | 引擎只记 INFO 不拦截 | 策略自行控制 buy 名单长度 |
-| 未显式声明 `exclude_loss: true` | `pe_ttm` 不 preload，亏损过滤不生效（告警一次） | 显式声明该规则 |
+| 未显式声明 `exclude_loss: true` | `pe_ttm` 不 preload，亏损过滤不生效 | 需要时才显式声明（未声明 = 不过滤，不再误告警） |
 | 空 `bars` 时未提前返回 | `StopIteration` / `KeyError` | `if not bars: return {"buy": [], "sell": []}` |
 | 用裸价（`close`）做排名/信号 | 除权日跳空产生虚假信号 | 因子侧用 `*_hfq` 列 |
 

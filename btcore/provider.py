@@ -49,6 +49,14 @@ class DataProvider:
             symbols, lookback_start or "00000101", trade_date, columns=columns,
         )
 
+    def set_as_of(self, date_str: str | None) -> None:
+        """钳制查询锚点：get_historical_bars / get_benchmark_returns 的查询端上限。
+
+        引擎在回测主循环每日更新；preload 阶段（get_universe / on_start）
+        即已钳到首日前一交易日，钩子内传未来日期也拿不到未来数据。
+        """
+        self._as_of_date = date_str
+
     # ── 策略用 (不含当日) ──
 
     def attach_bars(self, bars_df: pd.DataFrame) -> None:

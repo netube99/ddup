@@ -2,6 +2,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
+from btcore.filters import StockFilter
+from btcore.strategy_tools import ConditionBuilder
+
 logger = logging.getLogger(__name__)
 
 
@@ -11,6 +14,14 @@ class Strategy(ABC):
     引擎只通过钩子与策略交互：on_start（启动初始化）/ on_fills（每日成交回报，
     可选）/ on_tick（每日状态维护，可选）/ select（每日选股下单）/
     calc_conditions（条件单生成）/ get_universe（股票池裁剪）。
+
+    声明式配置的默认接线：
+      - FILTER_RULES → 默认 on_start 构建 StockFilter 挂到 self._filter，
+        select 中经 self.filter_bars(bars, date_str) 过滤
+      - conditions   → 基类 __init__ 构建 ConditionBuilder 挂到 self._cond，
+        默认 calc_conditions 委托其翻译为条件单
+    子类覆盖 on_start / on_tick / calc_conditions 时必须调用 super() 对应实现
+    （或自行维护 self._filter / self._cond），否则声明式规则静默失效。
 
     FACTOR_SPECS 与 FILTER_RULES 是声明式配置；子类可以在类级别定义默认值，
     也可以在构造时通过 ``factor_specs`` / ``filter_rules`` 传入实例级覆盖。
@@ -54,6 +65,9 @@ class Strategy(ABC):
         self.FILTER_RULES = (
             dict(filter_rules) if filter_rules is not None else dict(self.FILTER_RULES)
         )
+        # 声明式接线：conditions 规则 → ConditionBuilder（默认 calc_conditions 委托）
+        self._cond = ConditionBuilder(self.config.get("conditions") or {})
+        self._filter: StockFilter | None = None
 
     def get_universe(
         self, provider, start: str, end: str
@@ -77,11 +91,19 @@ class Strategy(ABC):
         """
         return None
 
-    @abstractmethod
     def on_start(
         self, provider, first_date: str, end_date: str | None = None
     ) -> None:
-        ...
+        """默认实现：FILTER_RULES 非空时构建 StockFilter 挂到 self._filter。
+
+        子类覆盖时必须调用 super().on_start(provider, first_date, end_date)，
+        否则 self._filter 不构建、过滤规则失效（filter_bars 会 fail-fast 报错）。
+        """
+        self._filter = None
+        if self.FILTER_RULES:
+            self._filter = StockFilter(
+                provider.backend, first_date, self.FILTER_RULES, end_date=end_date
+            )
 
     def on_fills(self, trades: list, provider) -> None:
         """可选 hook：每日 select 之前调用，告知当日已成交订单。
@@ -94,33 +116,37 @@ class Strategy(ABC):
         """
 
     def on_tick(self, bars, snapshot, provider) -> dict | None:
-        """可选钩子：每日调用，用于维护策略内部状态。
+        """默认实现：修剪 ConditionBuilder 已平仓标的的 trailing 锚点。
 
-        引擎在 on_fills 之后、select 之前调用。on_tick 每日运行
-        ——即使策略在 select 中自行管理调仓节奏，on_tick 仍每日运行。
-        策略可在此更新：
-          - 冷却期递减
-          - 市场状态机推进
-          - 持仓逐仓最高价跟踪
-          - 自定义 ConditionBuilder 状态维护
-          - 返回 buy_conditions 以在非调仓日提交新的条件买单
-
-        Args:
-            bars: 当日截面 dict-of-dicts（symbol → {open, high, low, close, ...}）
-            snapshot: 当日账户快照 Snapshot（含 holdings / trades / cash / total_value）
-            provider: DataProvider 实例
-
-        Returns:
-            None 或 {"buy_conditions": [{symbol, trigger, price?, ...}, ...]}。
-            返回的 buy_conditions 会合并到引擎的 pending_actions 中，与 select()
-            返回的 buy_conditions 等价处理。基类默认返回 None。
+        子类覆盖时必须调用 super().on_tick(bars, snapshot, provider)
+        （或在自身实现中自行 prune），否则重入场标的可能沿用旧锚点。
         """
+        if snapshot is not None:
+            self._cond.prune(set(snapshot.holdings.keys()))
         return None
 
     @abstractmethod
     def select(self, bars, account_snapshot, provider) -> dict:
         ...
 
-    @abstractmethod
     def calc_conditions(self, symbol, entry_price, bar, holding_days) -> list[dict]:
-        ...
+        """默认实现：委托 ConditionBuilder 翻译 YAML conditions 声明。
+
+        子类可覆盖做程序式扩展（在默认条件单之上增删改）。
+        """
+        return self._cond.calc(symbol, entry_price, bar, holding_days)
+
+    def filter_bars(self, bars: dict, date_str: str) -> dict:
+        """FILTER_RULES 过滤；未配置规则时原样返回。
+
+        on_start 未调用 super().on_start() 时 self._filter 未构建——
+        FILTER_RULES 非空则直接报错（fail-fast），避免过滤规则静默失效。
+        """
+        if self._filter is not None:
+            return self._filter.filter(bars, date_str)
+        if self.FILTER_RULES:
+            raise RuntimeError(
+                "FILTER_RULES 已配置但 self._filter 未构建——"
+                "on_start 必须调用 super().on_start(provider, first_date, end_date)"
+            )
+        return bars

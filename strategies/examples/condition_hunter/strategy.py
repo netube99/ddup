@@ -10,13 +10,12 @@
 下一级 multi_model 展示多模型投票与状态机。
 """
 
-from btcore.filters import StockFilter
 from btcore.match.conditions import (
     register_buy_condition_handler,
     register_condition_handler,
 )
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 # ══════════════════════════════════════════════════════════════════════════
 # 自定义条件单 handler — 模块级函数，在 on_start 中注册（进程级全局）
@@ -74,12 +73,10 @@ class ConditionHunter(Strategy):
         register_condition_handler("DYNAMIC_STOP", _dynamic_stop_handler)
         register_buy_condition_handler("VWAP_BUY", _vwap_buy_handler)
 
+        # 基类接线：FILTER_RULES → self._filter、conditions → self._cond
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 5))
         self._hunt_count = int(self.config.get("hunt_count", 3))
-        self._filter = StockFilter(
-            provider.backend, first_date, self.FILTER_RULES, end_date=end_date
-        )
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
         # 记录上一日的 top_k 之外候选（供 on_tick 突破买入用）
         self._watchlist: dict[str, float] = {}
@@ -92,12 +89,16 @@ class ConditionHunter(Strategy):
         on_tick 每日运行，不受 select 中调仓判断影响。
         返回的 buy_conditions 会合并到 select() 返回的 buy_conditions 中。
         """
-        # 修剪条件单状态
-        self._cond.prune(set(snapshot.holdings.keys()))
+        # 修剪条件单状态（基类默认 on_tick 负责）
+        super().on_tick(bars, snapshot, provider)
 
         # 检测突破，提交非调仓日条件买单
         orders = []
+        self._breakout_symbols = []  # select 据此排除 buy 名单，避免同日冲突
         for sym, ref_close in list(self._watchlist.items()):
+            # 已持仓标的跳过：select 同日可能将其列入 sell（卖出与条件买入互斥）
+            if sym in snapshot.holdings:
+                continue
             bar = bars.get(sym)
             if not bar:
                 continue
@@ -108,6 +109,7 @@ class ConditionHunter(Strategy):
                     "price": round(ref_close * 1.03, 2),
                     "value": snapshot.total_value * 0.02,
                 })
+                self._breakout_symbols.append(sym)
                 del self._watchlist[sym]  # 单日只挂一次
 
         if orders:
@@ -120,7 +122,7 @@ class ConditionHunter(Strategy):
             return {"buy": [], "sell": []}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
 
         df = bars_to_df(filtered)
         _, score = eval_factor_specs(df, self.FACTOR_SPECS)
@@ -131,6 +133,10 @@ class ConditionHunter(Strategy):
 
         buy_list = sorted(target - current)
         sell_list = sorted(current - target)
+
+        # 排除 on_tick 已挂条件买单的标的：同一 symbol 同日既在 buy 名单又挂
+        # 条件买单会被引擎拒绝（同日买卖冲突 fail-fast）
+        buy_list = [s for s in buy_list if s not in self._breakout_symbols]
 
         # ── 条件买入：top_k 之后的 hunt_count 只作为条件买单候选 ─────────
         # LIMIT_BUY: 现价 98% 回踩买入（限价低吸）

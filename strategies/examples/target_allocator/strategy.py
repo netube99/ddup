@@ -11,9 +11,8 @@
 下一级 condition_hunter 展示条件单系统的全部入口。
 """
 
-from btcore.filters import StockFilter
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 
 class TargetAllocator(Strategy):
@@ -28,13 +27,10 @@ class TargetAllocator(Strategy):
     """
 
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 8))
         self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
         self._last_rebalance = 0
-        self._filter = StockFilter(
-            provider.backend, first_date, self.FILTER_RULES, end_date=end_date
-        )
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
     def select(self, bars, account_snapshot, provider) -> dict:
         if not bars:
@@ -51,7 +47,7 @@ class TargetAllocator(Strategy):
 
         self._last_rebalance = date_int
 
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
 
         df = bars_to_df(filtered)
         factor_df, score = eval_factor_specs(df, self.FACTOR_SPECS)
@@ -99,6 +95,4 @@ class TargetAllocator(Strategy):
 
         return {"buy": [], "sell": [], "target_value": target_value}
 
-    def calc_conditions(self, symbol, entry_price, bar, holding_days) -> list[dict]:
-        """每个持仓的条件单。"""
-        return self._cond.calc(symbol, entry_price, bar, holding_days)
+    # calc_conditions 未覆盖：基类默认实现把 YAML conditions 节翻译为条件单。

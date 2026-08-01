@@ -12,9 +12,8 @@
   - 与 self_managed_rank（排名阈值模式）形成两种自管理方案
 """
 
-from btcore.filters import StockFilter
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 
 class SelfManagedTime(Strategy):
@@ -25,16 +24,12 @@ class SelfManagedTime(Strategy):
     """
 
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 5))
         self._rebalance_interval = int(self.config.get("rebalance_interval", 22))
         self._emergency_sell_threshold = float(
             self.config.get("emergency_sell_threshold", -0.09)
         )
-
-        self._filter = StockFilter(
-            provider.backend, first_date, self.FILTER_RULES, end_date=end_date
-        )
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
         # 冷却期 + 上次调仓日
         self._cooldown: dict[str, int] = {}
@@ -58,11 +53,13 @@ class SelfManagedTime(Strategy):
         date_int = int(date_str) if date_str else 0
 
         # 冷却期到期清理
+        # 冷却期到期清理
         expired = [s for s, d in self._cooldown.items() if d <= date_int]
         for s in expired:
             del self._cooldown[s]
 
-        self._cond.prune(set(snapshot.holdings.keys()))
+        # 清理已平仓标的的 trailing 锚点（基类默认 on_tick 负责）
+        super().on_tick(bars, snapshot, provider)
 
     # ── select: 时间门控调仓 ─────────────────────────────────────────────
     def select(self, bars, account_snapshot, provider) -> dict:
@@ -71,7 +68,7 @@ class SelfManagedTime(Strategy):
 
         date_str = next(iter(bars.values())).get("trade_date", "")
         date_int = int(date_str) if date_str else 0
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
         df = bars_to_df(filtered)
         current = set(account_snapshot.holdings.keys())
 
@@ -107,5 +104,4 @@ class SelfManagedTime(Strategy):
 
         return {"buy": buy_list, "sell": sell_list}
 
-    def calc_conditions(self, symbol, entry_price, bar, holding_days) -> list[dict]:
-        return self._cond.calc(symbol, entry_price, bar, holding_days)
+    # calc_conditions 未覆盖：基类默认实现把 YAML conditions 节翻译为条件单。

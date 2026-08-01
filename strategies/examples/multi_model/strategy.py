@@ -14,10 +14,10 @@
 下一级 self_managed_rank / self_managed_time 展示自管理换手的两种模式。
 """
 
-from btcore.filters import StockFilter
+from btcore.filters import INDEX_LOOKBACK_DAYS
 from btcore.match.conditions import register_condition_handler
 from btcore.strategy import Strategy
-from btcore.strategy_tools import ConditionBuilder, bars_to_df, eval_factor_specs
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 
 # ══════════════════════════════════════════════════════════════════════════
 # 自定义条件单 handler
@@ -91,7 +91,9 @@ class MultiModel(Strategy):
             return None  # 后端不支持 → 全市场
         from datetime import date as dt_date
         from datetime import timedelta
-        lookback = (dt_date.fromisoformat(start) - timedelta(days=45)).strftime("%Y%m%d")
+        lookback = (
+            dt_date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
+        ).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(["000300.SH"], lookback, end)
         if not snapshots:
             return None
@@ -109,7 +111,9 @@ class MultiModel(Strategy):
             return None
         from datetime import date as dt_date
         from datetime import timedelta
-        lookback = (dt_date.fromisoformat(start) - timedelta(days=45)).strftime("%Y%m%d")
+        lookback = (
+            dt_date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
+        ).strftime("%Y%m%d")
         snapshots = provider.backend.get_index_members(["000906.SH"], lookback, end)
         if not snapshots:
             return None
@@ -121,16 +125,13 @@ class MultiModel(Strategy):
         register_condition_handler("DYNAMIC_STOP", _dynamic_stop)
         register_condition_handler("TIME_STOP", _time_stop)
 
+        # 基类接线：FILTER_RULES → self._filter、conditions → self._cond
+        super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 8))
         self._cooldown_days = int(self.config.get("cooldown_days", 3))
         self._confirm_days = int(self.config.get("mode_confirm_days", 5))
         self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
         self._last_rebalance = 0
-
-        self._filter = StockFilter(
-            provider.backend, first_date, self.FILTER_RULES, end_date=end_date
-        )
-        self._cond = ConditionBuilder(self.config.get("conditions", {}))
 
         # 三套子模型的因子规格（各自独立打分）
         self._momentum_specs = [
@@ -217,8 +218,8 @@ class MultiModel(Strategy):
                     self._mode = target_mode
                     self._mode_counter = 0
 
-        # 修剪条件单状态
-        self._cond.prune(set(snapshot.holdings.keys()))
+        # 修剪条件单状态（基类默认 on_tick 负责）
+        super().on_tick(bars, snapshot, provider)
 
     # ── select: 多模型加权投票（时间门控） ──────────────────────────────
     def select(self, bars, account_snapshot, provider) -> dict:
@@ -236,7 +237,7 @@ class MultiModel(Strategy):
 
         self._last_rebalance = date_int
 
-        filtered = self._filter.filter(bars, date_str)
+        filtered = self.filter_bars(bars, date_str)
         df = bars_to_df(filtered)
 
         # ── 三模型独立打分 ──────────────────────────────────────────────

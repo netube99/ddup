@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # index_universe 成分快照是月频的，加载时向前多取一段，
 # 保证回测首日也有 ≤ 当日的快照可用
-_INDEX_LOOKBACK_DAYS = 45
+INDEX_LOOKBACK_DAYS = 45
 
 
 def filter_required_columns(rules: dict) -> set[str]:
@@ -72,7 +72,7 @@ class StockFilter:
             if hasattr(backend, "get_index_members"):
                 lookback = (
                     date.fromisoformat(start_date)
-                    - timedelta(days=_INDEX_LOOKBACK_DAYS)
+                    - timedelta(days=INDEX_LOOKBACK_DAYS)
                 ).strftime("%Y%m%d")
                 self._idx_map = backend.get_index_members(
                     list(rules["index_universe"]), lookback, end_date or start_date
@@ -100,9 +100,11 @@ class StockFilter:
         rules = self._rules
         exclude_boards = set(rules.get("exclude_boards", []))
         min_price = rules.get("min_price", 0.0)
-        exclude_st = rules.get("exclude_st", True)
-        exclude_new_stock = rules.get("exclude_new_stock", True)
-        exclude_loss = rules.get("exclude_loss", True)
+        # 默认关闭：未声明 = 不生效（与 __init__ 的加载条件和
+        # filter_required_columns 的 preload 条件一致，避免"假开启"告警）
+        exclude_st = rules.get("exclude_st", False)
+        exclude_new_stock = rules.get("exclude_new_stock", False)
+        exclude_loss = rules.get("exclude_loss", False)
         exclude_industries = set(rules.get("exclude_industries", []))
         index_members = self._index_members_at(date_str)
 
