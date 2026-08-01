@@ -245,7 +245,7 @@ class MyStrategy(Strategy):
 - 逐仓最高价跟踪
 - `ConditionBuilder.prune()` 清理已平仓标的的 trailing 状态
 
-**返回值**：可返回 `{"buy_conditions": [{symbol, type, price, value|shares}]}`，引擎将其合并进 `select()` 返回的 `buy_conditions`（合并后统一走 §3.3 的校验）。策略因此可以在非调仓日提交条件买单（如突破买入），不受调仓窗口限制：
+**返回值**：可返回 `{"buy_conditions": [{symbol, type, price, value|shares}]}`，引擎将其合并进 `select()` 返回的 `buy_conditions`（合并后统一走 §3.3 的校验）。策略因此可以在非调仓日提交条件买单（如突破买入），不受调仓窗口限制。**返回值只支持 `buy_conditions` 一个键**——返回 `buy`/`sell`/`target_value` 等其他键会直接 `ValueError`（买卖名单只能经 `select()` 返回；`on_tick` 里返回这些键此前会被静默丢弃，故引擎改为报错而非忽略）：
 
 ```python
 def on_tick(self, bars, snapshot, provider):
@@ -580,6 +580,8 @@ register_buy_condition_handler("MY_BUY", my_buy_handler)
 - **价格非法**：成交价 None / NaN / 非正 → 跳过。条件单成交价非法 → 顺延（当日不再评估该持仓后续条件单）。
 - **现金不足**：跳过该订单并告警，不缩股。
 - **T+1 锁定**：买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单自动跳过——不会当天买入当天止损卖出。
+- **无当日行情**：标的停牌/缺数据（当日无 bar）→ 该标的当日所有订单跳过并告警（与涨跌停跳过同一告警通道）。卖出单不会顺延到次日重试——pending 每日由 `select()` 重算，平仓意图需策略在次日重新声明。
+- **除息日停牌**：现金分红在除息日按持仓照常入账、成本相应扣减；但当日无 bar 时无法按 `pre_close` 做价格除权缩放（`entry_price`/条件单价格保持除权前口径）。复牌后市场价已除权，与持仓口径存在除权差，可能影响裸价收益计算或条件单触发——已知取舍：停牌期除权价不可观测，不引入启发式。
 - **涨跌停**：
   - 涨停不买：`fill_price >= up_limit` → 买单跳过。
   - 跌停不卖：`fill_price <= down_limit` → 卖单跳过（条件单顺延）。

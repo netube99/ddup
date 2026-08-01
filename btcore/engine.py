@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import math
 from collections import Counter
 
 import pandas as pd
@@ -28,9 +29,9 @@ def _check_symbol_list(symbols: list, which: str) -> None:
     重复 symbol 会导致 manual_buy 双重扣款、持仓被覆盖（账户恒等式破坏），
     这里 fail-fast 而不是让撮合层静默腐化账户。
     """
-    bad = [s for s in symbols if not isinstance(s, str)]
+    bad = [s for s in symbols if not isinstance(s, str) or not s.strip()]
     if bad:
-        raise ValueError(f"select() 的 {which} 名单含非字符串元素: {bad!r}")
+        raise ValueError(f"select() 的 {which} 名单含非字符串或空元素: {bad!r}")
     dups = sorted({s for s, n in Counter(symbols).items() if n > 1})
     if dups:
         raise ValueError(f"select() 的 {which} 名单含重复 symbol: {dups}")
@@ -107,6 +108,12 @@ class Engine:
         )
 
         slippage_ticks = config.get("slippage_ticks", 2)
+        if (not isinstance(slippage_ticks, int)
+                or isinstance(slippage_ticks, bool)
+                or slippage_ticks < 0):
+            raise ValueError(
+                f"slippage_ticks 必须是非负整数: {slippage_ticks!r}"
+            )
         condition_slippage_ticks = config.get("condition_slippage_ticks")
         if condition_slippage_ticks is not None and (
                 not isinstance(condition_slippage_ticks, int)
@@ -131,7 +138,16 @@ class Engine:
         if self.provider is not None:
             self.provider.benchmark = self.benchmark
         self.quiet_skips = bool(config.get("quiet_skips", False))
-        self.order_volume_ratio = config.get("order_volume_ratio")
+        order_volume_ratio = config.get("order_volume_ratio")
+        if order_volume_ratio is not None and (
+                not isinstance(order_volume_ratio, (int, float))
+                or isinstance(order_volume_ratio, bool)
+                or not math.isfinite(order_volume_ratio)
+                or order_volume_ratio <= 0):
+            raise ValueError(
+                f"order_volume_ratio 必须是正数或 None: {order_volume_ratio!r}"
+            )
+        self.order_volume_ratio = order_volume_ratio
         execution_price = config.get("execution_price", "open")
         if execution_price not in ("open", "close"):
             raise ValueError(
@@ -141,7 +157,6 @@ class Engine:
         self._execution_price = execution_price
         self.account = self._make_account()
         self.pending_actions = {"buy": [], "sell": []}
-        self._debug = debug
         # ML 模型（strategy_loader 依据 YAML models 节挂接；未配置为空列表）
         self._model_specs = list(getattr(strategy, "MODEL_SPECS", None) or [])
         self._holding_models = [m for m in self._model_specs if m.scope == "holding"]
@@ -153,6 +168,11 @@ class Engine:
         self.bars_by_date: dict | _DaySlicer = {}
         self._saved_cash: float | None = None
         self._saved_holdings: dict | None = None
+        self._saved_total_value: float | None = None
+        self._saved_daily_pnl: float | None = None
+        self._saved_cumulative_pnl: float | None = None
+        self._saved_pending: dict | None = None
+        self._saved_as_of: str | None = None
 
     def _make_account(self) -> types.Account:
         """新建干净账户（初始资金口径）。run() 每次重跑时用于幂等重置。"""
@@ -186,7 +206,7 @@ class Engine:
             # provider 查询以首日前一交易日为锚（首个模拟日决策时点口径），
             # 钩子里传未来日期也拿不到未来数据
             self.provider.set_as_of(
-                self.provider._prev_trading_day(calendar[0]) or calendar[0]
+                self.provider.prev_trading_day(calendar[0]) or calendar[0]
             )
 
             factor_symbols = self.strategy.get_factor_universe(self.provider, start, end)
@@ -253,7 +273,7 @@ class Engine:
                     status="running",
                 )
 
-            prev_day = self.provider._prev_trading_day(calendar[0])
+            prev_day = self.provider.prev_trading_day(calendar[0])
             if prev_day:
                 self._compute_pending(prev_day)
 
@@ -304,8 +324,9 @@ class Engine:
                 "benchmark_nav": benchmark_nav,
                 "benchmark_code": self.benchmark,
             }
-        except Exception:
-            # 崩溃不留 "running" 假象；run_id=0 说明还没落库，无需标记
+        except BaseException:
+            # 崩溃（含 KeyboardInterrupt/SystemExit）不留 "running" 假象；
+            # run_id=0 说明还没落库，无需标记
             if self.run_id:
                 with conn:
                     database.update_run_status(conn, self.run_id, "failed")
@@ -517,18 +538,19 @@ class Engine:
                 "select() 返回未知键（将被忽略，可能是 typo）: %s", sorted(unknown)
             )
 
-        # 合并 on_tick 返回的 buy_conditions（同样校验返回类型与未知键）
+        # 合并 on_tick 返回的 buy_conditions；其余键（含 buy/sell 等合法
+        # select 键）不在 on_tick 协议内，返回即报错——静默丢弃是 typo 温床
         if on_tick_result is not None:
             if not isinstance(on_tick_result, dict):
                 raise ValueError(
                     "on_tick() 必须返回 dict 或 None，得到 "
                     f"{type(on_tick_result).__name__}: {on_tick_result!r}"
                 )
-            tick_unknown = set(on_tick_result) - _SELECT_KEYS
-            if tick_unknown:
-                logger.warning(
-                    "on_tick() 返回未知键（将被忽略，可能是 typo）: %s",
-                    sorted(tick_unknown),
+            tick_extra = set(on_tick_result) - {"buy_conditions"}
+            if tick_extra:
+                raise ValueError(
+                    "on_tick() 只支持返回 buy_conditions（买卖名单请走 "
+                    f"select()）: {sorted(tick_extra)}"
                 )
             if on_tick_result.get("buy_conditions"):
                 existing_conds = actions.setdefault("buy_conditions", [])
@@ -550,6 +572,16 @@ class Engine:
         target_value = actions.get("target_value") or {}
         if target_value and (buy or sell):
             raise ValueError("target_value 与 buy/sell 名单互斥, 同日只能用一种")
+        if not isinstance(target_value, dict):
+            raise ValueError("target_value 必须是 {symbol: 目标市值} 的 dict")
+        for symbol, tv in target_value.items():
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError(f"target_value 键必须是非空字符串: {symbol!r}")
+            if (isinstance(tv, bool) or not isinstance(tv, (int, float))
+                    or not math.isfinite(tv) or tv < 0):
+                raise ValueError(
+                    f"target_value[{symbol}] 必须是 ≥0 的有限数值: {tv!r}"
+                )
 
         sell_shares = actions.get("sell_shares") or {}
         if not isinstance(sell_shares, dict):
@@ -713,12 +745,27 @@ class Engine:
     def _save_state(self):
         self._saved_cash = self.account.cash
         self._saved_holdings = copy.deepcopy(self.account.holdings)
+        self._saved_total_value = self.account.total_value
+        self._saved_daily_pnl = self.account.daily_pnl
+        self._saved_cumulative_pnl = self.account.cumulative_pnl
+        self._saved_pending = copy.deepcopy(self.pending_actions)
+        self._saved_as_of = (
+            self.provider._as_of_date if self.provider is not None else None
+        )
 
     def _restore_state(self):
         if self._saved_cash is not None:
             self.account.cash = self._saved_cash
         if self._saved_holdings is not None:
             self.account.holdings = self._saved_holdings
+        if self._saved_total_value is not None:
+            self.account.total_value = self._saved_total_value
+            self.account.daily_pnl = self._saved_daily_pnl
+            self.account.cumulative_pnl = self._saved_cumulative_pnl
+        if self._saved_pending is not None:
+            self.pending_actions = self._saved_pending
+        if self.provider is not None:
+            self.provider._as_of_date = self._saved_as_of
 
     def _write_debug_snapshot(self, conn, today, pending_actions, day_bars):
         """收集每日调试快照并写入 debug_snapshots 表。"""

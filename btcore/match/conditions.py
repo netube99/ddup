@@ -81,6 +81,7 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             continue
         bar = bars.get(symbol)
         if bar is None:
+            _warn("%s 无当日行情（停牌/缺数据）, 跳过条件单", symbol)
             continue
 
         trade_date = bar_get(bar, "trade_date", "")
@@ -199,6 +200,7 @@ def entry_conditions(account, bars: dict, orders: list[dict],
                         max_positions, symbol)
         bar = bars.get(symbol)
         if bar is None:
+            _warn("%s 无当日行情（停牌/缺数据）, 跳过条件买入", symbol)
             continue
         trade_date = bar_get(bar, "trade_date", "")
 

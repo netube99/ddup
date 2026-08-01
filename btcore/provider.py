@@ -31,9 +31,10 @@ class DataProvider:
         self._prev_day_cache: dict[str, str | None] = {}
         self._bars_df: pd.DataFrame | None = None
         self._as_of_date: str | None = None
-        # benchmark 面板精确键缓存：(code, start, end) → frame|None。
+        # 基准指数面板精确键缓存：(code, start, end) → frame|None。
         # 只对同区间重复调用去重（如 trend + returns 同日连调）；逐日滑窗
-        # 调用每窗回源一次——单标的索引查询，成本可忽略
+        # 调用每窗回源一次——单标的索引查询，成本可忽略。
+        # 长回测每日一窗，缓存有界增长（≈ 回测天数 × 1 键），刻意不清理
         self._bench_cache: dict[tuple[str, str, str], pd.DataFrame | None] = {}
 
     # ── 引擎用 (含当日) ──
@@ -80,7 +81,7 @@ class DataProvider:
         """
         if self._as_of_date is not None:
             end_date = min(end_date, self._as_of_date)
-        prev = self._prev_trading_day(end_date)
+        prev = self.prev_trading_day(end_date)
         if prev is None:
             return pd.DataFrame()
         lookback_start = (
@@ -124,7 +125,7 @@ class DataProvider:
             return None
         if self._as_of_date is not None:
             end_date = min(end_date, self._as_of_date)
-        prev = self._prev_trading_day(end_date)
+        prev = self.prev_trading_day(end_date)
         if prev is None:
             return None
         lookback_start = (
@@ -136,7 +137,13 @@ class DataProvider:
         bench = self._bench_cache[key]
         if bench is None or bench.empty:
             return None
-        ret = bench["hfq_close"].pct_change()
+        # 列口径与 engine benchmark_nav 提取一致：优先 hfq_close，缺列回退
+        # close（后端基准表可能只提供裸价）；两列都没有则视为无基准数据
+        col = ("hfq_close" if "hfq_close" in bench.columns
+               else "close" if "close" in bench.columns else None)
+        if col is None:
+            return None
+        ret = bench[col].pct_change()
         ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
         return ret.dropna()
 
@@ -156,7 +163,12 @@ class DataProvider:
 
     # ── 内部 ──
 
-    def _prev_trading_day(self, date_str: str) -> str | None:
+    def prev_trading_day(self, date_str: str) -> str | None:
+        """date_str 的前一交易日（日历查 30 天窗口，找不到返回 None）。
+
+        引擎在 preload 钳制与首日播种时调用（本类内部也复用）；
+        缓存按 date_str 记忆，回测中重复查询不重复走日历。
+        """
         if date_str in self._prev_day_cache:
             return self._prev_day_cache[date_str]
         lookback = (date.fromisoformat(date_str) - timedelta(days=30)).strftime("%Y%m%d")

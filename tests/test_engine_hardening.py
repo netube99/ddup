@@ -11,6 +11,7 @@ from btcore.costs import calc_trade_costs
 from btcore.database import init_backtest_db
 from btcore.engine import Engine
 from btcore.limits import get_limit_prices
+from btcore.match import conditions
 from btcore.match.manual import manual_buy, manual_sell, rebalance_to_targets
 from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
@@ -319,3 +320,234 @@ def test_run_idempotent_second_run_resets_account():
     engine.run("20240603", "20240607")
     second = (engine.account.cash, len(engine.account.holdings))
     assert first == second
+
+
+# ── 配置值校验: slippage_ticks / order_volume_ratio ──
+
+
+def _cfg_engine(config):
+    class S(_DuckStrategy):
+        pass
+
+    S.config = config
+    return Engine(S(), None, db_path=":memory:")
+
+
+def test_slippage_ticks_invalid_raises():
+    """负值/小数/字符串/bool 滑点配置 → 构造期 ValueError（负滑点会静默虚增收益）。"""
+    for bad in (-1, 1.5, "2", True):
+        with pytest.raises(ValueError, match="slippage_ticks"):
+            _cfg_engine({"slippage_ticks": bad})
+
+
+def test_slippage_ticks_valid_accepted():
+    eng = _cfg_engine({"slippage_ticks": 0})
+    assert eng._slippage_ticks == 0
+    eng2 = _cfg_engine({})
+    assert eng2._slippage_ticks == 2
+
+
+def test_order_volume_ratio_invalid_raises():
+    """负/零/字符串/bool/NaN → 构造期 ValueError（字符串会在撮合期裸崩，负值静默跳过全部订单）。"""
+    for bad in (-0.05, 0, "0.05", True, NAN):
+        with pytest.raises(ValueError, match="order_volume_ratio"):
+            _cfg_engine({"order_volume_ratio": bad})
+
+
+def test_order_volume_ratio_valid_accepted():
+    eng = _cfg_engine({"order_volume_ratio": 0.05})
+    assert eng.order_volume_ratio == 0.05
+    eng2 = _cfg_engine({})
+    assert eng2.order_volume_ratio is None
+
+
+# ── target_value 值校验 ──
+
+
+def test_target_value_nan_raises():
+    """NaN 目标市值 → 决策时点 ValueError（此前静默零成交零告警）。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"000001.SZ": NAN}}))
+    with pytest.raises(ValueError, match="target_value"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_negative_raises():
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"000001.SZ": -1.0}}))
+    with pytest.raises(ValueError, match="target_value"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_non_numeric_raises():
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"000001.SZ": "1e5"}}))
+    with pytest.raises(ValueError, match="target_value"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_bool_raises():
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"000001.SZ": True}}))
+    with pytest.raises(ValueError, match="target_value"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_empty_key_raises():
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"": 100.0}}))
+    with pytest.raises(ValueError, match="非空字符串"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_non_dict_raises():
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": [("000001.SZ", 100.0)]}))
+    with pytest.raises(ValueError, match="必须是"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_target_value_valid_and_zero_pass():
+    """合法 target_value（含 0 = 清仓）正常通过并进入 pending。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"target_value": {"000001.SZ": 0.0, "000002.SZ": 50000}}))
+    engine._compute_pending(
+        "20240603",
+        {"000001.SZ": make_bar(), "000002.SZ": make_bar()}, [])
+    assert engine.pending_actions["target_value"] == {
+        "000001.SZ": 0.0, "000002.SZ": 50000}
+
+
+# ── on_tick 协议: 只支持 buy_conditions ──
+
+
+def test_on_tick_extra_keys_raise():
+    """on_tick 返回 buy 等合法 select 键 → ValueError（此前静默丢弃）。"""
+    engine = _make_engine(_DuckStrategy(tick_result={"buy": ["000001.SZ"]}))
+    with pytest.raises(ValueError, match="只支持返回 buy_conditions"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_on_tick_buy_conditions_merged():
+    """on_tick 返回 buy_conditions 仍正常合并进 pending。"""
+    engine = _make_engine(_DuckStrategy(tick_result={
+        "buy_conditions": [{"symbol": "000002.SZ", "type": "LIMIT_BUY",
+                             "price": 9.0, "value": 10000}]}))
+    engine._compute_pending(
+        "20240603",
+        {"000001.SZ": make_bar(), "000002.SZ": make_bar()}, [])
+    conds = engine.pending_actions["buy_conditions"]
+    assert len(conds) == 1
+    assert conds[0]["symbol"] == "000002.SZ"
+
+
+# ── 无当日行情（停牌/缺数据）跳过告警 ──
+
+
+def test_manual_sell_warns_missing_bar(caplog):
+    account = _account(cash=0.0, holdings={"000001.SZ": _holding()})
+    with caplog.at_level(logging.WARNING):
+        trades = manual_sell(account, {}, ["000001.SZ"],
+                             get_limit_prices, calc_trade_costs, apply_slippage)
+    assert trades == []
+    assert "无当日行情" in caplog.text
+
+
+def test_manual_buy_warns_missing_bar(caplog):
+    account = _account()
+    with caplog.at_level(logging.WARNING):
+        trades = manual_buy(account, {}, ["000001.SZ"], 10,
+                            get_limit_prices, calc_trade_costs, apply_slippage)
+    assert trades == []
+    assert "无当日行情" in caplog.text
+
+
+def test_rebalance_warns_missing_bar(caplog):
+    account = _account(cash=0.0, holdings={"000001.SZ": _holding()})
+    with caplog.at_level(logging.WARNING):
+        trades = rebalance_to_targets(account, {}, {"000001.SZ": 0}, 10,
+                                      get_limit_prices, calc_trade_costs,
+                                      apply_slippage)
+    assert trades == []
+    assert "无当日行情" in caplog.text
+
+
+def test_exit_conditions_warns_missing_bar(caplog):
+    holding = _holding()
+    holding.conditions = [{"type": "STOP_LOSS", "price": 9.0}]
+    account = _account(cash=0.0, holdings={"000001.SZ": holding})
+    with caplog.at_level(logging.WARNING):
+        trades = conditions.exit_conditions(
+            account, {}, get_limit_prices, calc_trade_costs, apply_slippage)
+    assert trades == []
+    assert "无当日行情" in caplog.text
+
+
+def test_entry_conditions_warns_missing_bar(caplog):
+    account = _account()
+    order = {"symbol": "000001.SZ", "type": "LIMIT_BUY", "price": 9.0,
+             "value": 10000}
+    with caplog.at_level(logging.WARNING):
+        trades = conditions.entry_conditions(
+            account, {}, [order], 10,
+            get_limit_prices, calc_trade_costs, apply_slippage)
+    assert trades == []
+    assert "无当日行情" in caplog.text
+
+
+# ── select() 名单: 空字符串 symbol ──
+
+
+def test_select_empty_symbol_raises():
+    engine = _make_engine(_DuckStrategy(actions={"buy": [""], "sell": []}))
+    with pytest.raises(ValueError, match="空元素"):
+        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+# ── step 状态回滚完整性 ──
+
+
+def test_restore_state_rolls_back_full_account():
+    """异常回滚完整：现金/持仓/净值/盈亏/pending/as_of 全部还原。"""
+    engine = _make_engine(_DuckStrategy())
+    engine.pending_actions = {"buy": ["000001.SZ"], "sell": []}
+    engine._save_state()
+    engine.account.cash = 0.0
+    engine.account.total_value = 1.0
+    engine.account.daily_pnl = 2.0
+    engine.account.cumulative_pnl = 3.0
+    engine.account.holdings["000001.SZ"] = _holding()
+    engine.pending_actions = {"buy": [], "sell": []}
+    engine.provider._as_of_date = "20991231"
+    engine._restore_state()
+    assert engine.account.cash == engine.initial_capital
+    assert engine.account.total_value == engine.initial_capital
+    assert engine.account.daily_pnl == 0.0
+    assert engine.account.cumulative_pnl == 0.0
+    assert engine.account.holdings == {}
+    assert engine.pending_actions == {"buy": ["000001.SZ"], "sell": []}
+    assert engine.provider._as_of_date is None
+
+
+# ── run 异常: KeyboardInterrupt 也标记 failed ──
+
+
+class _KillStrategy(_BoomStrategy):
+    def select(self, bars, snapshot, provider):
+        raise KeyboardInterrupt
+
+
+def test_run_marks_failed_on_keyboard_interrupt(tmp_path):
+    db = str(tmp_path / "ki.db")
+    provider = DataProvider(MockDataBackend())
+    engine = Engine(_KillStrategy(), provider, initial_capital=1_000_000,
+                    db_path=db)
+    with pytest.raises(KeyboardInterrupt):
+        engine.run("20240603", "20240607")
+
+    conn = sqlite3.connect(db)
+    try:
+        status = conn.execute("SELECT status FROM runs").fetchone()[0]
+    finally:
+        conn.close()
+    assert status == "failed"

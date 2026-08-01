@@ -37,6 +37,7 @@ def manual_sell(account, bars: dict, sell_symbols: list,
         holding = account.holdings[symbol]
         bar = bars.get(symbol)
         if bar is None:
+            _warn("%s 无当日行情（停牌/缺数据）, 跳过卖出", symbol)
             continue
 
         exec_px = exec_price(bar, account)
@@ -108,6 +109,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
                         max_positions, symbol)
         bar = bars.get(symbol)
         if bar is None:
+            _warn("%s 无当日行情（停牌/缺数据）, 跳过买入", symbol)
             continue
 
         exec_px = exec_price(bar, account)
@@ -187,6 +189,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         bar = bars.get(symbol)
         if holding is not None:
             if bar is None:
+                _warn("%s 无当日行情（停牌/缺数据）, 跳过调仓", symbol)
                 continue
             price = exec_price(bar, account)
             current = holding.shares * (
@@ -248,6 +251,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
                         symbol, max_positions)
         bar = bars.get(symbol)
         if bar is None:
+            _warn("%s 无当日行情（停牌/缺数据）, 跳过买入", symbol)
             continue
 
         exec_px = exec_price(bar, account)

@@ -1,5 +1,7 @@
 """DataProvider 本地切片与模拟日钳制。"""
 
+import pandas as pd
+
 from btcore.provider import DataProvider
 from tests.conftest import MockDataBackend
 
@@ -71,3 +73,59 @@ def test_benchmark_trend_no_benchmark():
     result = provider.get_benchmark_trend("20240701", window=30)
 
     assert result is None
+
+
+# ── 基准列回退: 无 hfq_close 时用 close ──
+
+
+class _CloseOnlyBenchBackend(MockDataBackend):
+    """基准表只有 close 列（无 hfq_close）的后端。"""
+
+    def get_benchmark_bars(
+        self, code: str = "000300.SH", start: str = "", end: str = ""
+    ):
+        bm = self._benchmark.copy()
+        if start:
+            bm = bm[bm["trade_date"] >= start]
+        if end:
+            bm = bm[bm["trade_date"] <= end]
+        bm = bm.copy()
+        bm["trade_date"] = pd.to_datetime(bm["trade_date"])
+        bm.set_index("trade_date", inplace=True)
+        return bm[["close"]]
+
+
+class _NoPriceBenchBackend(MockDataBackend):
+    """基准表既无 hfq_close 也无 close（只有占位列）。"""
+
+    def get_benchmark_bars(
+        self, code: str = "000300.SH", start: str = "", end: str = ""
+    ):
+        bm = self._benchmark.copy()
+        bm["trade_date"] = pd.to_datetime(bm["trade_date"])
+        bm.set_index("trade_date", inplace=True)
+        return bm.assign(dummy=1.0)[["dummy"]]
+
+
+def test_benchmark_returns_falls_back_to_close():
+    """基准表只有 close 列时不再 KeyError，按 close 计算收益。"""
+    backend = _CloseOnlyBenchBackend()
+    backend._benchmark = backend._benchmark.rename(
+        columns={"hfq_close": "close"}
+    )
+    provider = DataProvider(backend)
+    provider.benchmark = "000300.SH"
+
+    rets = provider.get_benchmark_returns("20240701")
+
+    assert rets is not None
+    assert not rets.empty
+    assert "20240604" in set(rets.index)  # 首日被 pct_change 丢弃, 从第二日算起
+
+
+def test_benchmark_returns_none_without_price_cols():
+    """基准表无任何价格列 → 返回 None 而非 KeyError。"""
+    provider = DataProvider(_NoPriceBenchBackend())
+    provider.benchmark = "000300.SH"
+
+    assert provider.get_benchmark_returns("20240701") is None
