@@ -127,6 +127,16 @@ class ConditionBuilder:
                 })
         return conds
 
+    def rescale(self, symbol: str, scale: float) -> None:
+        """除权除息后同步缩放 trailing 锚点（引擎 corporate.adjust 后调用）。
+
+        锚点 _high 是裸收盘价口径，除权日价格台阶式下降；不 rescale 会让
+        TRAILING_TP 触发价保留除权前高点，次日 calc 重算即误触发（2026-08
+        实证 300501.SZ 10送4.6+派0.6 后开盘误卖）。
+        """
+        if symbol in self._high:
+            self._high[symbol] *= scale
+
     def prune(self, live_symbols) -> None:
         """清理已平仓标的的 trailing 状态。
 

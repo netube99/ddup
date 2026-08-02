@@ -21,11 +21,17 @@ import yaml
 
 
 def nested_set(d, key_path, value):
-    """按 '.' 分割的路径设置嵌套 dict 值。"""
+    """按 '.' 分割的路径设置嵌套值，支持列表整数下标（如 factor_specs.0.weight）。"""
     keys = key_path.split(".")
     for k in keys[:-1]:
-        d = d.setdefault(k, {})
-    d[keys[-1]] = value
+        if isinstance(d, list):
+            d = d[int(k)]
+        else:
+            d = d.setdefault(k, {})
+    if isinstance(d, list):
+        d[int(keys[-1])] = value
+    else:
+        d[keys[-1]] = value
 
 
 def expand_params(params_def):

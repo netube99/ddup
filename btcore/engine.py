@@ -101,11 +101,21 @@ class Engine:
             initial_capital if initial_capital is not None
             else config.get("initial_capital", 1_000_000)
         )
+        # 2026-08 审计补校验：此前负数/NaN 静默接受（负本金直接扭曲全部收益口径）
+        if not math.isfinite(self.initial_capital) or self.initial_capital <= 0:
+            raise ValueError(
+                f"initial_capital 必须是正有限数值: {self.initial_capital!r}"
+            )
         self.db_path = db_path or ":memory:"
         self.max_positions = int(
             max_positions if max_positions is not None
             else config.get("max_positions", 20)
         )
+        # 2026-08 审计补校验：≤0 时 manual_buy 静默返回 []，策略永不建仓
+        if self.max_positions <= 0:
+            raise ValueError(
+                f"max_positions 必须是正整数: {self.max_positions!r}"
+            )
 
         slippage_ticks = config.get("slippage_ticks", 2)
         if (not isinstance(slippage_ticks, int)
@@ -389,6 +399,15 @@ class Engine:
                 corporate_log = []
                 corporate.adjust(self.account, today, bars_dict,
                                  self.provider, corporate_log)
+                # 除权除息后同步 rescale 策略侧 trailing 锚点（S-COND-01，
+                # 2026-08 实证：漏 rescale 时次日 calc_conditions 用除权前高点
+                # 重算 TRAILING_TP 触发价，开盘即误触发卖出）
+                cond = getattr(getattr(self.strategy, "_cond", None), "rescale", None)
+                if cond is not None:
+                    for entry in corporate_log:
+                        scale = entry.get("scale")
+                        if scale is not None:
+                            cond(entry["symbol"], scale)
 
                 targets = self.pending_actions.get("target_value") or {}
                 if targets:
@@ -669,9 +688,17 @@ class Engine:
             bar = bars_dict.get(symbol, {})
             entry_price = holding.entry_price
             holding_days = holding.holding_days
-            holding.conditions = self.strategy.calc_conditions(
+            # 2026-08 审计补校验：calc_conditions 返回非 list（None/int/str/dict）
+            # 此前以晦涩异常崩溃或空 dict 静默当作无离场计划（S-HOOK-05）
+            conditions = self.strategy.calc_conditions(
                 symbol, entry_price, bar, holding_days
             )
+            if not isinstance(conditions, list):
+                raise ValueError(
+                    f"calc_conditions() 必须返回 list[dict]，{symbol} 得到 "
+                    f"{type(conditions).__name__}: {conditions!r}"
+                )
+            holding.conditions = conditions
             match.conditions.validate_condition_types(holding.conditions)
 
     def _warn_in_sample_overlap(self, start: str, end: str) -> None:

@@ -15,6 +15,7 @@ Outputs to tests/fixtures/:
 
 import os
 import sqlite3
+import sys
 
 import pandas as pd
 
@@ -23,6 +24,13 @@ from adapters.tushare import _DEFAULT_DB_PATH
 DB_PATH = _DEFAULT_DB_PATH
 if not DB_PATH:
     raise SystemExit("错误: 请在 adapters/tushare.py 中设置 _DEFAULT_DB_PATH")
+if len(sys.argv) > 1:
+    # 2026-08 审计：此前任意参数（含 --help）被静默忽略并直接执行 dump，
+    # 有覆盖 tests/fixtures/*.parquet 的风险；改为显式拒绝
+    raise SystemExit(
+        "dump_fixtures.py 不接受参数（窗口/范围由脚本内常量决定），"
+        "直接运行即可: python scripts/dump_fixtures.py"
+    )
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "tests", "fixtures")
 

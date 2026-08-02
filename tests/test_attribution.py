@@ -2,6 +2,7 @@
 
 import sqlite3
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -154,6 +155,34 @@ class TestBrinsonDaily:
         # 银行 3% + 医药 1%（synth_sw_returns 无医药列 → 收益按 0 计）
         assert daily_df["benchmark_return"].iloc[0] == pytest.approx(0.3 * 0.03 + 0.7 * 0.0)
 
+    def test_unheld_industry_nan_rows(self, synth_benchmark_weights, synth_sw_returns):
+        """未持仓行业在 holdings 行内是 NaN 而非 0（_reconstruct_daily_holdings
+        的真实输出形态）——回归：NaN 不得污染整日三效应（2026-08 修复）。"""
+        dates = synth_benchmark_weights.index
+        records = []
+        for i, d in enumerate(dates):
+            # 第 1 天只持银行（食品饮料 NaN），之后只持食品饮料（银行 NaN）
+            if i == 0:
+                records.append({"date": d, "银行_weight": 1.0, "银行_return": 0.03,
+                                "食品饮料_weight": float("nan"), "食品饮料_return": float("nan"),
+                                "portfolio_return": 0.03})
+            else:
+                records.append({"date": d, "银行_weight": float("nan"), "银行_return": float("nan"),
+                                "食品饮料_weight": 1.0, "食品饮料_return": 0.01,
+                                "portfolio_return": 0.01})
+        holdings_df = pd.DataFrame(records).set_index("date")
+
+        daily_df = _compute_brinson_daily(holdings_df, synth_benchmark_weights, synth_sw_returns)
+        assert not daily_df.empty
+        # 三效应与 unexplained 逐日都必须是有穷数（修复前 float(NaN) 全污染）
+        for col in ("allocation", "selection", "interaction", "unexplained"):
+            assert daily_df[col].notna().all(), f"{col} 含 NaN"
+            assert np.isfinite(daily_df[col]).all(), f"{col} 含 inf"
+        # 分解恒等式成立：excess = alloc + select + interact + unexplained
+        lhs = daily_df["excess_return"]
+        rhs = daily_df[["allocation", "selection", "interaction", "unexplained"]].sum(axis=1)
+        assert np.allclose(lhs, rhs)
+
     def test_pure_sector_bet(self, synth_benchmark_weights, synth_sw_returns):
         """全配银行（行业赌注），选股效应应接近 0。"""
         dates = synth_benchmark_weights.index
@@ -192,6 +221,36 @@ class TestBrinsonDaily:
 
 
 class TestAggregatePeriod:
+    def test_aggregate_nan_industry_days(self, synth_benchmark_weights, synth_sw_returns):
+        """聚合层同样必须容忍持仓行内 NaN 行业列（_aggregate_period 2026-08 修复）。"""
+        dates = synth_benchmark_weights.index
+        records = []
+        for i, d in enumerate(dates):
+            if i == 0:
+                records.append({"date": d, "银行_weight": 1.0, "银行_return": 0.03,
+                                "食品饮料_weight": float("nan"), "食品饮料_return": float("nan"),
+                                "portfolio_return": 0.03})
+            else:
+                records.append({"date": d, "银行_weight": float("nan"), "银行_return": float("nan"),
+                                "食品饮料_weight": 1.0, "食品饮料_return": 0.01,
+                                "portfolio_return": 0.01})
+        holdings_df = pd.DataFrame(records).set_index("date")
+        daily_df = _compute_brinson_daily(holdings_df, synth_benchmark_weights, synth_sw_returns)
+
+        result = _aggregate_period(daily_df, holdings_df, synth_benchmark_weights, synth_sw_returns)
+        sm = result["summary"]
+        for key in ("allocation_effect", "selection_effect", "interaction_effect", "unexplained"):
+            assert np.isfinite(sm[key]), f"{key} 非有穷: {sm[key]}"
+        # 分解恒等式：excess = 三效应 + unexplained
+        assert sm["total_excess_return"] == pytest.approx(
+            sm["allocation_effect"] + sm["selection_effect"]
+            + sm["interaction_effect"] + sm["unexplained"])
+        # industry_detail 单行业也不得 NaN
+        for ind_detail in result["industry_detail"].values():
+            for key in ("portfolio_return", "benchmark_return",
+                        "allocation_effect", "selection_effect", "interaction_effect"):
+                assert np.isfinite(ind_detail[key]), f"{key} 非有穷: {ind_detail[key]}"
+
     def test_summary_output(self, synth_benchmark_weights, synth_sw_returns):
         """验证聚合输出结构完整。"""
         dates = synth_benchmark_weights.index

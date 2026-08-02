@@ -310,6 +310,16 @@ def _ffill_benchmark(
     return benchmark_weights.reindex(dates).ffill()
 
 
+def _series_get0(series, key):
+    """Series/DataFrame 行取值，NaN/None 按 0 处理。
+
+    Series.get(key, 0.0) 只在键缺失时兜底，键存在但值为 NaN 时返回 NaN；
+    float(NaN) 会污染整个 Brinson 效应累加，此处统一守卫。
+    """
+    v = series.get(key, 0.0)
+    return 0.0 if v is None or pd.isna(v) else float(v)
+
+
 def _compute_brinson_daily(
     holdings_df: pd.DataFrame,
     benchmark_weights: pd.DataFrame,
@@ -358,12 +368,13 @@ def _compute_brinson_daily(
         h_row = holdings_df.loc[date]
 
         # 单遍提取每行业的 (基准权重, 基准行业收益, 策略权重, 策略收益)
+        # 当日未持仓行业在行内是 NaN 而非缺列，必须按 0 处理（_series_get0）
         ind_data = [
             (
-                float(w_b_row.get(ind, 0.0)),
-                float(sw_row.get(ind, 0.0)),
-                float(h_row.get(f"{ind}_weight", 0.0)),
-                float(h_row.get(f"{ind}_return", 0.0)),
+                _series_get0(w_b_row, ind),
+                _series_get0(sw_row, ind),
+                _series_get0(h_row, f"{ind}_weight"),
+                _series_get0(h_row, f"{ind}_return"),
             )
             for ind in industry_names
         ]
@@ -382,7 +393,7 @@ def _compute_brinson_daily(
             interaction += (w_p - w_b) * (r_p_i - r_b_i)
             allocation += (w_p - w_b) * (r_b_i - r_b_total)
 
-        r_p_total = float(h_row.get("portfolio_return", 0.0))
+        r_p_total = _series_get0(h_row, "portfolio_return")
 
         daily_results.append({
             "date": date,
@@ -458,15 +469,15 @@ def _aggregate_period(
         inter = 0.0
 
         for date in common_dates:
-            w_p = float(w_p_series.get(date, 0.0))
-            w_b = float(w_b_series.get(date, 0.0))
-            r_b_i = float(r_b_series.get(date, 0.0))
+            w_p = _series_get0(w_p_series, date)
+            w_b = _series_get0(w_b_series, date)
+            r_b_i = _series_get0(r_b_series, date)
             # common_dates 已含于 daily_df.index，直接取当日基准总收益
             r_b = float(daily_df.loc[date, "benchmark_return"])
 
             # 策略在该行业的实际收益 = 从 holdings_df 取
             # (common_dates 已含于 holdings_df.index 且 {ind}_return 列与 {ind}_weight 列成对存在)
-            r_p_i = float(holdings_df.loc[date, f"{ind}_return"])
+            r_p_i = _series_get0(holdings_df.loc[date], f"{ind}_return")
 
             port_ret += w_p * r_p_i
             bench_ret += w_b * r_b_i

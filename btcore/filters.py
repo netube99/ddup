@@ -1,6 +1,6 @@
 import logging
 from bisect import bisect_right
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from btcore.types import bar_get
 
@@ -51,7 +51,12 @@ class StockFilter:
 
         if rules.get("exclude_st"):
             if hasattr(backend, "get_st_map"):
-                self._st_map = backend.get_st_map(start_date)
+                # 前伸 10 日历日覆盖窗口首日前一交易日（种子日）的 select 决策：
+                # 引擎首日播种用 prev_trading_day(start) 截面，ST 快照缺该日时
+                # filters.py:131 取空集 → 首日买入 ST 股静默放行（2026-08 实证）。
+                st_from = (date.fromisoformat(start_date) - timedelta(days=10)).strftime("%Y%m%d") \
+                    if start_date else None
+                self._st_map = backend.get_st_map(st_from or start_date)
             else:
                 logger.warning(
                     "exclude_st 已开启但 backend 未提供 get_st_map，"
@@ -60,8 +65,19 @@ class StockFilter:
 
         if rules.get("exclude_new_stock"):
             if hasattr(backend, "get_recent_listings"):
+                # 名单须覆盖窗口内任意买入日上市 ≤60 天的票：查询区间下限用
+                # start-60 而非 end-60（以 end 为锚会把窗口早段上市的新股漏滤，
+                # 2026-08 审计实证 301587.SZ 上市 56 天被放行）。
+                cutoff_days = 60
+                if start_date and end_date:
+                    try:
+                        d_start = datetime.strptime(start_date, "%Y%m%d")
+                        d_end = datetime.strptime(end_date, "%Y%m%d")
+                        cutoff_days += (d_end - d_start).days
+                    except ValueError:
+                        pass
                 self._recent_listings = backend.get_recent_listings(
-                    cutoff_days=60, as_of=end_date or start_date
+                    cutoff_days=cutoff_days, as_of=end_date or start_date
                 )
             else:
                 logger.warning(

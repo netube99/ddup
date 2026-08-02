@@ -66,6 +66,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 - **[策略设计指南](./strategy_guide.md)** — Strategy 接口参考、YAML 完整参考、条件单系统、撮合与执行、Level 0-4 教程、进阶模式、结果库 schema、速查表全集
 - **[ML 子系统指南](./ml_guide.md)** — panel/holding 双 scope、models 配置、训练命令、meta 契约、model_exit、可观测性
 - **[CLI 与研究工具](./cli_and_research.md)** — 全部 CLI 参数表、研究库 API（因子评估/报告/合成/Brinson）、典型工作流、速查表
+- **[全功能核查列表](./audit_checklist.md)** — 三层核查（静态/动态/边界扫描）逐项验证功能与设计意图一致；真实数据探针速查
 
 Agent 自主研究指导在 `.omp/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
 

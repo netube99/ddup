@@ -196,17 +196,88 @@ class GenericSQLBackend(DataBackend):
             sym, _ = self._keys(sec["table"])
             frag, fparams = self._filter_sql(sec["table"])
             where = f" WHERE {frag}" if frag else ""
+            table = sec["table"]
+            # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
+            # 事件级归并）；通用后端无这两列时退化到值级归并
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({_q(table)})")}
+            has_event_cols = "end_date" in cols and "ann_date" in cols
+            sel_extra = ", end_date AS endd, ann_date AS annd" if has_event_cols else ""
+            # ORDER BY ann_date DESC：ann_date 为 NULL 的行（老分红/阶段公告缺失）
+            # 在 SQLite 中排序最小，排最后——同组取一/取最新时优先有公告日的行
+            order_by = " ORDER BY ann_date DESC" if has_event_cols else ""
             rows = self._conn.execute(
                 f"SELECT {_q(sym)} AS sym, {_q(sec['stk_div'])} AS stk,"
                 f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
-                f" FROM {_q(sec['table'])}{where}",
+                f"{sel_extra}"
+                f" FROM {_q(table)}{where}{order_by}",
                 fparams,
             ).fetchall()
-            self._div_idx = {}
-            for r in rows:
-                div = {"stk_div": r["stk"] or 0.0, "cash_div": r["cash"] or 0.0}
-                self._div_idx.setdefault(r["ex"], {})[r["sym"]] = div
+            if has_event_cols:
+                self._div_idx = self._build_div_idx_event(rows)
+            else:
+                self._div_idx = self._build_div_idx_value(rows)
         return self._div_idx.get(date_str, {})
+
+    @staticmethod
+    def _build_div_idx_value(rows):
+        """值级归并（无 end_date/ann_date 列的通用后端）：
+        同 (ex_date, symbol) 多行全等=重复发布取一，异值=叠加方案求和。"""
+        idx = {}
+        for r in rows:
+            div = {"stk_div": r["stk"] or 0.0, "cash_div": r["cash"] or 0.0}
+            bucket = idx.setdefault(r["ex"], {})
+            prev = bucket.get(r["sym"])
+            if prev is None:
+                bucket[r["sym"]] = div
+            elif prev == div:
+                continue
+            else:
+                logger.warning(
+                    "dividend 表 %s %s 同除权日多行异值，按叠加求和: %s + %s",
+                    r["ex"], r["sym"], prev, div,
+                )
+                bucket[r["sym"]] = {
+                    "stk_div": prev["stk_div"] + div["stk_div"],
+                    "cash_div": prev["cash_div"] + div["cash_div"],
+                }
+        return idx
+
+    @staticmethod
+    def _build_div_idx_event(rows):
+        """事件级归并（tushare 多阶段公告表，行已按 ann_date DESC 排序）：
+        - 同 (ex_date, symbol, end_date) → 同事件重复/修订公告，取 ann_date 最新
+        - 不同 end_date 但值全等           → 同事件重复记录（end_date 漂移），取一
+        - 不同 end_date 且值不同           → 多报告期分红同日实施（叠加事件，求和）
+        桶内部携带 endds（报告期集合）参与归并，最后剥离只留消费契约两键。"""
+        idx = {}
+        for r in rows:
+            div = {"stk_div": r["stk"] or 0.0, "cash_div": r["cash"] or 0.0,
+                   "endd": r["endd"]}
+            bucket = idx.setdefault(r["ex"], {})
+            prev = bucket.get(r["sym"])
+            if prev is None:
+                bucket[r["sym"]] = {"stk_div": div["stk_div"],
+                                     "cash_div": div["cash_div"],
+                                     "endds": {div["endd"]}}
+            elif div["endd"] in prev["endds"] or (
+                    prev["stk_div"] == div["stk_div"]
+                    and prev["cash_div"] == div["cash_div"]):
+                prev["endds"].add(div["endd"])
+            else:
+                logger.warning(
+                    "dividend 表 %s %s 同除权日多事件异值，按叠加求和: %s + %s",
+                    r["ex"], r["sym"],
+                    {k: prev[k] for k in ("stk_div", "cash_div")},
+                    {k: div[k] for k in ("stk_div", "cash_div")},
+                )
+                prev["stk_div"] += div["stk_div"]
+                prev["cash_div"] += div["cash_div"]
+                prev["endds"].add(div["endd"])
+        return {
+            d: {s: {k: v[k] for k in ("stk_div", "cash_div")}
+                for s, v in b.items()}
+            for d, b in idx.items()
+        }
 
     # ═══════════════════════════════════
     # 鸭子类型扩展实现（经 __getattr__ 按已填的空装配）

@@ -136,7 +136,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
     # 成本口径从 run 的 config 读取（引擎费率可配置，硬编码 5 元/0.05% 会失真）
     min_commission = float(config.get("min_commission", MIN_COMMISSION))
     stamp_min = float(config.get("stamp_tax_rate", STAMP_TAX_RATE))
-    capital = capital or config.get("initial_capital", 0) or 40000
+    capital = capital or config.get("initial_capital", 0) or 1_000_000
     if capital > 0:
         cost_ratio = total_costs / capital
         min_overhead = _min_commission_overhead(n_buys, capital, min_commission)
@@ -203,8 +203,8 @@ def validate_daily(daily, config):
     if len(daily) == 0:
         return issues, notes
 
-    # 期初资金检查
-    capital = config.get("initial_capital", 0) or 40000
+    # 期初资金检查（兜底与引擎默认一致，engine.py:102）
+    capital = config.get("initial_capital", 0) or 1_000_000
     init_total = daily.iloc[0]["total_value"]
     if abs(init_total - capital) > 1:
         notes.append(f"期初权益: {init_total:,.0f} (设定 {capital:,.0f})")

@@ -52,9 +52,12 @@ def main():
     print(f"industry_map: {len(df)} rows")
 
     # sw_returns: pivot to date × industry
+    # sw_daily 按 (trade_date, name) 有多 ts_code 同名行（如 20180102 水泥制造×3），
+    # 不先去重 pivot 会 ValueError（2026-08 审计实证：全表 66,110 组重复）
     sql = "SELECT trade_date, name, pct_change FROM sw_daily WHERE 1=1"
     sql += date_filter
     df = pd.read_sql_query(sql, conn, params=date_params)
+    df = df.drop_duplicates(subset=["trade_date", "name"])
     df["pct_change"] = df["pct_change"].astype(float) / 100
     sw_wide = df.pivot(index="trade_date", columns="name", values="pct_change")
     sw_wide.to_parquet(f"{args.out}/sw_returns.parquet")

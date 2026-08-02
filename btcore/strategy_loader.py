@@ -174,6 +174,15 @@ def load_strategy(path: str) -> Strategy:
     cls = _resolve_class(doc.get("strategy"), path)
     config = dict(doc.get("config") or {})
 
+    # 顶层未知键 WARNING（2026-08 审计：此前完全静默，typo 如 filter_rule 少 s 无人察觉）
+    known = {"name", "strategy", "config", "factor_library", "factor_specs",
+             "filter_rules", "conditions", "models"}
+    for key in doc:
+        if key not in known:
+            logger.warning(
+                "YAML 顶层未知键 %r（已忽略）：%s", key, path
+            )
+
     # factor_library 路径相对策略 YAML 所在目录解析；缺省用 factors/library.yaml
     lib_path = doc.get("factor_library")
     if lib_path and not Path(lib_path).is_absolute():
@@ -305,11 +314,21 @@ def _resolve_factor_specs(
                         f"引用了未声明的模型列 {name!r}——"
                         "models 节中没有对应的 panel 模型"
                     )
+                asc = raw.get("ascending", False)
+                if not isinstance(asc, bool):
+                    raise ValueError(
+                        f"factor_specs 条目 ascending 必须是 bool: {asc!r}"
+                    )
+                mo = raw.get("materialize_only", False)
+                if not isinstance(mo, bool):
+                    raise ValueError(
+                        f"factor_specs 条目 materialize_only 必须是 bool: {mo!r}"
+                    )
                 resolved.append({
                     "name": name,
                     "weight": float(raw.get("weight", 1.0)),
-                    "ascending": bool(raw.get("ascending", False)),
-                    "materialize_only": bool(raw.get("materialize_only", False)),
+                    "ascending": asc,
+                    "materialize_only": mo,
                 })
                 continue
             resolved.append(resolve_spec(raw, library))

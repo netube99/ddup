@@ -39,6 +39,7 @@ def _apply_stk_div(holding, stk_div: float, today: str, log: list):
         "date": today, "symbol": holding.symbol,
         "type": "stk_div", "stk_div": stk_div,
         "old_shares": old_shares, "new_shares": holding.shares,
+        "scale": scale,
     })
 
 
@@ -60,11 +61,13 @@ def _apply_cash_div(account, holding, cash_div: float, today: str,
     if pre_close > 0:
         scale = pre_close / (pre_close + cash_div)
         _rescale_holding(holding, scale)
+    else:
+        scale = None
 
     log.append({
         "date": today, "symbol": holding.symbol,
         "type": "cash_div", "gross": gross, "tax_rate": tax_rate,
-        "net": net,
+        "net": net, "scale": scale,
     })
 
 

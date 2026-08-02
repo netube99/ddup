@@ -82,9 +82,14 @@ def run_eval(
     # ML 模型：spec 解析（fail-fast），特征并入因子计算与请求列
     model_spec = None
     if model_path:
-        model_spec = ModelSpec.from_dict(
-            Path(model_path).stem, {"artifact": model_path}, "",
-        )
+        try:
+            model_spec = ModelSpec.from_dict(
+                Path(model_path).stem, {"artifact": model_path}, "",
+            )
+        except ValueError as exc:
+            # 2026-08 审计：此前裸 traceback（meta 与特征维度不一致等）
+            print(f"错误：模型加载失败: {exc}", file=sys.stderr)
+            return 1
         if model_spec.scope != "panel":
             print("错误：--model 只支持 panel scope 模型（holding scope 无物化列）",
                   file=sys.stderr)
