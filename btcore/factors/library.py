@@ -387,6 +387,20 @@ def compute_breadth(
 
         df.sort_index(inplace=True)
         factor_plan.derive_fields(df)
+        # 伪列附着：group_mean 等坍缩因子引用 industry 时必须先附着分组列
+        # （2026-08-03 实证 F-BRD-02：此前从未附着，industry_mom 直接 ValueError，
+        #  docs 的"引擎同源"对 group_mean 不成立）
+        needs: dict[str, bool] = {}
+        for node_spec in closure.values():
+            cols, _ = spec_names(node_spec, set(closure))
+            if "industry" in cols:
+                needs["industry_main"] = True
+            if "log_mktcap" in cols:
+                needs["mktcap_main"] = True
+            if "idx_ret" in cols:
+                needs["index"] = True
+        if needs:
+            factor_plan.ensure_pseudo_columns(df, needs, "main", backend=backend)
 
         # Compute factor for this chunk
         factor_df = compute_factors([factor_name], df, lib)

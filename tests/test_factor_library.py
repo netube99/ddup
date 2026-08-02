@@ -297,3 +297,51 @@ class TestBoolSumSemantics:
         )
         pd.testing.assert_series_equal(values, expect.astype(float), check_dtype=False)
         assert values.max() >= 2.0  # 必须出现多信号叠加值（修复前 OR 只得 0/1）
+
+
+class TestBreadthGroupMean:
+    """回归：compute_breadth 对 group_mean 坍缩因子须附着 industry 伪列。
+
+    2026-08-03 实证（F-BRD-02）：此前从不调用 ensure_pseudo_columns，
+    industry_mom（group_mean(mom20, industry)）直接 ValueError
+    "未知列或因子引用 industry"；docs"引擎同源"对 group_mean 不成立。
+    """
+
+    def test_group_mean_attaches_industry(self, tmp_path):
+        class IndustryBackend(MockDataBackend):
+            def get_stock_industries(self, ts_codes):
+                return {c: f"IND_{c[:3]}" for c in ts_codes}
+
+        backend = IndustryBackend()
+        # fixture 仅覆盖 20240603-20240701（21 交易日），mom20 全程在 warmup 内；
+        # 用短窗口 roc(close_hfq, 1) 验证 industry 伪列附着与分组求值
+        path = _write_lib(
+            tmp_path,
+            "factors:\n"
+            "  ind_mom1:\n"
+            '    expr: "group_mean(roc(close_hfq, 1), industry)"\n',
+        )
+        lib = load_library(path)
+        result = compute_breadth(
+            "ind_mom1", backend, "20240603", "20240628", lib, chunk_days=10
+        )
+        assert isinstance(result, pd.Series)
+        assert len(result) > 0
+        assert result.dropna().shape[0] > 0
+        # 与全量 compute_factors 一致（伪列附着后"引擎同源"成立）。
+        # 注意：fixture bars 自带 close_hfq 原始列与 close×adj_factor 派生有 5e-6
+        # 浮点差，两路径必须同用派生列（columns 受限查询 → derive_fields）
+        bars = backend.query_bars(None, "20240603", "20240628",
+                                  columns=["close", "adj_factor"])
+        bars.sort_index(inplace=True)
+        factor_plan = __import__("btcore.factors.plan", fromlist=["x"])
+        factor_plan.derive_fields(bars)
+        needs = {"industry_main": True}
+        factor_plan.ensure_pseudo_columns(bars, needs, "main", backend=backend)
+        full = compute_factors(["ind_mom1"], bars, lib)
+        daily = full.groupby(level="trade_date")["ind_mom1"].first()
+        common = daily.index.intersection(result.index)
+        pd.testing.assert_series_equal(
+            daily.loc[common].astype(float), result.loc[common].astype(float),
+            check_names=False, rtol=1e-6,
+        )
