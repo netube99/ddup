@@ -74,3 +74,21 @@ stats_json/物化面板）+ 影子重算（纯 SQL/pandas，禁止 import btcore
   champ_full.db / indmom_full.db（全周期）、/tmp/verify/panels/*.parquet（因子面板）
 - 各组输出：/tmp/verify/out_V1.json / out_V2.json / out_V3.json / out_V4.json
 - 影子脚本：/tmp/verify/v1_verify.py / shadow_factors.py / v3_shadow.py 等
+
+## 修复后基线（2026-08-03，提交 c2d5327 + 12c4413）
+
+两处 P1 修复已落地（F-EMA-01 bool 加法算术化、V4-F1 round_trip 同日分红优先归因），
+新代码重跑全部窗口（results/verify/v2/，17 半年窗 + 2 全周期 × 2 策略）：
+
+| 策略 | 窗口 | 新代码（v2） | 旧代码（R24） |
+|---|---|---|---|
+| champion | 2018-2026 全周期 | +332.7% | +254.0% |
+| champion | 2022-2026 | +137.8% | — |
+| champion | 2026H1 | +16.66% | +16.0%* |
+| indmom | 2018-2026 全周期 | +145.4% | +241.1% |
+| indmom | 2022-2026 | +200.6% | — |
+| indmom | 2026H1 | +36.37% | +39.95% |
+
+*R24 记录口径。ema_bullish 修复使 TREND_BREAK 恢复设计阈值（2 信号），交易行为显著改变，
+全周期绝对数字不可与旧代码直接比较；R23 相对关系保持（indmom 2026H1 仍跑赢 champion ~20pp）。
+研究状态见 results/research_state.yaml R25。
