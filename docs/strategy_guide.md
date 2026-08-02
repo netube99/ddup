@@ -366,7 +366,7 @@ factor_specs:
 |---|---|---|---|---|
 | `exclude_st` | `bool` | `False` | `st_symbol` | 排除 ST（日频快照：当日有记录才是 ST，摘帽次日恢复可买）。未声明 = 不过滤 |
 | `exclude_new_stock` | `bool` | `False` | `listing_date` | 排除上市 60 日内的新股。未声明 = 不过滤 |
-| `exclude_loss` | `bool` | `False` | `pe_ttm` 列 | 排除 `pe_ttm <= 0` 的亏损股。未声明 = 不过滤 |
+| `exclude_loss` | `bool` | `False` | `eps` 列 | 排除亏损股（`eps < 0`；后端无 `eps` 列时回退 `pe_ttm <= 0`）。未声明 = 不过滤。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数，`eps` 才是可靠信号（2026-08 修复） |
 | `exclude_boards` | `list[str]` | `[]` | — | 排除板块：`"BJ"`（北交所）、`"688"`（科创板）、`"300"`/`"301"`（创业板） |
 | `exclude_industries` | `list[str]` | `[]` | `industry_name` | 排除指定行业名 |
 | `min_price` | `float` | `0.0` | — | 最低收盘价过滤 |
@@ -376,7 +376,7 @@ factor_specs:
 要点：
 
 - 未知键 → WARNING 并被忽略（不报错）。
-- `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启后后端缺能力（缺 ST 表 / 上市日期 / `pe_ttm` 列）时告警一次、该规则不生效（软回退）。
+- `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启后后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时告警一次、该规则不生效（软回退）。
 - `index_universe` / `factor_universe` 可用的指数代码取决于后端数据库已有的成分数据；后端无 `get_index_members` 能力或对应指数无数据时，告警一次、规则不生效（软回退）。
 - `StockFilter` 是策略侧工具：引擎不过滤，策略在 `select()` 中自行调用 `self._filter.filter(bars, date_str)`。
 
@@ -791,7 +791,7 @@ for sym in current - target:
 | 条件单 `price` 填 `None` 但自定义 handler 未计算价格 | handler 收到 None | 内置类型必须给数值 price；自定义 handler 自行计算 |
 | 把每日状态更新写在 `select()` 的调仓 early-return 之后 | 非调仓日状态不更新 | 状态更新移到 `on_tick` |
 | 指望 `max_positions` 拦截超额买入 | 引擎只记 INFO 不拦截 | 策略自行控制 buy 名单长度 |
-| 未显式声明 `exclude_loss: true` | `pe_ttm` 不 preload，亏损过滤不生效 | 需要时才显式声明（未声明 = 不过滤，不再误告警） |
+| 未显式声明 `exclude_loss: true` | `eps` 不 preload，亏损过滤不生效 | 需要时才显式声明（未声明 = 不过滤，不再误告警） |
 | 空 `bars` 时未提前返回 | `StopIteration` / `KeyError` | `if not bars: return {"buy": [], "sell": []}` |
 | 用裸价（`close`）做排名/信号 | 除权日跳空产生虚假信号 | 因子侧用 `*_hfq` 列 |
 

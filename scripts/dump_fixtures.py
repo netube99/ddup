@@ -158,16 +158,22 @@ def _get_dividend_symbols(conn, start, end):
 
 
 def _dump_bars(conn, symbols, start, end):
-    """Dump projected stk_factor_pro columns for given symbols and date range."""
+    """Dump projected stk_factor_pro columns for given symbols and date range.
+
+    eps 从 bak_basic 联表（exclude_loss 过滤规则依赖；tushare 亏损股
+    pe_ttm 为 NULL 或正数，eps<0 才是可靠亏损信号）。
+    """
     if not symbols:
         return pd.DataFrame()
 
     fields = ", ".join(BAR_COLUMNS)
     placeholders = ",".join("?" * len(symbols))
     sql = (
-        f"SELECT {fields} FROM stk_factor_pro "
-        f"WHERE ts_code IN ({placeholders}) "
-        "AND trade_date BETWEEN ? AND ?"
+        f"SELECT {fields}, b.eps AS eps FROM stk_factor_pro s "
+        "LEFT JOIN bak_basic b ON b.ts_code = s.ts_code "
+        "AND b.trade_date = s.trade_date "
+        f"WHERE s.ts_code IN ({placeholders}) "
+        "AND s.trade_date BETWEEN ? AND ?"
     )
     df = pd.read_sql_query(sql, conn, params=symbols + [start, end])
     df.rename(columns={"ts_code": "symbol"}, inplace=True)

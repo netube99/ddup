@@ -48,9 +48,9 @@ class TestDerivation:
         s = _strategy()
         cols = required_bar_columns(s, _plan(s))
         # 必需 10 列 + 因子引用(turnover_rate/dv_ttm/where 的 pb)
-        # + exclude_loss 的 pe_ttm；close_hfq 展开为基础列（已在必需列里）
+        # + exclude_loss 的 eps/pe_ttm；close_hfq 展开为基础列（已在必需列里）
         assert set(cols) == set(REQUIRED_BAR_COLUMNS) | {
-            "turnover_rate", "dv_ttm", "pb", "pe_ttm",
+            "turnover_rate", "dv_ttm", "pb", "eps", "pe_ttm",
         }
 
     def test_derived_columns_excluded(self):
@@ -68,14 +68,17 @@ class TestDerivation:
         assert "mom20" not in cols and "value" not in cols
 
     def test_exclude_loss_only_when_explicit(self):
-        """exclude_loss 显式开启才要求 pe_ttm（缺省 True 是 StockFilter 运行时语义，
+        """exclude_loss 显式开启才要求 eps/pe_ttm（缺省 True 是 StockFilter 运行时语义，
         不用 StockFilter 的策略不应被强制要求该列）。"""
         rules = {"exclude_st": True}
         s = _strategy(filter_rules=rules)
         cols = required_bar_columns(s, _plan(s))
         assert "pe_ttm" not in cols
+        assert "eps" not in cols
         s = _strategy(filter_rules={**rules, "exclude_loss": True})
-        assert "pe_ttm" in required_bar_columns(s, _plan(s))
+        cols = required_bar_columns(s, _plan(s))
+        assert "pe_ttm" in cols
+        assert "eps" in cols
 
     def test_required_fields_included(self):
         """select() 命令式访问的列经 REQUIRED_FIELDS 声明后进入请求列。"""
@@ -140,7 +143,7 @@ class TestEndToEnd:
                         initial_capital=1_000_000, db_path=":memory:")
         engine.run("20240603", "20240628")
         expected = set(REQUIRED_BAR_COLUMNS) | {
-            "turnover_rate", "dv_ttm", "pb", "pe_ttm",
+            "turnover_rate", "dv_ttm", "pb", "eps", "pe_ttm",
             # 引擎派生列
             "open_hfq", "high_hfq", "low_hfq", "close_hfq", "pct_chg",
             # 物化因子列

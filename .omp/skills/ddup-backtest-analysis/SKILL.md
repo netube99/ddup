@@ -11,6 +11,8 @@ description: ddup 回测结果深度分析：结果库 schema（trade_log/runs/s
 
 - `runs(run_id, strategy, start_date, end_date, initial_capital, config_json, status, stats_json)`——status: running/completed/failed；stats_json 含全部统计
 - `trade_log(id, run_id, date, symbol, side, trigger, price, shares, turnover, commission, stamp_tax, transfer_fee, slippage_amount, net_amount, reason)`
+  - **`net_amount` 对 SELL 行是成交净额（正数），不是盈亏**——用它对卖出行做 SUM/正负判断会得到"全部卖出盈利"的荒谬结论。单笔盈亏只能经 `round_trip`（stats_json 的 trip_detail，含 pnl/pnl_pct/holding_days/sell_trigger）或自行按 BUY/SELL 配对重建。
+  - 六维钻取里的胜率列（`SUM(CASE WHEN net_amount>0 ...)`）仅对**配好对的盈亏列**有意义；直接对 trade_log 原始行算胜率应从 stats_json.round_trip 取
 - `account_daily(run_id, date, cash, total_value, daily_pnl, cumulative_pnl, n_holdings)`
 - `debug_snapshots(run_id, date, snapshot_json)`（仅 debug=True 的 Engine 写入）
 - `ml_predictions(run_id, date, symbol, model, score)`（ML 观测，见 ddup-ml-research）

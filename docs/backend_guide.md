@@ -208,7 +208,7 @@ MY_FORM = {
 >
 > | 字段 | 依赖方 | 缺失行为 |
 > |---|---|---|
-> | `pe_ttm` | `exclude_loss` 过滤规则 | 告警一次，亏损过滤不生效（显式声明 `exclude_loss: true` 可让引擎 preload 该列） |
+> | `eps` | `exclude_loss` 过滤规则 | 告警一次，亏损过滤不生效（显式声明 `exclude_loss: true` 可让引擎 preload 该列；后端无 `eps` 时回退 `pe_ttm<=0`）。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数，`eps<0` 才是可靠亏损信号 |
 > | `total_mv` | `log_mktcap` 伪列 | 因子表达式引用 `log_mktcap` 时 preload 报错 |
 > | `turnover_rate` 等任意列 | 策略 `select()` / `on_tick()` 命令式访问 | 未声明进 `REQUIRED_FIELDS` 时列被裁掉（示例见 `strategies/examples/multi_model`） |
 
@@ -392,7 +392,7 @@ FROM financials;
 | 指数成分 `index_code` + `index_member` | `get_index_members` | `index_universe` → 告警一次，白名单不生效；`factor_universe` → 告警一次，因子计算域回退为交易域 |
 | 基准行情 `benchmark_close` | `get_benchmark_bars` | 报告基准对比列为空，不报错；因子表达式引用 `idx_ret` → preload 报错 |
 
-另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力时才会出现上表告警（软回退）。
+另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。
 
 ### 10.1 数据卫生检查与空值语义（fail-fast）
 

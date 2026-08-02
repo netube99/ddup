@@ -242,3 +242,60 @@ class TestExcludeST:
         assert set(f.filter(bars, "20240603")) == {"600519.SH"}
         # 次日快照已无 600036（摘帽）→ 恢复可买
         assert set(f.filter(bars, "20240604")) == {"600036.SH", "600519.SH"}
+
+
+class TestExcludeLoss:
+    """exclude_loss 亏损过滤。
+
+    回归：tushare 亏损股 pe_ttm 为 NULL 或正数（eps<0 时 pe_ttm 可高达 4e4），
+    pe_ttm<=0 判断结构性失效；eps<0 才是可靠亏损信号（btcore/filters.py）。
+    """
+
+    def _rules(self):
+        return {
+            "exclude_st": False,
+            "exclude_new_stock": False,
+            "exclude_loss": True,
+            "exclude_boards": [],
+            "min_price": 0,
+        }
+
+    def test_eps_negative_filtered(self):
+        """eps<0（tushare 口径亏损股）必须被剔除——即使 pe_ttm 为正。"""
+        backend = StubBackend()
+        f = StockFilter(backend, "20240601", self._rules())
+        bars = {
+            # 亏损股：eps<0 但 pe_ttm 是正数（真实 tushare 数据形态）
+            "600001.SH": {"symbol": "600001.SH", "close": 10.0,
+                          "eps": -0.5, "pe_ttm": 250.0},
+            # 盈利股
+            "600002.SH": {"symbol": "600002.SH", "close": 10.0,
+                          "eps": 1.2, "pe_ttm": 8.3},
+        }
+        result = f.filter(bars, "20240603")
+        assert "600001.SH" not in result
+        assert "600002.SH" in result
+
+    def test_eps_null_falls_back_to_pe_ttm(self):
+        """后端无 eps 列（旧后端）时回退 pe_ttm<=0 旧口径。"""
+        backend = StubBackend()
+        f = StockFilter(backend, "20240601", self._rules())
+        bars = {
+            "600001.SH": {"symbol": "600001.SH", "close": 10.0,
+                          "pe_ttm": -3.0},
+            "600002.SH": {"symbol": "600002.SH", "close": 10.0,
+                          "pe_ttm": 15.0},
+        }
+        result = f.filter(bars, "20240603")
+        assert "600001.SH" not in result
+        assert "600002.SH" in result
+
+    def test_eps_negative_wins_over_positive_pe_ttm(self):
+        """eps 与 pe_ttm 冲突时以 eps 为准（pe_ttm 在亏损股上不可靠）。"""
+        backend = StubBackend()
+        f = StockFilter(backend, "20240601", self._rules())
+        bars = {
+            "600001.SH": {"symbol": "600001.SH", "close": 10.0,
+                          "eps": -1.0, "pe_ttm": 41099.0},
+        }
+        assert f.filter(bars, "20240603") == {}

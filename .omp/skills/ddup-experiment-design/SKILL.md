@@ -46,9 +46,12 @@ params:
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results/sweep_r3.db [--dry-run]
 ```
 - params 点路径覆写 base，值列表做**笛卡尔积**（3×3×3=27 组）；`--dry-run` 预览组合
-- 执行 = subprocess **串行**调 run.py（--no-report，共享 --out，规避并行锁）；失败组合打印 FAIL 跳过
-- 结果写同库 runs + sweep_results 表（label/params/stats），末尾打印收益/Sharpe/MDD 汇总表
+- **CLI 只有 yaml/--start/--end/--out/--capital/--dry-run 六个参数，不接受 `--no-report`**——它内部调 run.py 时已强制带 `--no-report`，手动加会 usage error
+- 单次调用 = 一个窗口；多窗口网格需外层 shell 循环分次调用（每次独立 --out 或同库串行累积）
+- 执行 = subprocess **串行**调 run.py（共享 --out，规避并行锁）；失败组合打印 FAIL 跳过
+- 结果写同库 runs + sweep_results 表（label/params/stats），末尾打印收益/Sharpe/MDD 汇总行，直接 grep 即可
 - 多 run 横向对比：`python scripts/compare.py results/sweep_r3.db --html cmp.html`（11 项指标表 + 归一化净值叠加）
+- **列表型参数（如 factor_specs 权重）不能进 params 点路径**（nested_set 只支持标量）——需在策略代码加 config 开关，或手写变体 yaml 逐份运行
 
 ## 两阶段验证（防过拟合）
 

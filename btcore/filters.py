@@ -15,10 +15,12 @@ def filter_required_columns(rules: dict) -> set[str]:
     """过滤规则对 bars 列的固定依赖（引擎 preload 列裁剪用）。
 
     只统计显式开启的规则: exclude_loss 未声明即不过滤、不 preload;
-    显式开启但后端缺 pe_ttm 列时才告警（软回退）。
+    显式开启但后端缺 eps 列时才告警（软回退）。
     """
     if rules.get("exclude_loss"):
-        return {"pe_ttm"}
+        # eps 是亏损判定的可靠信号（tushare 亏损股 pe_ttm 为 NULL 或正数，
+        # pe_ttm<=0 判断结构性失效）；保留 pe_ttm 兼容只提供 pe_ttm 的后端
+        return {"eps", "pe_ttm"}
     return set()
 
 
@@ -151,17 +153,23 @@ class StockFilter:
                 continue
 
             if exclude_loss:
+                eps = bar_get(bar, "eps")
                 pe = bar_get(bar, "pe_ttm")
                 if not self._pe_checked:
-                    # exclude_loss 依赖 pe_ttm; 列裁剪下未显式声明
+                    # exclude_loss 依赖 eps/pe_ttm; 列裁剪下未显式声明
                     # exclude_loss: true 不会 preload 该列, 告警一次
                     self._pe_checked = True
-                    if pe is None:
+                    if eps is None and pe is None:
                         logger.warning(
-                            "exclude_loss 生效但 bars 无 pe_ttm 列，亏损过滤不生效；"
+                            "exclude_loss 生效但 bars 无 eps/pe_ttm 列，亏损过滤不生效；"
                             "请在 filter_rules 显式声明 exclude_loss: true 以 preload 该列"
                         )
-                if pe is not None and pe <= 0:
+                # 亏损判定：eps<0 可靠（tushare 亏损股 pe_ttm 为 NULL 或正数）；
+                # 后端无 eps 列时回退 pe_ttm<=0（旧口径）
+                if eps is not None:
+                    if eps < 0:
+                        continue
+                elif pe is not None and pe <= 0:
                     continue
 
             filtered[symbol] = bar

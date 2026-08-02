@@ -47,6 +47,9 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 - sell_shares：dict，键必须 ⊆ sell，值正整数
 - buy_weights：dict，键与 buy **精确一致**，单项∈(0,1]、和≤1；None=等权
 - buy_conditions：list[dict]，每条必含 symbol/type/price(>0)，value 与 shares 恰填一个；symbol 不得与 buy/sell 重叠；T 日声明 T+1 盘中触发，未触发自动失效
+  - **互斥是同日全量校验**：on_tick 返回的 buy_conditions 会与同日 select 的 buy 名单合并校验——若 on_tick 对某 symbol 挂了条件单，select 必须从 buy_list 排除同一 symbol（否则 ValueError）。
+    惯用模式（见 condition_hunter）：on_tick 把已挂单 symbol 记入 `self._breakout_symbols`，select 里 `buy_list = [s for s in buy_list if s not in self._breakout_symbols]`，调仓日再重置该集合。
+  - **未触发 = 不成交 = 空仓**：条件单 T+1 没碰到触发价就自动失效，该标的要等下个调仓日才重新评估。入场换条件单会系统性漏掉次日高开的强势股——对截面选股型策略（alpha 在选股不在择时）通常是负贡献，改入场方式前先想清楚 alpha 来源
 - 空返回 {"buy": [], "sell": []} 合法；空 bars 提前返回它
 
 ## 4. YAML config 引擎键（默认值）
@@ -64,7 +67,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 6. filter_rules 全集（全部可选，软回退：后端缺数据告警一次继续）
 
-`exclude_st`、`exclude_new_stock`（上市 60 日内）、`exclude_boards`（如 ["BJ","688","300","301"]）、`exclude_industries`（[行业名]）、`min_price`（close< 剔）、`exclude_loss`（pe_ttm≤0 剔，声明才 preload pe_ttm）、`index_universe`（指数池白名单，只管入场）、`factor_universe`（只决定因子计算域，不过滤交易）。未知键仅 WARNING。
+`exclude_st`、`exclude_new_stock`（上市 60 日内）、`exclude_boards`（如 ["BJ","688","300","301"]）、`exclude_industries`（[行业名]）、`min_price`（close< 剔）、`exclude_loss`（eps<0 剔，后端无 eps 列时回退 pe_ttm≤0；声明才 preload eps+pe_ttm。tushare 亏损股 pe_ttm 为 NULL 或正数，eps 才是可靠信号——2026-08 修复）、`index_universe`（指数池白名单，只管入场）、`factor_universe`（只决定因子计算域，不过滤交易）。未知键仅 WARNING。
 
 ## 7. 代码层禁令
 
