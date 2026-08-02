@@ -242,7 +242,11 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
             "date": row["date"], "symbol": row["symbol"], "type": "DIV",
             "net_amount": abs(row["net_amount"]),
         })
-    events.sort(key=lambda e: e["date"])
+    # 同日事件按 A 股时序：除息/送转（盘前）→ 买入 → 卖出。
+    # 旧排序仅按 date（同日 SELL 先于 DIV），除息日清仓的持仓分红整体丢失
+    # （2026-08-03 实证：champ 全周期 total_dividend_received 低估 -63%）。
+    _type_priority = {"DIV": 0, "STK_DIV": 0, "BUY": 1, "SELL": 2}
+    events.sort(key=lambda e: (e["date"], _type_priority.get(e["type"], 3)))
 
     # 每只股票维护 lot 队列: [{shares, cost_per_share, buy_date, dividend_accrued}]
     lots: dict[str, deque] = defaultdict(deque)

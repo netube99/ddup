@@ -102,6 +102,33 @@ def test_round_trip_through_stk_div():
     assert rt["trip_detail"][0]["pnl"] == pytest.approx(20.0, abs=0.01)
 
 
+def test_round_trip_same_day_div_before_sell():
+    """除息日清仓：同日 DIV 必须先于 SELL 入账，否则分红整体丢失。
+
+    2026-08-03 实证（V4-F1）：旧排序仅按 date（同日 SELL 先于 DIV），
+    champion 全周期 total_dividend_received 低估 -63%（13 笔同日清仓分红丢失）。
+    100 股 @10 → 同日 DIV 50 元 + SELL 100 股 @10.5：
+    修复后 trip 必须计入分红 50（total_dividend_received=50）。
+    """
+    adf = make_account_daily(
+        [1_000_000.0, 1_005_000.0, 1_005_050.0], n_holdings=[1, 0, 0]
+    )
+    trades = make_trades([
+        ["20240603", "AAA", "BUY", "MANUAL", 10.0, 100, 1000.0, 5.0, 0.0, 0.1, 2.0,
+         -1007.1, ""],
+        # 模拟落库顺序：SELL 行在 DIV 行之前（旧排序丢分红的复现条件）
+        ["20240605", "AAA", "SELL", "MANUAL", 10.5, 100, 1050.0, 5.0, 0.525, 0.1, 1.0,
+         1043.375, ""],
+        ["20240605", "AAA", "DIV", "CORPORATE", 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         50.0, "cash_div"],
+    ])
+    stats = calculate_statistics(adf, trades)
+    rt = stats["round_trip"]
+    assert rt["summary"]["total_dividend_received"] == pytest.approx(50.0, abs=0.01)
+    # 分红计入后总盈亏 = 价差 50 + 分红 50 = 100
+    assert rt["summary"]["total_realized_pnl"] == pytest.approx(100.0, abs=0.01)
+
+
 def test_empty_trades_zero_dicts():
     adf = make_account_daily([1_000_000.0, 1_010_000.0], n_holdings=[0, 1])
     stats = calculate_statistics(adf, make_trades([]))

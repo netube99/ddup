@@ -238,3 +238,62 @@ class TestComputeBreadth:
         late = compute_breadth("adv_dec_ratio", backend, cal[3], cal[10], lib)
         assert full.loc[cal[3]] == pytest.approx(late.loc[cal[3]])
         assert full.loc[cal[3]] != 0.0
+
+
+class TestBoolSumSemantics:
+    """回归：比较结果相加必须为算术计数，而非 bool OR。
+
+    2026-08-03 实证（F-EMA-01）：`(a > b) + (c > d)` 在 numexpr 纯表达式
+    路径下 bool 加法=OR，ema_bullish 仅得 0/1 而非 0-3 分，导致策略
+    `float(eb) < 3` 恒真、TREND_BREAK 的 EMA 信号永久激活。修复为各比较项
+    显式 `* 1` 转数值后再相加。
+    """
+
+    def _panel(self) -> pd.DataFrame:
+        dates = ["20240102", "20240103"]
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B", "C"]], names=["trade_date", "symbol"]
+        )
+        data = {
+            # A: 全空头排列(0分)  B: 2/3多头(2分)  C: 全多头(3分)
+            "ema_5": [1, 3, 4, 1, 3, 4],
+            "ema_20": [2, 2, 3, 2, 2, 3],
+            "ema_60": [3, 4, 2, 3, 4, 2],
+            "ema_250": [4, 1, 1, 4, 1, 1],
+            # 空头信号：macd_dif<=dea / close<bbi / ema和<3 / pdi<mdi
+            "macd_dif": [1, 1, 3, 1, 1, 3],
+            "macd_dea": [2, 2, 2, 2, 2, 2],
+            "close": [5, 5, 3, 5, 5, 3],
+            "bbi": [3, 3, 3, 3, 3, 3],
+            "dmi_pdi": [6, 6, 6, 6, 6, 6],
+            "dmi_mdi": [1, 1, 1, 1, 1, 1],
+        }
+        return pd.DataFrame(data, index=idx)
+
+    def test_ema_bullish_is_arithmetic_score(self):
+        df = self._panel()
+        values = compute_factor("ema_bullish", df)
+        expect = (
+            (df["ema_5"] > df["ema_20"]).astype(int)
+            + (df["ema_20"] > df["ema_60"]).astype(int)
+            + (df["ema_60"] > df["ema_250"]).astype(int)
+        )
+        pd.testing.assert_series_equal(values, expect.astype(float), check_dtype=False)
+        assert values.max() == 3.0  # 全多头行必须得 3 分（修复前 OR 只得 1）
+
+    def test_bear_signal_count_is_arithmetic_score(self):
+        df = self._panel()
+        values = compute_factor("bear_signal_count", df)
+        ema_sum = (
+            (df["ema_5"] > df["ema_20"]).astype(int)
+            + (df["ema_20"] > df["ema_60"]).astype(int)
+            + (df["ema_60"] > df["ema_250"]).astype(int)
+        )
+        expect = (
+            (df["macd_dif"] <= df["macd_dea"]).astype(int)
+            + (df["close"] < df["bbi"]).astype(int)
+            + (ema_sum < 3).astype(int)
+            + (df["dmi_pdi"] < df["dmi_mdi"]).astype(int)
+        )
+        pd.testing.assert_series_equal(values, expect.astype(float), check_dtype=False)
+        assert values.max() >= 2.0  # 必须出现多信号叠加值（修复前 OR 只得 0/1）
