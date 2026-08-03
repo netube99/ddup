@@ -178,6 +178,7 @@ class MyStrategy(Strategy):
 | `sell` | `list[str]` | 卖出名单（默认全部清仓）。空列表 = 无卖出。 |
 | `buy_weights` | `dict[str, float] \| None` | 每只买入的资金权重，每项 ∈ (0, 1]，权重和 ≤ 1。引擎按 `total_value × weight` 分配资金。键必须与 `buy` 列表精确一致。`None` = 等权买入。 |
 | `sell_shares` | `dict[str, int] \| None` | 部分减仓股数（正整数）。键必须是 `sell` 列表的子集。 |
+| `sell_reasons` | `dict[str, str] \| None` | 按 symbol 覆盖手动卖出的 trigger（缺省 `"MANUAL"`），值非空字符串、键 ⊆ sell。用于卖出来源归因（如 TREND_BREAK 盘前评估离场）；`on_fills` 冷却期记账与 ML holding 标签都消费 trigger。 |
 | `buy_conditions` | `list[dict] \| None` | T+1 日盘中条件买单列表，格式见 §5.2.2。 |
 | `target_value` | `dict[str, float] \| None` | 每只股票的目标市值，引擎自动计算买卖差额。`0` = 清仓；未出现的 symbol 不动。键必须是非空字符串、值必须 ≥ 0 的有限数值，否则 `ValueError`。与 `buy`/`sell`/`buy_conditions` 同日互斥。 |
 
@@ -191,6 +192,7 @@ class MyStrategy(Strategy):
 | `target_value` 与 `buy_conditions` 同时非空 | `ValueError: 互斥` |
 | `buy_weights` 的键与 `buy` 列表不一致，或权重 ∉ (0,1]，或权重和 > 1 | `ValueError` |
 | `sell_shares` 的键不在 `sell` 列表中，或值不是正整数 | `ValueError` |
+| `sell_reasons` 的键不在 `sell` 列表中，或值不是非空字符串 | `ValueError` |
 | `buy_conditions` 的 symbol 出现在 `buy` 或 `sell` 名单中 | `ValueError` |
 | 条件买单缺 `symbol`/`type`/`price`、`price` 非正数、`value` 与 `shares` 同时填或同时缺 | `ValueError` |
 | 条件单/条件买单的 `type` 未注册 | `ValueError: 未注册的条件单类型` |
@@ -893,6 +895,7 @@ python scripts/replay.py result.db --run-id 1 --symbol 000001.SZ --date 20240315
 | `sell` | `list[str]` | 是 | 卖出名单（默认全清） |
 | `buy_weights` | `dict[str, float] \| None` | 是 | 买入权重，键 = buy，单项 ∈ (0,1]，和 ≤ 1 |
 | `sell_shares` | `dict[str, int] \| None` | 是 | 部分减仓股数，键 ⊆ sell，正整数 |
+| `sell_reasons` | `dict[str, str] \| None` | 是 | 手动卖出 trigger 覆盖，键 ⊆ sell，非空字符串 |
 | `buy_conditions` | `list[dict] \| None` | 是 | 条件买单，symbol 不得与 buy/sell 重叠 |
 | `target_value` | `dict[str, float] \| None` | — | 目标市值，0 = 清仓 |
 

@@ -27,3 +27,6 @@ docs/devlog/
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# 实盘账本（账户隐私数据）
+live/

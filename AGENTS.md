@@ -49,6 +49,12 @@ python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out sweep.d
 # 交易决策回放（按 symbol/日期定位调试上下文）
 python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
 
+# 实盘账本：建账 / 每日对账同步 / 明日操作单 / 状态（账本与策略解耦，可换任意策略 YAML）
+python scripts/live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]
+python scripts/live.py sync live/main.db sync.yaml
+python scripts/live.py signal live/main.db strategies/selected/trend_guard_bw_300/config.yaml --date 20260731
+python scripts/live.py status live/main.db
+
 # Brinson 归因数据导出（一次性导出 parquet，后续离线归因）
 python scripts/dump_brinson_data.py /path/to/tushare.db --out brinson_data
 
@@ -66,7 +72,7 @@ btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策
               不要随意修改
 adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
 research/   — 研究工具库（纯 importable 模块，不含 CLI；因子评估、归因、
-              HTML 报告生成、多因子合成）
+              HTML 报告生成、多因子合成、实盘账本回放 research/live.py）
 scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、
               性能基准、fixtures 生成、反破坏检查）
 factors/    — 用户因子定义（library.yaml，可编辑）
@@ -206,6 +212,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 单文件 HTML 报告与多 run 对比（内联 SVG） | `research/report.py` | `docs/cli_and_research.md` |
 | 回测 CLI（run/report/compare/交叉验证/sweep/replay） | `scripts/` | `docs/cli_and_research.md` |
 | debug 快照与交易回放 | `btcore/database.py`, `scripts/replay.py` | `docs/strategy_guide.md`, `docs/cli_and_research.md` |
+| 实盘账本与回放（ledger 驱动、策略解耦、明日操作单） | `research/live.py`, `scripts/live.py` | `docs/cli_and_research.md` |
 | 坍缩因子流式计算（compute_breadth） | `btcore/factors/library.py` | `docs/factor_library.md` |
 | 涨跌停价格推算（ROUND_HALF_UP） | `btcore/limits.py` | — |
 | 撮合入口（价格校验/成交量cap等） | `btcore/match/core.py` | — |
@@ -219,13 +226,14 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 415 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+- 521 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
   ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、
   训练面板与引擎物化一致性、时间切分 embargo、评估指标）、
   统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、
-  debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证等
+  debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证、
+  实盘账本（成交应用/对账/操作单/回测往返一致性 parity）、select 协议 sell_reasons 键
 
 ---
 

@@ -23,10 +23,12 @@ def manual_sell(account, bars: dict, sell_symbols: list,
                 limits_fn, costs_fn, slip_fn,
                 shares_map: dict | None = None,
                 quiet: bool = False,
-                trigger: str = "MANUAL") -> list:
+                trigger: str = "MANUAL",
+                reasons_map: dict | None = None) -> list:
     """手动卖出。shares_map 为 None 时清仓（现状）；否则按指定股数部分卖出。
 
-    trigger 透传进成交记录，缺省 "MANUAL"。
+    trigger 透传进成交记录，缺省 "MANUAL"；reasons_map 可按 symbol 覆盖
+    （select 协议 sell_reasons 键，用于卖出来源归因，如 TREND_BREAK）。
     """
     _warn = logger.debug if quiet else logger.warning
     trades = []
@@ -66,7 +68,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
                            trade_date, symbol)
             continue
 
-        trade = execute_sell(account, holding, bar, exec_px, trigger,
+        trade = execute_sell(account, holding, bar, exec_px,
+                             (reasons_map or {}).get(symbol, trigger),
                              costs_fn, slip_fn, shares=shares)
         trades.append(trade)
         if shares >= holding.shares:

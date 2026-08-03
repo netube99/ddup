@@ -1,6 +1,6 @@
 ---
 name: ddup-strategy-craft
-description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与示例地图（含 multi_model 与 ML 消歧）、Strategy 钩子接口、select 返回协议 6 键与冲突校验、YAML config 键全集、条件单系统与自定义 handler、filter_rules 全集、代码层禁令。创建/修改策略、加条件单/目标仓位/条件买入/自定义 handler、升级策略级别时使用。
+description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与示例地图（含 multi_model 与 ML 消歧）、Strategy 钩子接口、select 返回协议 7 键与冲突校验、YAML config 键全集、条件单系统与自定义 handler、filter_rules 全集、代码层禁令。创建/修改策略、加条件单/目标仓位/条件买入/自定义 handler、升级策略级别时使用。
 ---
 
 # ddup 策略编写规程
@@ -40,11 +40,12 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 3. select() 返回协议（engine 校验，违反即 ValueError）
 
-合法键仅 6 个：`buy` `sell` `buy_conditions` `target_value` `sell_shares` `buy_weights`（未知键仅 warning）。
+合法键仅 7 个：`buy` `sell` `buy_conditions` `target_value` `sell_shares` `buy_weights` `sell_reasons`（未知键仅 warning）。
 
 - buy/sell：list，无重复 symbol；buy∩sell 冲突报错
 - target_value：dict{symbol: ≥0 有限值}；**与 buy/sell/buy_conditions 全互斥**；0=清仓、未出现不动；trigger="TARGET"，先卖后买
 - sell_shares：dict，键必须 ⊆ sell，值正整数
+- sell_reasons：dict{symbol: 非空字符串}，键必须 ⊆ sell；按 symbol 覆盖手动卖出的 trigger（缺省 "MANUAL"）——卖出来源归因（如 TREND_BREAK 盘前评估离场），on_fills 冷却期记账与 ML holding 标签都消费 trigger
 - buy_weights：dict，键与 buy **精确一致**，单项∈(0,1]、和≤1；None=等权
 - buy_conditions：list[dict]，每条必含 symbol/type/price(>0)，value 与 shares 恰填一个；symbol 不得与 buy/sell 重叠；T 日声明 T+1 盘中触发，未触发自动失效
   - **互斥是同日全量校验**：on_tick 返回的 buy_conditions 会与同日 select 的 buy 名单合并校验——若 on_tick 对某 symbol 挂了条件单，select 必须从 buy_list 排除同一 symbol（否则 ValueError）。

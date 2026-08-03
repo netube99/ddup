@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # select() / on_tick() 返回 dict 的已知键；其余键被忽略并告警（防 typo 静默失效）
 _SELECT_KEYS = frozenset({
     "buy", "sell", "buy_conditions", "target_value",
-    "sell_shares", "buy_weights",
+    "sell_shares", "buy_weights", "sell_reasons",
 })
 
 
@@ -208,64 +208,7 @@ class Engine:
         self._warn_in_sample_overlap(start, end)
         conn = database.init_backtest_db(self.db_path)
         try:
-            calendar = self.provider.get_calendar(start, end)
-            if not calendar:
-                raise ValueError("日历为空")
-
-            # 前视钳制提前到 preload 阶段：get_universe / on_start 内的
-            # provider 查询以首日前一交易日为锚（首个模拟日决策时点口径），
-            # 钩子里传未来日期也拿不到未来数据
-            self.provider.set_as_of(
-                self.provider.prev_trading_day(calendar[0]) or calendar[0]
-            )
-
-            factor_symbols = self.strategy.get_factor_universe(self.provider, start, end)
-            trade_symbols = self.strategy.get_universe(self.provider, start, end)
-            # factor_universe 未配置时 factor_symbols 为 None，沿用 trade_symbols
-            load_symbols = factor_symbols if factor_symbols is not None else trade_symbols
-            fplan = self._build_factor_plan()
-            warmup_days = fplan["main_days"] if fplan else factor_plan.DEFAULT_WARMUP_DAYS
-            preload_start = (
-                pd.Timestamp(calendar[0]) - pd.Timedelta(days=warmup_days)
-            ).strftime("%Y%m%d")
-            bars_df = self.provider.get_engine_bars(
-                load_symbols, calendar[-1],
-                lookback_start=preload_start,
-                columns=required_bar_columns(self.strategy, fplan),
-            )
-            bars_df.sort_index(inplace=True)
-            factor_plan.validate_required_columns(bars_df)
-            factor_plan.derive_fields(bars_df)
-            if fplan:
-                # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
-                logger.debug("factor warmup rows: %s", fplan["windows"])
-                breadth_df = self._preload_breadth(fplan, calendar)
-                self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
-                factor_plan.materialize(
-                    bars_df, breadth_df, fplan, self.strategy.FACTOR_NODES
-                )
-                # 物化后验证
-                issues = factor_plan.validate_materialization(bars_df, fplan)
-                for issue in issues:
-                    getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
-            if self._model_specs:
-                # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
-                # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
-                # 变换的排名口径 = 因子计算域，与训练面板口径一致
-                ml_runtime.materialize_predictions(bars_df, self._model_specs)
-            # 若 factor_universe 比 trading universe 更宽，裁切到交易域
-            if factor_symbols is not None and trade_symbols is not None:
-                trade_set = set(trade_symbols)
-                mask = bars_df.index.get_level_values("symbol").isin(trade_set)
-                bars_df = bars_df[mask]
-                if bars_df.empty:
-                    raise ValueError(
-                        "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
-                    )
-            self.bars_df = bars_df
-            self.bars_by_date = _DaySlicer(bars_df)
-            self.provider.attach_bars(bars_df)
-            self.strategy.on_start(self.provider, calendar[0], end_date=end)
+            calendar = self._prepare(start, end)
 
             # runs 行独立事务提交: 后续 step 回滚不会把它带走,
             # 崩溃时才能把状态改写成 failed
@@ -348,6 +291,72 @@ class Engine:
         finally:
             conn.close()
 
+    def _prepare(self, start: str, end: str) -> list[str]:
+        """回测/实盘回放共用的预加载管线（无 DB 写入、不触碰账户）。
+
+        日历 → 前视锚定 → universe → 因子物化（广度+主面板）→ ML 分数物化
+        → 面板裁切 → provider.attach_bars → strategy.on_start。返回交易日历。
+        """
+        calendar = self.provider.get_calendar(start, end)
+        if not calendar:
+            raise ValueError("日历为空")
+
+        # 前视钳制提前到 preload 阶段：get_universe / on_start 内的
+        # provider 查询以首日前一交易日为锚（首个模拟日决策时点口径），
+        # 钩子里传未来日期也拿不到未来数据
+        self.provider.set_as_of(
+            self.provider.prev_trading_day(calendar[0]) or calendar[0]
+        )
+
+        factor_symbols = self.strategy.get_factor_universe(self.provider, start, end)
+        trade_symbols = self.strategy.get_universe(self.provider, start, end)
+        # factor_universe 未配置时 factor_symbols 为 None，沿用 trade_symbols
+        load_symbols = factor_symbols if factor_symbols is not None else trade_symbols
+        fplan = self._build_factor_plan()
+        warmup_days = fplan["main_days"] if fplan else factor_plan.DEFAULT_WARMUP_DAYS
+        preload_start = (
+            pd.Timestamp(calendar[0]) - pd.Timedelta(days=warmup_days)
+        ).strftime("%Y%m%d")
+        bars_df = self.provider.get_engine_bars(
+            load_symbols, calendar[-1],
+            lookback_start=preload_start,
+            columns=required_bar_columns(self.strategy, fplan),
+        )
+        bars_df.sort_index(inplace=True)
+        factor_plan.validate_required_columns(bars_df)
+        factor_plan.derive_fields(bars_df)
+        if fplan:
+            # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
+            logger.debug("factor warmup rows: %s", fplan["windows"])
+            breadth_df = self._preload_breadth(fplan, calendar)
+            self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
+            factor_plan.materialize(
+                bars_df, breadth_df, fplan, self.strategy.FACTOR_NODES
+            )
+            # 物化后验证
+            issues = factor_plan.validate_materialization(bars_df, fplan)
+            for issue in issues:
+                getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
+        if self._model_specs:
+            # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
+            # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
+            # 变换的排名口径 = 因子计算域，与训练面板口径一致
+            ml_runtime.materialize_predictions(bars_df, self._model_specs)
+        # 若 factor_universe 比 trading universe 更宽，裁切到交易域
+        if factor_symbols is not None and trade_symbols is not None:
+            trade_set = set(trade_symbols)
+            mask = bars_df.index.get_level_values("symbol").isin(trade_set)
+            bars_df = bars_df[mask]
+            if bars_df.empty:
+                raise ValueError(
+                    "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
+                )
+        self.bars_df = bars_df
+        self.bars_by_date = _DaySlicer(bars_df)
+        self.provider.attach_bars(bars_df)
+        self.strategy.on_start(self.provider, calendar[0], end_date=end)
+        return calendar
+
     def _build_factor_plan(self) -> dict | None:
         """由策略 FACTOR_SPECS/FACTOR_NODES 构建因子供给计划（无因子则 None）。"""
         specs = getattr(self.strategy, "FACTOR_SPECS", None) or []
@@ -425,6 +434,7 @@ class Engine:
                         limits.get_limit_prices, self.costs_fn, apply_slippage,
                         shares_map=self.pending_actions.get("sell_shares"),
                         trigger="MANUAL",
+                        reasons_map=self.pending_actions.get("sell_reasons"),
                         quiet=self.quiet_skips,
                     )
 
@@ -628,6 +638,19 @@ class Engine:
                     or shares <= 0):
                 raise ValueError(
                     f"sell_shares[{symbol}] 必须是正整数股数: {shares!r}"
+                )
+
+        sell_reasons = actions.get("sell_reasons") or {}
+        if not isinstance(sell_reasons, dict):
+            raise ValueError("sell_reasons 必须是 {symbol: 原因字符串} 的 dict")
+        for symbol, reason in sell_reasons.items():
+            if symbol not in sell:
+                raise ValueError(
+                    f"sell_reasons 的 {symbol} 不在 sell 名单里"
+                )
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(
+                    f"sell_reasons[{symbol}] 必须是非空字符串: {reason!r}"
                 )
 
         buy_weights = actions.get("buy_weights")

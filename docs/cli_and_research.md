@@ -267,7 +267,50 @@ python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
 | `benchmark_weights.parquet` | 基准行业权重（单指数） | index=trade_date，columns=行业名，每日归一化到和为 1 |
 | `bars.parquet` | 个股 bars（仅 `--result-db` 时导出） | MultiIndex (trade_date, symbol)，列 close/pct_chg |
 
-### 2.9 开发/性能工具（一句话索引）
+### 2.9 `live.py` — 实盘账本与每日信号
+
+实盘化的核心设计：**账本（ledger）是唯一持久化状态，与策略完全解耦**。
+`ledger_fills`（append-only 真实成交）+ `ledger_meta`（账户元数据）是唯一手工
+数据源；每次 `signal` 把账本灌进回测引擎全量回放（真实成交替代撮合、公司行为
+走引擎原生路径、策略钩子逐日演化），末日 `_compute_pending` 的输出即次日操作单。
+策略可随意切换——换一份 YAML 重新回放即得该策略口径的操作单。
+
+```bash
+python scripts/live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]
+python scripts/live.py sync live/main.db sync.yaml          # 每日对账
+python scripts/live.py signal live/main.db strategies/selected/xxx/config.yaml [--date D] [--out o.json]
+python scripts/live.py status live/main.db
+```
+
+| 子命令 | 语义 |
+|------|------|
+| `init` | 建账：现金 + 可选已有持仓（`positions.yaml` 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账；`entry_date/entry_price` 用于 holding_days 与 trailing 锚点重建，缺省空仓开局） |
+| `sync` | 每日对账：追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST` 条目（超 100 元告警）。数据落后时也可用（估值用旧价不影响股数/现金对账） |
+| `signal` | 全量回放 → 明日操作单（JSON）：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（券商条件单：每只持仓的 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌、T+1 锁定）。同时重写衍生表 |
+| `status` | 当前状态：最近一日 account_daily、持仓快照（`ledger_holdings`）、最近 10 条成交 |
+
+`sync.yaml` 格式（全量账户信息一次性给到位）：
+
+```yaml
+date: 20260803
+cash: 41233.55                                  # 券商可用资金
+holdings: [{symbol: 600519.SH, shares: 100}]    # 券商实际持仓
+fills:                                          # 今日实际成交（可为空）
+  - {symbol: 000001.SZ, side: SELL, price: 12.34, shares: 1000,
+     commission: 2.47, stamp_tax: 6.17, transfer_fee: 0.0, reason: TREND_BREAK}
+```
+
+- **账本即回测结果库**：`runs`/`trade_log`/`account_daily`/`holdings` 衍生表与回测
+  同 schema（`report.py`/`cross_validate.py`/`replay.py` 直接消费）；公司行为
+  （DIV/STK_DIV）回放时从分红表自动衍生落库，无需手工录入
+- **成交是唯一真相源**：持仓/现金永远衍生，不可手改；对不上 = 漏录/错录成交
+- **reason 字段**（= 回测 trigger）：冷却期记账（on_fills）与 ML holding 标签消费它；
+  条件单触发离场如实记录（如 `TREND_BREAK`/`TRAILING_TP`），手动操作记 `MANUAL`
+- **一致性保证**：回测 trade_log 灌入账本回放，衍生账户轨迹与回测逐日逐分钱一致、
+  末日 pending_actions 逐键相等（`tests/test_live.py::TestBacktestParity` 锁定）
+- 每日节奏：收盘后 ①更新行情库 ②`sync` ③`signal` ④次日盘前按操作单设券商条件单
+
+### 2.10 开发/性能工具（一句话索引）
 
 | 工具 | 用途 |
 |------|------|
