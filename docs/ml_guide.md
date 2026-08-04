@@ -98,6 +98,10 @@ conditions:
     --db results/baseline.db --lookahead 3
 ```
 
+holding 标签只消费单一 run 的 trade_log：多 run 结果库缺省取最新
+completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
+先于买卖处理，红利计入在持回合 pnl。
+
 训练域：`filter_rules.index_universe` 成分在训练窗口内的并集；未配置则全市场。
 面板自动向 start 之前延伸 warmup 天数（按因子闭包推导），标签窗口不会缺数据。
 
@@ -221,6 +225,7 @@ conditions:
 | `--start` / `--end` | 是 | 训练窗口 YYYYMMDD |
 | `--horizon` | 否 | panel 标签前瞻天数，缺省 5（也是 embargo 宽度） |
 | `--db` | holding 必需 | holding scope 标签来源：含 trade_log 的回测结果库 |
+| `--run-id` | 否 | 标签取用的 run_id；缺省取最新 `status='completed'` 的 run（无 completed 回退最新 run），多 run 时告警告知所选 |
 | `--lookahead` | 否 | holding 标签前瞻天数，缺省 3（也是 embargo 宽度） |
 | `--post-transform` | 否 | `none` / `xs_rank` / `xs_zscore`，写入 meta 作为训练/推理统一声明 |
 | `-v` / `--verbose` | 否 | 调试日志 |

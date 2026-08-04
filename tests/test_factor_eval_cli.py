@@ -8,7 +8,7 @@ run_eval 以 MockDataBackend 注入，验证与引擎同源的物化口径：
 
 import pytest
 
-from scripts.factor_eval import run_eval
+from research.factor_eval import run_eval
 from tests.conftest import MockDataBackend
 
 
@@ -44,7 +44,7 @@ def test_collapse_nested_failfast(backend, capsys, monkeypatch):
         "parent": {"expr": "close_hfq / breadth"},
         "breadth": {"expr": "mean(close_hfq > 0)"},
     }
-    monkeypatch.setattr("scripts.factor_eval.load_library", lambda: fake_lib)
+    monkeypatch.setattr("research.factor_eval.load_library", lambda: fake_lib)
     rc = run_eval(backend, ["parent"], "20240603", "20240628")
     captured = capsys.readouterr()
     assert rc == 1

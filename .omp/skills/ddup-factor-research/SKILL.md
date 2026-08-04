@@ -75,7 +75,7 @@ ev = evaluate_composite(comp, fwd_ret)   # → {"ic":…, "rank_ic":…, "layere
 
 ## 坍缩因子特例
 
-- 研究侧 `compute_factor(s)` 的聚合口径 = 传入 df 的股票池（窄池 ≠ 引擎全市场口径）；评估坍缩因子**必须**用 `compute_breadth(name, backend, start, end)`（全市场流式分块，与引擎同口径）
+- 研究侧 `compute_factors` 的聚合口径 = 传入 df 的股票池（窄池 ≠ 引擎全市场口径）；评估坍缩因子**必须**用 `compute_breadth(name, backend, lib, start, end, benchmark=...)`（全市场流式分块，与引擎同源口径；`lib` 为 load_library() 结果，`benchmark` 在因子引用 `idx_ret` 时必传）
 - 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层，改时序维度（与基准收益比对 / 择时门控信号）
 
 ## 四大陷阱（每轮因子工作前过一遍）

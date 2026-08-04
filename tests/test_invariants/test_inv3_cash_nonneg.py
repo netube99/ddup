@@ -8,7 +8,7 @@ def test_inv3_cash_nonneg(make_engine):
     strategy = AccumulateBuyStrategy()
     engine, calendar = make_engine(strategy, "20240610", max_positions=5)
 
-    engine._compute_pending(calendar[0])
+    engine.compute_pending(calendar[0])
 
     conn = init_backtest_db(":memory:")
     try:

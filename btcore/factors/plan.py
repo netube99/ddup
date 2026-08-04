@@ -154,7 +154,8 @@ def ensure_pseudo_columns(
 
 
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）
-def _to_calendar_days(trading_rows: int) -> int:
+# 公开：library.compute_breadth 跨模块消费同一换算，避免两份逻辑漂移
+def to_calendar_days(trading_rows: int) -> int:
     return int(trading_rows * 1.5) + 10
 
 
@@ -166,9 +167,11 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
 
     返回 dict：
       topo:             闭包拓扑序（引用先于被引用方）
+      main:             主面板节点集合（非坍缩节点；坍缩节点由投影供值）
       breadth:          需在广度面板计算的节点集合
       collapse:         {坍缩节点: "market"|"group"}（投影方式）
-      main_columns:     主面板需向 backend 请求的基础列（含伪列名，引擎再分流）
+      main_columns:     主面板基础列（已剔除伪列；派生列如 close_hfq 仍在内，
+                        请求前需经 expand_columns 展开）
       breadth_columns:  广度面板基础列（同上）
       needs:            {market, index, industry_main, industry_breadth,
                          mktcap_main, mktcap_breadth} 布尔标志
@@ -240,7 +243,7 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
     if needs["mktcap_breadth"]:
         breadth_raw.add("total_mv")
 
-    breadth_days = _to_calendar_days(max_window)
+    breadth_days = to_calendar_days(max_window)
     return {
         "topo": order,
         "main": main_set,
@@ -289,14 +292,13 @@ def materialize(
     main_df: pd.DataFrame,
     breadth_df: pd.DataFrame | None,
     plan: dict,
-    nodes: dict[str, dict],
 ) -> None:
     """两阶段物化：广度面板求值 + 坍缩投影 + 主面板求值（原地写列）。
 
     nodes 以 plan["nodes"]（CSE 重写后）为准；CSE 合成节点的临时列在
     物化完成后删除。
     """
-    nodes = plan.get("nodes", nodes)
+    nodes = plan["nodes"]
     breadth_set: set[str] = plan["breadth"]
     if breadth_df is not None:
         for name in plan["topo"]:

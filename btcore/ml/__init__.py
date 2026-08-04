@@ -10,7 +10,3 @@
 训练侧（dataset/labels/trainer/export）与引擎共用 btcore.factors.plan
 的同一物化路径——训练面板与回测面板逐列一致，无第二条物化管线。
 """
-
-from btcore.ml.spec import ModelSpec, parse_models
-
-__all__ = ["ModelSpec", "parse_models"]

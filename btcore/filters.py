@@ -11,6 +11,32 @@ logger = logging.getLogger(__name__)
 INDEX_LOOKBACK_DAYS = 45
 
 
+def resolve_index_snapshots(backend, codes, start: str, end: str) -> dict[str, set[str]]:
+    """指数成分快照 map：{快照日: {成分股}}，前溯 INDEX_LOOKBACK_DAYS。
+
+    前溯保证窗口首日也有 ≤ 当日的快照（快照是月频的）。
+    codes 为空或 backend 无 get_index_members 能力时返回 {}。
+    """
+    if not codes or not hasattr(backend, "get_index_members"):
+        return {}
+    lookback = (
+        date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
+    ).strftime("%Y%m%d")
+    raw = backend.get_index_members(list(codes), lookback, end) or {}
+    return {str(d): set(v) for d, v in raw.items()}
+
+
+def resolve_index_universe(backend, codes, start: str, end: str) -> list[str] | None:
+    """指数成分区间并集（preload/universe 裁剪候选池用）。
+
+    backend 无能力或区间内无快照时返回 None（调用方回退全市场）。
+    """
+    snapshots = resolve_index_snapshots(backend, codes, start, end)
+    if not snapshots:
+        return None
+    return sorted(set().union(*snapshots.values()))
+
+
 def filter_required_columns(rules: dict) -> set[str]:
     """过滤规则对 bars 列的固定依赖（引擎 preload 列裁剪用）。
 
@@ -87,12 +113,9 @@ class StockFilter:
 
         if rules.get("index_universe"):
             if hasattr(backend, "get_index_members"):
-                lookback = (
-                    date.fromisoformat(start_date)
-                    - timedelta(days=INDEX_LOOKBACK_DAYS)
-                ).strftime("%Y%m%d")
-                self._idx_map = backend.get_index_members(
-                    list(rules["index_universe"]), lookback, end_date or start_date
+                self._idx_map = resolve_index_snapshots(
+                    backend, rules["index_universe"],
+                    start_date, end_date or start_date,
                 )
                 self._idx_dates = sorted(self._idx_map)
                 if not self._idx_map:

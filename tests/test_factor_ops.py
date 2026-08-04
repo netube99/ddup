@@ -199,3 +199,8 @@ class TestStaticAnalysis:
             ops.validate_op_expr("ma(close)")
         with pytest.raises(ValueError, match="链式比较"):
             ops.validate_op_expr("1 < close < 2")
+
+    def test_op_names_derived_from_ops_table(self):
+        """OP_NAMES 由 _OPS 派生（单一来源），消费方 cse/check_skill_sync 依赖。"""
+        assert ops.OP_NAMES == frozenset(ops._OPS)
+        assert "mean" in ops.OP_NAMES and "group_mean" in ops.OP_NAMES

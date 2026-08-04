@@ -32,7 +32,7 @@ def test_as_of_clamps_future_end_date():
     bars = backend.query_bars(None, "20240603", "20240701")
     bars.sort_index(inplace=True)
     provider.attach_bars(bars)
-    provider._as_of_date = "20240610"
+    provider.set_as_of("20240610")
 
     hist = provider.get_historical_bars(None, "20991231", lookback_days=365)
 

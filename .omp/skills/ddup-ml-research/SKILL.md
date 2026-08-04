@@ -54,6 +54,7 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model exit_guard
     --start 20220101 --end 20250630 --db results/base_run.db --lookahead 3
 ```
 - 标签：panel = horizon 日前向收益 close_hfq 截面 pct rank；holding = trade_log 回合重构，正样本=TREND_BREAK 且净亏损、距卖出∈[1,lookahead]
+- holding 标签只消费单一 run：`--run-id` 显式指定，缺省取最新 completed run（无 completed 回退最新 run，多 run 时 warning）；同日公司行为（DIV/STK_DIV 盘前）先于买卖，红利计入在持回合 pnl，实盘账本 ADJUST 审计行跳过
 - 训练域 = filter_rules.index_universe 成分并集 + PIT 过滤（未配则全市场）；80/20 时间切分 + embargo（切点前 horizon/lookahead 日剔除）；scaler 仅训练段拟合
 - 产出：`<name>.onnx` + `<name>.meta.json`（v3：特征契约/scaler/指标/train_window/artifact_sha256）；导出强制 sklearn vs ONNX 一致性 ≤1e-4
 - 样本下限：panel ≥500 行；holding ≥100 且正样本 ≥20（不足报错）

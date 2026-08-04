@@ -86,7 +86,7 @@ def build_panel(
             bars_df, fplan["needs"], "main",
             backend=backend, benchmark=benchmark,
         )
-        factor_plan.materialize(bars_df, breadth_df, fplan, nodes)
+        factor_plan.materialize(bars_df, breadth_df, fplan)
         issues = factor_plan.validate_materialization(bars_df, fplan)
         for issue in issues:
             getattr(logger, issue["level"])("[因子验证] %s", issue["message"])

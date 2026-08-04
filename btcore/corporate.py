@@ -7,9 +7,52 @@
 import logging
 from datetime import date
 
+from btcore import types
 from btcore.types import bar_get
 
 logger = logging.getLogger(__name__)
+
+
+def derived_trades(corporate_log: list) -> list[types.Trade]:
+    """公司行为日志 → 衍生 trade_log 行（回测落库与实盘衍生表重写共用）。
+
+    送转增股必须落库：stats 往返盈亏 / Brinson 持仓重建 /
+    ML 回合配对都从 trade_log 重建持股事实，缺失会腐化三处。
+    """
+    out = []
+    for event in corporate_log:
+        if event["type"] == "cash_div":
+            out.append(types.Trade(
+                date=event["date"], symbol=event["symbol"], side="DIV",
+                trigger="CORPORATE", price=0.0, shares=0,
+                turnover=0.0, commission=0.0, stamp_tax=0.0,
+                transfer_fee=0.0, slippage_amount=0.0,
+                net_amount=event["net"], reason="cash_div",
+            ))
+        elif event["type"] == "stk_div":
+            out.append(types.Trade(
+                date=event["date"], symbol=event["symbol"], side="STK_DIV",
+                trigger="CORPORATE", price=0.0, shares=event["new_shares"],
+                turnover=0.0, commission=0.0, stamp_tax=0.0,
+                transfer_fee=0.0, slippage_amount=0.0,
+                net_amount=0.0, reason="stk_div",
+            ))
+    return out
+
+
+def apply_condition_rescale(strategy, corporate_log: list):
+    """除权除息后同步 rescale 策略侧 trailing 锚点（S-COND-01，回测/实盘共用）。
+
+    2026-08 实证：漏 rescale 时次日 calc_conditions 用除权前高点
+    重算 TRAILING_TP 触发价，开盘即误触发卖出。
+    """
+    rescale = getattr(getattr(strategy, "_cond", None), "rescale", None)
+    if rescale is None:
+        return
+    for entry in corporate_log:
+        scale = entry.get("scale")
+        if scale is not None:
+            rescale(entry["symbol"], scale)
 
 
 def adjust(account, today: str, day_bars, provider, log: list):

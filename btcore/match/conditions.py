@@ -26,7 +26,7 @@ def register_condition_handler(condition_type: str, handler, required_keys=None)
     """注册条件卖出 handler: handler(holding, cond, bar) -> (executed, fill_price, log_params)。
 
     required_keys: 该类型条件单 dict 的必填键（如 {"price"}），
-    缺键会在 _compute_pending 阶段立即报错，而不是拖到次日撮合时 KeyError。
+    缺键会在 compute_pending 阶段立即报错，而不是拖到次日撮合时 KeyError。
     """
     _DISPATCH[condition_type] = handler
     if required_keys:
@@ -46,7 +46,7 @@ def registered_condition_types() -> set[str]:
 def validate_condition_types(conditions: list[dict]) -> None:
     """检查每个 condition 的 type 是否已注册、必填键是否齐全；未通过立即抛错。
 
-    设计 §2.4 步 6: 未注册 type / 缺必填键在 _compute_pending 阶段快速失败,
+    设计 §2.4 步 6: 未注册 type / 缺必填键在 compute_pending 阶段快速失败,
     不等到次日撮合时才发现（handler 直取 cond["price"] 会 KeyError 崩 run）。
     """
     for cond in conditions:
@@ -97,7 +97,7 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             continue
 
         for cond in holding.conditions:
-            # 防御：engine._compute_pending 已 validate_condition_types 前置校验，
+            # 防御：engine.compute_pending 已 validate_condition_types 前置校验，
             # 此分支仅在 match 层被绕过引擎直接调用时可达
             handler = _DISPATCH.get(cond.get("type", ""))
             if handler is None:
@@ -209,7 +209,7 @@ def entry_conditions(account, bars: dict, orders: list[dict],
             continue
         trade_date = bar_get(bar, "trade_date", "")
 
-        # type 已在 engine._compute_pending 经 validate_buy_condition_types 校验
+        # type 已在 engine.compute_pending 经 validate_buy_condition_types 校验
         handler = _BUY_DISPATCH[order["type"]]
         executed, fill_price, log_params = handler(order, bar)
         if not executed:

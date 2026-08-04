@@ -39,10 +39,12 @@ from pathlib import Path
 import yaml
 
 from btcore.factors.library import load_library
+from btcore.filters import resolve_index_snapshots
 from btcore.ml import dataset, labels
 from btcore.ml.export import export_model
 from btcore.ml.spec import SCOPE_HOLDING, ModelSpec
 from btcore.ml.trainer import train_guard, train_panel
+from research import cli_common
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,8 @@ def parse_args():
     p.add_argument("--horizon", type=int, default=5,
                    help="panel 标签前瞻天数（默认 5）")
     p.add_argument("--db", help="holding scope 标签来源：含 trade_log 的结果库")
+    p.add_argument("--run-id", type=int, default=None,
+                   help="标签取用的 run_id（缺省取最新 completed run）")
     p.add_argument("--lookahead", type=int, default=3,
                    help="holding scope 标签前瞻天数（默认 3）")
     p.add_argument("--post-transform", choices=["none", "xs_rank", "xs_zscore"],
@@ -107,8 +111,7 @@ def main() -> int:
         return 1
 
     try:
-        from adapters.tushare import TushareBackend
-        backend = TushareBackend()
+        backend = cli_common.make_provider().backend
     except ImportError:
         print("错误: 无法导入 adapters.tushare.TushareBackend")
         return 1
@@ -119,11 +122,11 @@ def main() -> int:
     symbols = None
     pit_members = None
     index_codes = (doc.get("filter_rules") or {}).get("index_universe", [])
-    if index_codes and hasattr(backend, "get_index_members"):
-        snaps = backend.get_index_members(list(index_codes), args.start, args.end)
+    if index_codes:
+        snaps = resolve_index_snapshots(backend, index_codes, args.start, args.end)
         if snaps:
             symbols = sorted(set().union(*snaps.values()))
-            pit_members = {str(d): set(v) for d, v in snaps.items()}
+            pit_members = snaps
             print(f"训练域: {len(symbols)} 只（index_universe 并集，PIT 过滤）")
 
     benchmark = (doc.get("config") or {}).get("benchmark")
@@ -174,7 +177,7 @@ def _train_panel(
 def _train_holding(
     args, spec, backend, symbols, library, benchmark, pit_members=None,
 ) -> int:
-    pairs_df = labels.extract_trade_pairs(args.db)
+    pairs_df = labels.extract_trade_pairs(args.db, run_id=args.run_id)
     if pairs_df.empty:
         print("错误: trade_log 中没有可配对的交易回合")
         return 1

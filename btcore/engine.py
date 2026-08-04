@@ -11,8 +11,10 @@ from btcore.costs import make_costs_fn
 from btcore.factors import plan as factor_plan
 from btcore.filters import filter_required_columns
 from btcore.ml import runtime as ml_runtime
-from btcore.provider import DataProvider
+from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL
+from btcore.provider import DataProvider, benchmark_price_column
 from btcore.slippage import apply_slippage
+from btcore.types import bar_get
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,182 @@ def _check_symbol_list(symbols: list, which: str) -> None:
     dups = sorted({s for s, n in Counter(symbols).items() if n > 1})
     if dups:
         raise ValueError(f"select() 的 {which} 名单含重复 symbol: {dups}")
+
+
+def _validate_engine_config(config: dict) -> None:
+    """逐键校验 strategy config（构造期 fail-fast，非法值拒绝启动）。"""
+    slippage_ticks = config.get("slippage_ticks", 2)
+    if (not isinstance(slippage_ticks, int)
+            or isinstance(slippage_ticks, bool)
+            or slippage_ticks < 0):
+        raise ValueError(
+            f"slippage_ticks 必须是非负整数: {slippage_ticks!r}"
+        )
+    condition_slippage_ticks = config.get("condition_slippage_ticks")
+    if condition_slippage_ticks is not None and (
+            not isinstance(condition_slippage_ticks, int)
+            or isinstance(condition_slippage_ticks, bool)
+            or condition_slippage_ticks < 0):
+        raise ValueError(
+            "condition_slippage_ticks 必须是非负整数或 None: "
+            f"{condition_slippage_ticks!r}"
+        )
+    order_volume_ratio = config.get("order_volume_ratio")
+    if order_volume_ratio is not None and (
+            not isinstance(order_volume_ratio, (int, float))
+            or isinstance(order_volume_ratio, bool)
+            or not math.isfinite(order_volume_ratio)
+            or order_volume_ratio <= 0):
+        raise ValueError(
+            f"order_volume_ratio 必须是正数或 None: {order_volume_ratio!r}"
+        )
+    execution_price = config.get("execution_price", "open")
+    if execution_price not in ("open", "close"):
+        raise ValueError(
+            f"execution_price 只支持 'open'/'close': {execution_price!r}"
+        )
+
+
+def _validate_select_actions(actions, on_tick_result):
+    """select()/on_tick() 返回协议校验 + on_tick buy_conditions 合并。
+
+    全部规则通过（on_tick 的 buy_conditions 已并入 actions）后返回
+    actions；任何协议违背立即 raise，不让脏指令流入 pending/撮合层。
+    """
+    if not isinstance(actions, dict):
+        raise ValueError(
+            f"select() 必须返回 dict，得到 {type(actions).__name__}: {actions!r}"
+        )
+    unknown = set(actions) - _SELECT_KEYS
+    if unknown:
+        logger.warning(
+            "select() 返回未知键（将被忽略，可能是 typo）: %s", sorted(unknown)
+        )
+
+    # 合并 on_tick 返回的 buy_conditions；其余键（含 buy/sell 等合法
+    # select 键）不在 on_tick 协议内，返回即报错——静默丢弃是 typo 温床
+    if on_tick_result is not None:
+        if not isinstance(on_tick_result, dict):
+            raise ValueError(
+                "on_tick() 必须返回 dict 或 None，得到 "
+                f"{type(on_tick_result).__name__}: {on_tick_result!r}"
+            )
+        tick_extra = set(on_tick_result) - {"buy_conditions"}
+        if tick_extra:
+            raise ValueError(
+                "on_tick() 只支持返回 buy_conditions（买卖名单请走 "
+                f"select()）: {sorted(tick_extra)}"
+            )
+        if on_tick_result.get("buy_conditions"):
+            existing_conds = actions.setdefault("buy_conditions", [])
+            existing_conds.extend(on_tick_result["buy_conditions"])
+
+    buy_list = actions.get("buy", [])
+    sell_list = actions.get("sell", [])
+    if not isinstance(buy_list, list) or not isinstance(sell_list, list):
+        raise ValueError(
+            f"select() 的 buy/sell 必须是 list: "
+            f"buy={buy_list!r} sell={sell_list!r}"
+        )
+    _check_symbol_list(buy_list, "buy")
+    _check_symbol_list(sell_list, "sell")
+    buy = set(buy_list)
+    sell = set(sell_list)
+    if buy & sell:
+        raise ValueError(f"同日买卖冲突: {buy & sell}")
+    target_value = actions.get("target_value") or {}
+    if target_value and (buy or sell):
+        raise ValueError("target_value 与 buy/sell 名单互斥, 同日只能用一种")
+    if not isinstance(target_value, dict):
+        raise ValueError("target_value 必须是 {symbol: 目标市值} 的 dict")
+    for symbol, tv in target_value.items():
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError(f"target_value 键必须是非空字符串: {symbol!r}")
+        if (isinstance(tv, bool) or not isinstance(tv, (int, float))
+                or not math.isfinite(tv) or tv < 0):
+            raise ValueError(
+                f"target_value[{symbol}] 必须是 ≥0 的有限数值: {tv!r}"
+            )
+
+    sell_shares = actions.get("sell_shares") or {}
+    if not isinstance(sell_shares, dict):
+        raise ValueError("sell_shares 必须是 {symbol: 股数} 的 dict")
+    for symbol, shares in sell_shares.items():
+        if symbol not in sell:
+            raise ValueError(
+                f"sell_shares 的 {symbol} 不在 sell 名单里"
+            )
+        if (not isinstance(shares, int) or isinstance(shares, bool)
+                or shares <= 0):
+            raise ValueError(
+                f"sell_shares[{symbol}] 必须是正整数股数: {shares!r}"
+            )
+
+    sell_reasons = actions.get("sell_reasons") or {}
+    if not isinstance(sell_reasons, dict):
+        raise ValueError("sell_reasons 必须是 {symbol: 原因字符串} 的 dict")
+    for symbol, reason in sell_reasons.items():
+        if symbol not in sell:
+            raise ValueError(
+                f"sell_reasons 的 {symbol} 不在 sell 名单里"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                f"sell_reasons[{symbol}] 必须是非空字符串: {reason!r}"
+            )
+
+    buy_weights = actions.get("buy_weights")
+    if buy_weights is not None:
+        if not isinstance(buy_weights, dict):
+            raise ValueError("buy_weights 必须是 {symbol: 权重} 的 dict")
+        if set(buy_weights) != buy:
+            raise ValueError(
+                f"buy_weights 的键必须与 buy 名单一致: "
+                f"多 {set(buy_weights) - buy}, 缺 {buy - set(buy_weights)}"
+            )
+        total_w = 0.0
+        for symbol, w in buy_weights.items():
+            if not _is_valid_positive(w) or w > 1:
+                raise ValueError(
+                    f"buy_weights[{symbol}] 必须 ∈ (0,1]: {w!r}"
+                )
+            total_w += w
+        if total_w > 1.0 + 1e-10:
+            raise ValueError(f"buy_weights 权重之和必须 ≤ 1: {total_w}")
+
+    buy_conds = actions.get("buy_conditions") or []
+    if not isinstance(buy_conds, list):
+        raise ValueError("buy_conditions 必须是订单 dict 的 list")
+    for i, order in enumerate(buy_conds):
+        if not isinstance(order, dict):
+            raise ValueError(f"buy_conditions[{i}] 必须是 dict: {order!r}")
+        missing = {"symbol", "type", "price"} - set(order)
+        if missing:
+            raise ValueError(f"buy_conditions[{i}] 缺必填键: {missing}")
+        if not _is_valid_positive(order["price"]):
+            raise ValueError(
+                f"buy_conditions[{i}].price 必须是正数: {order['price']!r}"
+            )
+        has_value = order.get("value") is not None
+        has_shares = order.get("shares") is not None
+        if has_value == has_shares:
+            raise ValueError(
+                f"buy_conditions[{i}] 必须在 value/shares 中恰填一个"
+            )
+        sizing = order.get("value") if has_value else order.get("shares")
+        if not _is_valid_positive(sizing):
+            raise ValueError(
+                f"buy_conditions[{i}] value/shares 必须是正数: {sizing!r}"
+            )
+    bc_symbols = {o["symbol"] for o in buy_conds}
+    if bc_symbols & sell:
+        raise ValueError(f"同日卖出与条件买入冲突: {bc_symbols & sell}")
+    if bc_symbols & buy:
+        raise ValueError(f"buy 名单与条件买入重复: {bc_symbols & buy}")
+    if buy_conds and target_value:
+        raise ValueError("target_value 与 buy_conditions 互斥, 同日只能用一种")
+    match.conditions.validate_buy_condition_types(buy_conds)
+    return actions
 
 
 # 数据契约必需列（REQUIRED_BAR_COLUMNS）已下沉至 btcore.factors.plan，
@@ -117,22 +295,9 @@ class Engine:
                 f"max_positions 必须是正整数: {self.max_positions!r}"
             )
 
+        _validate_engine_config(config)
         slippage_ticks = config.get("slippage_ticks", 2)
-        if (not isinstance(slippage_ticks, int)
-                or isinstance(slippage_ticks, bool)
-                or slippage_ticks < 0):
-            raise ValueError(
-                f"slippage_ticks 必须是非负整数: {slippage_ticks!r}"
-            )
         condition_slippage_ticks = config.get("condition_slippage_ticks")
-        if condition_slippage_ticks is not None and (
-                not isinstance(condition_slippage_ticks, int)
-                or isinstance(condition_slippage_ticks, bool)
-                or condition_slippage_ticks < 0):
-            raise ValueError(
-                "condition_slippage_ticks 必须是非负整数或 None: "
-                f"{condition_slippage_ticks!r}"
-            )
         self.condition_slippage_ticks = condition_slippage_ticks
         self.costs_fn = make_costs_fn(config)
         bench_code = config.get("benchmark")
@@ -148,28 +313,14 @@ class Engine:
         if self.provider is not None:
             self.provider.benchmark = self.benchmark
         self.quiet_skips = bool(config.get("quiet_skips", False))
-        order_volume_ratio = config.get("order_volume_ratio")
-        if order_volume_ratio is not None and (
-                not isinstance(order_volume_ratio, (int, float))
-                or isinstance(order_volume_ratio, bool)
-                or not math.isfinite(order_volume_ratio)
-                or order_volume_ratio <= 0):
-            raise ValueError(
-                f"order_volume_ratio 必须是正数或 None: {order_volume_ratio!r}"
-            )
-        self.order_volume_ratio = order_volume_ratio
-        execution_price = config.get("execution_price", "open")
-        if execution_price not in ("open", "close"):
-            raise ValueError(
-                f"execution_price 只支持 'open'/'close': {execution_price!r}"
-            )
+        self.order_volume_ratio = config.get("order_volume_ratio")
         self._slippage_ticks = slippage_ticks
-        self._execution_price = execution_price
+        self._execution_price = config.get("execution_price", "open")
         self.account = self._make_account()
         self.pending_actions = {"buy": [], "sell": []}
         # ML 模型（strategy_loader 依据 YAML models 节挂接；未配置为空列表）
         self._model_specs = list(getattr(strategy, "MODEL_SPECS", None) or [])
-        self._holding_models = [m for m in self._model_specs if m.scope == "holding"]
+        self._holding_models = [m for m in self._model_specs if m.scope == SCOPE_HOLDING]
         # ml_log: "full" 落盘全截面分数；缺省只落盘决策相关标的
         self._ml_log_full = config.get("ml_log") == "full"
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
@@ -208,7 +359,7 @@ class Engine:
         self._warn_in_sample_overlap(start, end)
         conn = database.init_backtest_db(self.db_path)
         try:
-            calendar = self._prepare(start, end)
+            calendar = self.prepare(start, end)
 
             # runs 行独立事务提交: 后续 step 回滚不会把它带走,
             # 崩溃时才能把状态改写成 failed
@@ -220,15 +371,20 @@ class Engine:
                     start_date=start,
                     end_date=end,
                     initial_capital=self.initial_capital,
+                    # 落库生效值：CLI 覆盖（--capital 等）后 runs 表的
+                    # initial_capital 列与 config_json 保持一致
                     config_json=json.dumps(
-                        self.strategy.config, ensure_ascii=False, default=str
+                        {**self.strategy.config,
+                         "initial_capital": self.initial_capital,
+                         "max_positions": self.max_positions},
+                        ensure_ascii=False, default=str,
                     ),
                     status="running",
                 )
 
             prev_day = self.provider.prev_trading_day(calendar[0])
             if prev_day:
-                self._compute_pending(prev_day)
+                self.compute_pending(prev_day)
 
             for today in calendar:
                 day_bars = self.bars_by_date.get(today)
@@ -261,11 +417,11 @@ class Engine:
                 bm = benchmark.copy()
                 if "date" in bm.columns:
                     bm = bm.set_index("date")
-                hfq_col = "hfq_close" if "hfq_close" in bm.columns else "close"
-                if hfq_col in bm.columns and len(bm) > 0:
-                    first = float(bm[hfq_col].iloc[0])
+                price_col = benchmark_price_column(bm)
+                if price_col is not None and len(bm) > 0:
+                    first = float(bm[price_col].iloc[0])
                     if first > 0:
-                        benchmark_nav = (bm[hfq_col] / first).tolist()
+                        benchmark_nav = (bm[price_col] / first).tolist()
                         benchmark_nav = [float(v) for v in benchmark_nav]
             with conn:
                 # 基准净值随 stats_json 落库：离线 report 才能画出基准叠加线
@@ -291,7 +447,7 @@ class Engine:
         finally:
             conn.close()
 
-    def _prepare(self, start: str, end: str) -> list[str]:
+    def prepare(self, start: str, end: str) -> list[str]:
         """回测/实盘回放共用的预加载管线（无 DB 写入、不触碰账户）。
 
         日历 → 前视锚定 → universe → 因子物化（广度+主面板）→ ML 分数物化
@@ -330,9 +486,7 @@ class Engine:
             logger.debug("factor warmup rows: %s", fplan["windows"])
             breadth_df = self._preload_breadth(fplan, calendar)
             self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
-            factor_plan.materialize(
-                bars_df, breadth_df, fplan, self.strategy.FACTOR_NODES
-            )
+            factor_plan.materialize(bars_df, breadth_df, fplan)
             # 物化后验证
             issues = factor_plan.validate_materialization(bars_df, fplan)
             for issue in issues:
@@ -399,7 +553,7 @@ class Engine:
         )
 
     def step(self, today: str, day_bars: pd.DataFrame, conn):
-        bars_dict = _bars_to_dict(day_bars, today)
+        bars_dict = bars_to_dict(day_bars, today)
 
         self._save_state()
 
@@ -408,15 +562,8 @@ class Engine:
                 corporate_log = []
                 corporate.adjust(self.account, today, bars_dict,
                                  self.provider, corporate_log)
-                # 除权除息后同步 rescale 策略侧 trailing 锚点（S-COND-01，
-                # 2026-08 实证：漏 rescale 时次日 calc_conditions 用除权前高点
-                # 重算 TRAILING_TP 触发价，开盘即误触发卖出）
-                cond = getattr(getattr(self.strategy, "_cond", None), "rescale", None)
-                if cond is not None:
-                    for entry in corporate_log:
-                        scale = entry.get("scale")
-                        if scale is not None:
-                            cond(entry["symbol"], scale)
+                # 除权除息后同步 rescale 策略侧 trailing 锚点（S-COND-01）
+                corporate.apply_condition_rescale(self.strategy, corporate_log)
 
                 targets = self.pending_actions.get("target_value") or {}
                 if targets:
@@ -473,7 +620,7 @@ class Engine:
                 )
                 self._settle(today, bars_dict, all_trades, corporate_log, conn)
 
-                self._compute_pending(today, bars_dict, all_trades)
+                self.compute_pending(today, bars_dict, all_trades)
                 if self._model_specs:
                     self._write_ml_predictions(conn, today, bars_dict)
                 if self._debug:
@@ -485,54 +632,28 @@ class Engine:
     def _settle(self, today: str, bars_dict: dict, trades: list,
                 corporate_log: list, conn):
         _warn = logger.debug if self.quiet_skips else logger.warning
-        total_value = self.account.cash
-        for symbol, holding in self.account.holdings.items():
-            bar = bars_dict.get(symbol)
-            close = bar.get("close") if bar is not None else None
-            if match.core.is_valid_price(close):
-                holding.last_price = close
-            elif bar is not None:
-                _warn("[%s] %s 收盘价非法 (%s), 沿用 last_price=%s",
-                               today, symbol, close, holding.last_price)
-            total_value += holding.shares * holding.last_price
-
-        self.account.total_value = total_value
-
-        prev_cum = self.account.cumulative_pnl
-        self.account.cumulative_pnl = total_value - self.initial_capital
-        self.account.daily_pnl = self.account.cumulative_pnl - prev_cum
+        value_account(self.account, bars_dict, warn=_warn)
 
         database.write_daily(
-            conn, self.run_id, today, self.account.cash, total_value,
+            conn, self.run_id, today, self.account.cash, self.account.total_value,
             self.account.daily_pnl, self.account.cumulative_pnl,
             self.initial_capital, len(self.account.holdings),
         )
         database.write_holdings(conn, self.account)
         for trade in trades:
             database.write_trade(conn, self.run_id, trade)
+        # 公司行为衍生行（DIV/STK_DIV）与实盘回放共用同一构造口径
+        for trade in corporate.derived_trades(corporate_log):
+            database.write_trade(conn, self.run_id, trade)
 
-        for event in corporate_log:
-            if event["type"] == "cash_div":
-                database.write_trade(conn, self.run_id, types.Trade(
-                    date=today, symbol=event["symbol"], side="DIV",
-                    trigger="CORPORATE", price=0.0, shares=0,
-                    turnover=0.0, commission=0.0, stamp_tax=0.0,
-                    transfer_fee=0.0, slippage_amount=0.0,
-                    net_amount=event["net"], reason="cash_div",
-                ))
-            elif event["type"] == "stk_div":
-                # 送转增股必须落库：stats 往返盈亏 / Brinson 持仓重建 /
-                # ML 回合配对都从 trade_log 重建持股事实，缺失会腐化三处
-                database.write_trade(conn, self.run_id, types.Trade(
-                    date=today, symbol=event["symbol"], side="STK_DIV",
-                    trigger="CORPORATE", price=0.0, shares=event["new_shares"],
-                    turnover=0.0, commission=0.0, stamp_tax=0.0,
-                    transfer_fee=0.0, slippage_amount=0.0,
-                    net_amount=0.0, reason="stk_div",
-                ))
+    def compute_pending(self, calc_date: str, bars_dict: dict | None = None,
+                        trades: list | None = None):
+        """决策时点（回测 step 结尾 / 实盘回放逐日共用）。
 
-    def _compute_pending(self, calc_date: str, bars_dict: dict | None = None,
-                         trades: list | None = None):
+        前视钳制 → holding_days 递增/T+1 解锁 → holding 模型分数注入 →
+        on_fills → on_tick → select 返回协议校验 → calc_conditions。
+        结果写入 pending_actions，由次日 step 撮合（回放中则被丢弃）。
+        """
         self.provider.set_as_of(calc_date)
 
         for holding in self.account.holdings.values():
@@ -543,7 +664,7 @@ class Engine:
             day_bars_view = self.bars_by_date.get(calc_date)
             if day_bars_view is None:
                 return
-            bars_dict = _bars_to_dict(day_bars_view, calc_date)
+            bars_dict = bars_to_dict(day_bars_view, calc_date)
 
         # holding scope 模型：账户态特征只能在决策时点计算，分数注入持仓
         # 的 bar dict——策略在 on_tick/select/calc_conditions 中像读普通列
@@ -571,141 +692,7 @@ class Engine:
             on_tick_result = on_tick(bars_dict, snapshot, self.provider)
 
         actions = self.strategy.select(bars_dict, snapshot, self.provider)
-        if not isinstance(actions, dict):
-            raise ValueError(
-                f"select() 必须返回 dict，得到 {type(actions).__name__}: {actions!r}"
-            )
-        unknown = set(actions) - _SELECT_KEYS
-        if unknown:
-            logger.warning(
-                "select() 返回未知键（将被忽略，可能是 typo）: %s", sorted(unknown)
-            )
-
-        # 合并 on_tick 返回的 buy_conditions；其余键（含 buy/sell 等合法
-        # select 键）不在 on_tick 协议内，返回即报错——静默丢弃是 typo 温床
-        if on_tick_result is not None:
-            if not isinstance(on_tick_result, dict):
-                raise ValueError(
-                    "on_tick() 必须返回 dict 或 None，得到 "
-                    f"{type(on_tick_result).__name__}: {on_tick_result!r}"
-                )
-            tick_extra = set(on_tick_result) - {"buy_conditions"}
-            if tick_extra:
-                raise ValueError(
-                    "on_tick() 只支持返回 buy_conditions（买卖名单请走 "
-                    f"select()）: {sorted(tick_extra)}"
-                )
-            if on_tick_result.get("buy_conditions"):
-                existing_conds = actions.setdefault("buy_conditions", [])
-                existing_conds.extend(on_tick_result["buy_conditions"])
-
-        buy_list = actions.get("buy", [])
-        sell_list = actions.get("sell", [])
-        if not isinstance(buy_list, list) or not isinstance(sell_list, list):
-            raise ValueError(
-                f"select() 的 buy/sell 必须是 list: "
-                f"buy={buy_list!r} sell={sell_list!r}"
-            )
-        _check_symbol_list(buy_list, "buy")
-        _check_symbol_list(sell_list, "sell")
-        buy = set(buy_list)
-        sell = set(sell_list)
-        if buy & sell:
-            raise ValueError(f"同日买卖冲突: {buy & sell}")
-        target_value = actions.get("target_value") or {}
-        if target_value and (buy or sell):
-            raise ValueError("target_value 与 buy/sell 名单互斥, 同日只能用一种")
-        if not isinstance(target_value, dict):
-            raise ValueError("target_value 必须是 {symbol: 目标市值} 的 dict")
-        for symbol, tv in target_value.items():
-            if not isinstance(symbol, str) or not symbol.strip():
-                raise ValueError(f"target_value 键必须是非空字符串: {symbol!r}")
-            if (isinstance(tv, bool) or not isinstance(tv, (int, float))
-                    or not math.isfinite(tv) or tv < 0):
-                raise ValueError(
-                    f"target_value[{symbol}] 必须是 ≥0 的有限数值: {tv!r}"
-                )
-
-        sell_shares = actions.get("sell_shares") or {}
-        if not isinstance(sell_shares, dict):
-            raise ValueError("sell_shares 必须是 {symbol: 股数} 的 dict")
-        for symbol, shares in sell_shares.items():
-            if symbol not in sell:
-                raise ValueError(
-                    f"sell_shares 的 {symbol} 不在 sell 名单里"
-                )
-            if (not isinstance(shares, int) or isinstance(shares, bool)
-                    or shares <= 0):
-                raise ValueError(
-                    f"sell_shares[{symbol}] 必须是正整数股数: {shares!r}"
-                )
-
-        sell_reasons = actions.get("sell_reasons") or {}
-        if not isinstance(sell_reasons, dict):
-            raise ValueError("sell_reasons 必须是 {symbol: 原因字符串} 的 dict")
-        for symbol, reason in sell_reasons.items():
-            if symbol not in sell:
-                raise ValueError(
-                    f"sell_reasons 的 {symbol} 不在 sell 名单里"
-                )
-            if not isinstance(reason, str) or not reason.strip():
-                raise ValueError(
-                    f"sell_reasons[{symbol}] 必须是非空字符串: {reason!r}"
-                )
-
-        buy_weights = actions.get("buy_weights")
-        if buy_weights is not None:
-            if not isinstance(buy_weights, dict):
-                raise ValueError("buy_weights 必须是 {symbol: 权重} 的 dict")
-            if set(buy_weights) != buy:
-                raise ValueError(
-                    f"buy_weights 的键必须与 buy 名单一致: "
-                    f"多 {set(buy_weights) - buy}, 缺 {buy - set(buy_weights)}"
-                )
-            total_w = 0.0
-            for symbol, w in buy_weights.items():
-                if not is_valid_positive(w) or w > 1:
-                    raise ValueError(
-                        f"buy_weights[{symbol}] 必须 ∈ (0,1]: {w!r}"
-                    )
-                total_w += w
-            if total_w > 1.0 + 1e-10:
-                raise ValueError(f"buy_weights 权重之和必须 ≤ 1: {total_w}")
-
-        buy_conds = actions.get("buy_conditions") or []
-        if not isinstance(buy_conds, list):
-            raise ValueError("buy_conditions 必须是订单 dict 的 list")
-        for i, order in enumerate(buy_conds):
-            if not isinstance(order, dict):
-                raise ValueError(f"buy_conditions[{i}] 必须是 dict: {order!r}")
-            missing = {"symbol", "type", "price"} - set(order)
-            if missing:
-                raise ValueError(f"buy_conditions[{i}] 缺必填键: {missing}")
-            if not is_valid_positive(order["price"]):
-                raise ValueError(
-                    f"buy_conditions[{i}].price 必须是正数: {order['price']!r}"
-                )
-            has_value = order.get("value") is not None
-            has_shares = order.get("shares") is not None
-            if has_value == has_shares:
-                raise ValueError(
-                    f"buy_conditions[{i}] 必须在 value/shares 中恰填一个"
-                )
-            sizing = order.get("value") if has_value else order.get("shares")
-            if not is_valid_positive(sizing):
-                raise ValueError(
-                    f"buy_conditions[{i}] value/shares 必须是正数: {sizing!r}"
-                )
-        bc_symbols = {o["symbol"] for o in buy_conds}
-        if bc_symbols & sell:
-            raise ValueError(f"同日卖出与条件买入冲突: {bc_symbols & sell}")
-        if bc_symbols & buy:
-            raise ValueError(f"buy 名单与条件买入重复: {bc_symbols & buy}")
-        if buy_conds and target_value:
-            raise ValueError("target_value 与 buy_conditions 互斥, 同日只能用一种")
-        match.conditions.validate_buy_condition_types(buy_conds)
-
-        self.pending_actions = actions
+        self.pending_actions = _validate_select_actions(actions, on_tick_result)
 
         for symbol, holding in self.account.holdings.items():
             bar = bars_dict.get(symbol, {})
@@ -775,7 +762,7 @@ class Engine:
         holding scope：落盘当日注入的全部持仓分数。
         """
         rows: list[tuple] = []
-        panel_specs = [m for m in self._model_specs if m.scope == "panel"]
+        panel_specs = [m for m in self._model_specs if m.scope == SCOPE_PANEL]
         if panel_specs:
             if self._ml_log_full:
                 symbols = set(bars_dict)
@@ -814,7 +801,7 @@ class Engine:
         self._saved_cumulative_pnl = self.account.cumulative_pnl
         self._saved_pending = copy.deepcopy(self.pending_actions)
         self._saved_as_of = (
-            self.provider._as_of_date if self.provider is not None else None
+            self.provider.get_as_of() if self.provider is not None else None
         )
 
     def _restore_state(self):
@@ -829,7 +816,7 @@ class Engine:
         if self._saved_pending is not None:
             self.pending_actions = self._saved_pending
         if self.provider is not None:
-            self.provider._as_of_date = self._saved_as_of
+            self.provider.set_as_of(self._saved_as_of)
 
     def _write_debug_snapshot(self, conn, today, pending_actions, day_bars):
         """收集每日调试快照并写入 debug_snapshots 表。"""
@@ -875,15 +862,43 @@ class Engine:
         database.write_debug_snapshot(conn, self.run_id, today, snapshot)
 
 
-def is_valid_positive(v) -> bool:
+def _is_valid_positive(v) -> bool:
     """正数校验: 拒绝 bool / None / NaN / 非正。"""
     return (isinstance(v, (int, float)) and not isinstance(v, bool)
             and v == v and v > 0)
 
 
-def _bars_to_dict(day_bars_df: pd.DataFrame, trade_date: str) -> dict:
+def bars_to_dict(day_bars_df: pd.DataFrame, trade_date: str) -> dict:
     """单日 bars DataFrame 转 dict-of-dicts，并注入 trade_date 字段。"""
     result = day_bars_df.to_dict("index")
     for key in result:
         result[key]["trade_date"] = trade_date
     return result
+
+
+def value_account(account, bars_dict: dict, fallback_closes: dict | None = None,
+                  warn=None):
+    """估值结算（引擎 _settle / 实盘回放共用）：last_price 更新与净值/盈亏计算。
+
+    fallback_closes: 策略 universe 外持仓的当日收盘价（实盘切策略场景）——
+    面板裁切不能为估值加列（截面因子口径会变），估值单独补价。
+    warn: 收盘价非法且无法补价时的告警回调（logger 风格 fmt 调用）；
+    None 则静默沿用 last_price。
+    """
+    total_value = account.cash
+    for symbol, holding in account.holdings.items():
+        bar = bars_dict.get(symbol)
+        close = bar_get(bar, "close")
+        if not match.core.is_valid_price(close) and fallback_closes:
+            close = fallback_closes.get(symbol)
+        if match.core.is_valid_price(close):
+            holding.last_price = close
+        elif bar is not None and warn is not None:
+            warn("[%s] %s 收盘价非法 (%s), 沿用 last_price=%s",
+                 bar.get("trade_date"), symbol, close, holding.last_price)
+        total_value += holding.shares * holding.last_price
+
+    prev_cum = account.cumulative_pnl
+    account.total_value = total_value
+    account.cumulative_pnl = total_value - account.initial_capital
+    account.daily_pnl = account.cumulative_pnl - prev_cum

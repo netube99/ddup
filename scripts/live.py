@@ -36,9 +36,8 @@ from pathlib import Path
 
 import yaml
 
-from adapters.tushare import TushareBackend
-from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
+from research import cli_common
 from research.live import LedgerStore, build_op_sheet, reconcile, run_signal
 
 CASH_SYNC_EPS = 0.01          # 现金差额低于此值不记 ADJUST（分位噪声）
@@ -94,7 +93,7 @@ def cmd_sync(args) -> int:
     fills = stmt.get("fills") or []
 
     store = LedgerStore(args.db)
-    provider = DataProvider(TushareBackend())
+    provider = cli_common.make_provider()
     try:
         if date < store.start_date:
             print(f"date {date} 早于账本起始日 {store.start_date}", file=sys.stderr)
@@ -151,7 +150,7 @@ def cmd_sync(args) -> int:
 
 def cmd_signal(args) -> int:
     store = LedgerStore(args.db)
-    provider = DataProvider(TushareBackend())
+    provider = cli_common.make_provider()
     try:
         end = args.date or datetime.datetime.now().strftime("%Y%m%d")
         if end < store.start_date:

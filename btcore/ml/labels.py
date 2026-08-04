@@ -19,6 +19,7 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
+from btcore.constants import TRADE_EVENT_PRIORITY
 from btcore.ml.runtime import compute_state_features
 from btcore.ml.spec import ModelSpec
 from btcore.types import Holding
@@ -41,8 +42,45 @@ def xs_forward_return(panel: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return pd.DataFrame({"label": label, "fwd_ret": fwd}, index=panel.index)
 
 
-def extract_trade_pairs(result_db_path: str) -> pd.DataFrame:
+def _resolve_run_id(db: sqlite3.Connection, run_id: int | None) -> int:
+    """run_id 缺省解析：优先最新 completed run，无 completed 回退最新 run。"""
+    if run_id is not None:
+        return run_id
+    has_runs = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+    ).fetchone()
+    if has_runs is None:
+        raise ValueError("结果库缺少 runs 表，无法定位 trade_log 所属 run")
+    n_runs = db.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    if n_runs == 0:
+        raise ValueError("结果库 runs 表为空，无可用回测 run")
+    completed = db.execute(
+        "SELECT MAX(run_id) FROM runs WHERE status = 'completed'"
+    ).fetchone()[0]
+    if completed is not None:
+        chosen = completed
+    else:
+        chosen = db.execute("SELECT MAX(run_id) FROM runs").fetchone()[0]
+    if n_runs > 1:
+        logger.warning(
+            "[ML标签] 结果库含 %d 个 run，缺省取 run_id=%d（--run-id 可指定）",
+            n_runs, chosen,
+        )
+    return chosen
+
+
+def extract_trade_pairs(result_db_path: str, run_id: int | None = None) -> pd.DataFrame:
     """从结果库 trade_log 重构完整持仓回合表（回合 = 持仓 0 → 归 0）。
+
+    run_id：多 run 结果库必须定位单一 run，否则跨 run 交易混入会腐化
+    回合。缺省取最新 status='completed' 的 run（无 completed 回退最新
+    run），多 run 时告警告知所选；runs 表缺失/为空抛 ValueError。
+
+    同日时序：按 (date, TRADE_EVENT_PRIORITY) 稳定重排（Python sorted
+    稳定，同 (date, priority) 内保持 id 落库序）——公司行为（盘前）
+    先于买卖处理。DIV 红利计入在持回合 pnl（除息日清仓场景 DIV 先于
+    SELL，红利归属该回合）；无持仓的红利告警跳过。ADJUST（实盘账本
+    现金审计行）非持仓事件，静默跳过不进回合。
 
     买入不限 trigger（MANUAL / TARGET / 条件买入均计入——此前只认
     MANUAL 会把 target_value 与条件买入策略的回合静默蒸发成空标签集）；
@@ -54,11 +92,17 @@ def extract_trade_pairs(result_db_path: str) -> pd.DataFrame:
     列: symbol, buy_date, sell_date, buy_price, pnl, trigger。
     """
     db = sqlite3.connect(result_db_path)
+    run_id = _resolve_run_id(db, run_id)
     rows = db.execute(
         "SELECT symbol, date, side, trigger, price, shares, net_amount "
-        "FROM trade_log ORDER BY date, id"
+        "FROM trade_log WHERE run_id = ? ORDER BY date, id",
+        (run_id,),
     ).fetchall()
     db.close()
+    # 同日按公司行为(盘前)→买入→卖出重排；稳定排序，同键内保持 id 序
+    rows = sorted(
+        rows, key=lambda r: (r[1], TRADE_EVENT_PRIORITY.get(r[2], 3)),
+    )
 
     open_rounds: dict[str, dict] = {}
     rounds: list[dict] = []
@@ -87,6 +131,19 @@ def extract_trade_pairs(result_db_path: str) -> pd.DataFrame:
                 continue
             r["shares"] = shares
             r["buy_shares"] = shares
+        elif side == "DIV":
+            # 红利现金：同日重排后 DIV 先于 SELL 处理，除息日清仓时
+            # 红利计入该回合 pnl；无在持回合 = 数据残缺，告警跳过
+            r = open_rounds.get(symbol)
+            if r is None:
+                logger.warning(
+                    "[ML标签] %s %s 红利无对应持仓，跳过", date, symbol,
+                )
+                continue
+            r["pnl"] += net_amount
+        elif side == "ADJUST":
+            # 实盘账本现金审计行（非持仓事件），不进回合
+            continue
         else:  # SELL
             r = open_rounds.get(symbol)
             if r is None:
@@ -162,7 +219,7 @@ def build_guard_samples(
 
         for i in range(len(pos_bars)):
             trade_date = dates[i]
-            # 引擎在成交当日的 _compute_pending 已 +1：成交日 holding_days=1。
+            # 引擎在成交当日的 compute_pending 已 +1：成交日 holding_days=1。
             # buy_date 落在面板窗口外时退化为窗口内相对位置（近似）
             hd = date_pos[trade_date] - buy_pos + 1 if buy_pos is not None else i + 1
             dts = (

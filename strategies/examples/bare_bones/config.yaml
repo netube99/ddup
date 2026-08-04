@@ -25,8 +25,9 @@ factor_specs:
     ascending: true           # true = 值越小排名越高（低换手异象）
 
 # ── 过滤规则 ─────────────────────────────────────────────────────────────
-# 引擎先过 filter_rules 做截面筛选，Strategy.select() 收到的 bars 里
-# 只剩通过过滤的股票。规则项全部可选，均有默认值。
+# filter_rules 由 Strategy.on_start 默认构建 StockFilter；引擎不做截面预筛，
+# 策略必须在 select() 中调 self.filter_bars(bars, date_str) 过滤才生效。
+# 规则项全部可选，均有默认值。
 filter_rules:
   exclude_st: true            # 排除 ST
   exclude_new_stock: true     # 排除上市不足 60 日的新股

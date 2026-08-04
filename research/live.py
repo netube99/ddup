@@ -3,7 +3,7 @@
 账本（ledger）是唯一持久化状态：append-only 成交记录 + 账户元数据，
 不存任何策略内部状态。算信号时把账本灌进引擎回放：逐日应用真实成交、
 原生公司行为（含 trailing 锚点 rescale）、估值结算，策略钩子逐日演化，
-末日 _compute_pending 的输出即次日操作单。策略可随意切换——换一份
+末日 compute_pending 的输出即次日操作单。策略可随意切换——换一份
 YAML 重新回放即得到该策略口径下的明日操作。
 
 表结构（与回测结果库同库共存）：
@@ -20,9 +20,8 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from btcore import corporate, database, types
-from btcore.engine import Engine, _bars_to_dict
+from btcore.engine import Engine, bars_to_dict, value_account
 from btcore.match.core import apply_partial_sell, is_valid_price
-from btcore.types import bar_get
 
 logger = logging.getLogger(__name__)
 
@@ -326,7 +325,7 @@ def seed_opening(account: types.Account, store: LedgerStore, provider,
     """建仓持仓以 OPENING 条目入账：种子持仓（真实 entry_date/entry_price）。
 
     holding_days 种子值 = entry 到 init 之间引擎会经历的结算次数
-    （交易日历上 (entry, init) 的开区间长度），使回放首日 _compute_pending
+    （交易日历上 (entry, init) 的开区间长度），使回放首日 compute_pending
     递增后与连续运行的引擎口径一致。
     """
     calendar = provider.get_calendar("20000101", init_date)
@@ -354,49 +353,6 @@ def seed_opening(account: types.Account, store: LedgerStore, provider,
         )
 
 
-def mark_to_market(account: types.Account, bars_dict: dict,
-                   fallback_closes: dict | None = None):
-    """估值结算（engine._settle 的内存版，无 DB 写入）。
-
-    fallback_closes: 策略 universe 外持仓的当日收盘价（切策略场景）——
-    面板裁切不能为估值加列（截面因子口径会变），估值单独补价。
-    """
-    total_value = account.cash
-    for holding in account.holdings.values():
-        bar = bars_dict.get(holding.symbol)
-        close = bar_get(bar, "close") if bar is not None else None
-        if not is_valid_price(close) and fallback_closes:
-            close = fallback_closes.get(holding.symbol)
-        if is_valid_price(close):
-            holding.last_price = close
-        total_value += holding.shares * holding.last_price
-    prev_cum = account.cumulative_pnl
-    account.total_value = total_value
-    account.cumulative_pnl = total_value - account.initial_capital
-    account.daily_pnl = account.cumulative_pnl - prev_cum
-
-
-def _corporate_derived_trades(corporate_log: list) -> list[types.Trade]:
-    """公司行为日志 → 衍生 trade_log 行（与 engine._settle 落库口径一致）。"""
-    out = []
-    for event in corporate_log:
-        if event["type"] == "cash_div":
-            out.append(types.Trade(
-                date=event["date"], symbol=event["symbol"], side="DIV",
-                trigger="CORPORATE", price=0.0, shares=0, turnover=0.0,
-                commission=0.0, stamp_tax=0.0, transfer_fee=0.0,
-                slippage_amount=0.0, net_amount=event["net"], reason="cash_div",
-            ))
-        elif event["type"] == "stk_div":
-            out.append(types.Trade(
-                date=event["date"], symbol=event["symbol"], side="STK_DIV",
-                trigger="CORPORATE", price=0.0, shares=event["new_shares"],
-                turnover=0.0, commission=0.0, stamp_tax=0.0, transfer_fee=0.0,
-                slippage_amount=0.0, net_amount=0.0, reason="stk_div",
-            ))
-    return out
-
-
 # ── 回放 ──
 
 
@@ -406,7 +362,7 @@ def replay_ledger(engine: Engine, provider, store: LedgerStore,
                   price_fallback: dict | None = None):
     """账本驱动回放：真实成交替代撮合，策略钩子逐日演化（run_decisions 时）。
 
-    engine 须已完成 _prepare（因子物化/attach_bars/on_start）且账户已播种。
+    engine 须已完成 prepare（因子物化/attach_bars/on_start）且账户已播种。
     price_fallback: {date: {symbol: close}}，universe 外持仓的估值补价。
     collect=True 时返回 (daily_rows, trade_rows) 供衍生表重写。
     """
@@ -431,25 +387,19 @@ def replay_ledger(engine: Engine, provider, store: LedgerStore,
             reason=f["reason"] or "cash_adjust",
         ))
 
-    rescale = getattr(getattr(engine.strategy, "_cond", None), "rescale", None)
-
     # 与 run() 首日行为对齐：首日前一交易日先算一次 pending（策略状态播种）
     prev_day = provider.prev_trading_day(calendar[0])
     if prev_day and run_decisions:
-        engine._compute_pending(prev_day)
+        engine.compute_pending(prev_day)
 
     for today in calendar:
         day_bars = engine.bars_by_date.get(today)
-        bars_dict = _bars_to_dict(day_bars, today) if day_bars is not None else {}
+        bars_dict = bars_to_dict(day_bars, today) if day_bars is not None else {}
 
         corporate_log: list = []
         corporate.adjust(engine.account, today, bars_dict, provider, corporate_log)
-        if rescale is not None:
-            for entry in corporate_log:
-                scale = entry.get("scale")
-                if scale is not None:
-                    rescale(entry["symbol"], scale)
-        trade_rows.extend(_corporate_derived_trades(corporate_log))
+        corporate.apply_condition_rescale(engine.strategy, corporate_log)
+        trade_rows.extend(corporate.derived_trades(corporate_log))
 
         day_trades = []
         for fill in fills_by_date.get(today, []):
@@ -459,14 +409,14 @@ def replay_ledger(engine: Engine, provider, store: LedgerStore,
                 trade_rows.append(trade)
 
         if bars_dict or price_fallback:
-            mark_to_market(engine.account, bars_dict,
-                           (price_fallback or {}).get(today))
+            value_account(engine.account, bars_dict,
+                          fallback_closes=(price_fallback or {}).get(today))
 
         if run_decisions and bars_dict:
             # 策略决策层：on_fills(当日真实成交) → on_tick → select →
             # calc_conditions；末日之前的 pending_actions 全部丢弃——
             # 真实世界已按账本发生
-            engine._compute_pending(today, bars_dict, day_trades)
+            engine.compute_pending(today, bars_dict, day_trades)
 
         if collect:
             daily_rows.append({
@@ -510,7 +460,7 @@ def light_replay(store: LedgerStore, provider, end: str) -> types.Account:
     fills_by_date = store.fills_by_date()
     for today in calendar:
         if bars_df is not None and today in bars_df.index.get_level_values(0):
-            bars_dict = _bars_to_dict(bars_df.loc[today], today)
+            bars_dict = bars_to_dict(bars_df.loc[today], today)
         else:
             bars_dict = {}
         corporate_log: list = []
@@ -518,7 +468,7 @@ def light_replay(store: LedgerStore, provider, end: str) -> types.Account:
         for fill in fills_by_date.get(today, []):
             apply_fill(account, fill, today)
         if bars_dict:
-            mark_to_market(account, bars_dict)
+            value_account(account, bars_dict)
     return account
 
 
@@ -572,7 +522,7 @@ def run_signal(strategy, provider, store: LedgerStore, end: str):
     engine = Engine(strategy, provider, initial_capital=store.initial_capital)
     engine.account.cash = store.initial_cash
     seed_opening(engine.account, store, provider, store.start_date)
-    calendar = engine._prepare(store.start_date, end)
+    calendar = engine.prepare(store.start_date, end)
     if calendar[-1] != end:
         raise ValueError(f"{end} 不是交易日（日历末日 {calendar[-1]}）——数据未更新？")
     if end not in engine.bars_by_date:

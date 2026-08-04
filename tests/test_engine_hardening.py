@@ -222,7 +222,7 @@ def test_buy_duplicate_symbols_raise():
         actions={"buy": ["000001.SZ", "000001.SZ"], "sell": []}
     ))
     with pytest.raises(ValueError, match="重复 symbol"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_sell_duplicate_symbols_raise():
@@ -230,7 +230,7 @@ def test_sell_duplicate_symbols_raise():
         actions={"buy": [], "sell": ["000001.SZ", "000001.SZ"]}
     ))
     with pytest.raises(ValueError, match="重复 symbol"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_select_non_dict_raises():
@@ -240,7 +240,7 @@ def test_select_non_dict_raises():
 
     engine = _make_engine(NotDict())
     with pytest.raises(ValueError, match="必须返回 dict"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_select_unknown_key_warns(caplog):
@@ -249,14 +249,14 @@ def test_select_unknown_key_warns(caplog):
         actions={"buy": [], "sell": [], "buy_condition": ["000001.SZ"]}
     ))
     with caplog.at_level(logging.WARNING):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
     assert "未知键" in caplog.text
 
 
 def test_on_tick_non_dict_raises():
     engine = _make_engine(_DuckStrategy(tick_result=[]))
     with pytest.raises(ValueError, match="on_tick"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_condition_missing_price_fails_fast():
@@ -271,7 +271,7 @@ def test_condition_missing_price_fails_fast():
         symbol="000001.SZ", shares=1000
     )
     with pytest.raises(ValueError, match="缺必填键"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_provider_clamp_blocks_future():
@@ -300,7 +300,7 @@ def test_on_start_runs_with_clamped_asof():
     seen = {}
 
     def check(provider):
-        seen["as_of"] = provider._as_of_date
+        seen["as_of"] = provider.get_as_of()
 
     strategy = _DuckStrategy()
     strategy.on_start = lambda provider, first_date, end_date=None: check(provider)
@@ -369,49 +369,49 @@ def test_target_value_nan_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"000001.SZ": NAN}}))
     with pytest.raises(ValueError, match="target_value"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_negative_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"000001.SZ": -1.0}}))
     with pytest.raises(ValueError, match="target_value"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_non_numeric_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"000001.SZ": "1e5"}}))
     with pytest.raises(ValueError, match="target_value"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_bool_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"000001.SZ": True}}))
     with pytest.raises(ValueError, match="target_value"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_empty_key_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"": 100.0}}))
     with pytest.raises(ValueError, match="非空字符串"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_non_dict_raises():
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": [("000001.SZ", 100.0)]}))
     with pytest.raises(ValueError, match="必须是"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_target_value_valid_and_zero_pass():
     """合法 target_value（含 0 = 清仓）正常通过并进入 pending。"""
     engine = _make_engine(_DuckStrategy(
         actions={"target_value": {"000001.SZ": 0.0, "000002.SZ": 50000}}))
-    engine._compute_pending(
+    engine.compute_pending(
         "20240603",
         {"000001.SZ": make_bar(), "000002.SZ": make_bar()}, [])
     assert engine.pending_actions["target_value"] == {
@@ -425,7 +425,7 @@ def test_on_tick_extra_keys_raise():
     """on_tick 返回 buy 等合法 select 键 → ValueError（此前静默丢弃）。"""
     engine = _make_engine(_DuckStrategy(tick_result={"buy": ["000001.SZ"]}))
     with pytest.raises(ValueError, match="只支持返回 buy_conditions"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 def test_on_tick_buy_conditions_merged():
@@ -433,7 +433,7 @@ def test_on_tick_buy_conditions_merged():
     engine = _make_engine(_DuckStrategy(tick_result={
         "buy_conditions": [{"symbol": "000002.SZ", "type": "LIMIT_BUY",
                              "price": 9.0, "value": 10000}]}))
-    engine._compute_pending(
+    engine.compute_pending(
         "20240603",
         {"000001.SZ": make_bar(), "000002.SZ": make_bar()}, [])
     conds = engine.pending_actions["buy_conditions"]
@@ -501,7 +501,7 @@ def test_entry_conditions_warns_missing_bar(caplog):
 def test_select_empty_symbol_raises():
     engine = _make_engine(_DuckStrategy(actions={"buy": [""], "sell": []}))
     with pytest.raises(ValueError, match="空元素"):
-        engine._compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
 
 
 # ── step 状态回滚完整性 ──
@@ -518,7 +518,7 @@ def test_restore_state_rolls_back_full_account():
     engine.account.cumulative_pnl = 3.0
     engine.account.holdings["000001.SZ"] = _holding()
     engine.pending_actions = {"buy": [], "sell": []}
-    engine.provider._as_of_date = "20991231"
+    engine.provider.set_as_of("20991231")
     engine._restore_state()
     assert engine.account.cash == engine.initial_capital
     assert engine.account.total_value == engine.initial_capital
@@ -526,7 +526,7 @@ def test_restore_state_rolls_back_full_account():
     assert engine.account.cumulative_pnl == 0.0
     assert engine.account.holdings == {}
     assert engine.pending_actions == {"buy": ["000001.SZ"], "sell": []}
-    assert engine.provider._as_of_date is None
+    assert engine.provider.get_as_of() is None
 
 
 # ── run 异常: KeyboardInterrupt 也标记 failed ──

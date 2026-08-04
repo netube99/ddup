@@ -9,7 +9,7 @@ def test_inv2_lot_size(make_engine):
     engine, calendar = make_engine(strategy, "20240607",
                                    initial_capital=2_000_000, max_positions=5)
 
-    engine._compute_pending(calendar[0])
+    engine.compute_pending(calendar[0])
 
     conn = init_backtest_db(":memory:")
     try:

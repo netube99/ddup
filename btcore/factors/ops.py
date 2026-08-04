@@ -180,14 +180,6 @@ def _xs_group_mean(x: pd.Series, g: pd.Series) -> pd.Series:
 
 # ── 算子表（固定白名单，非运行时注册表）──
 
-OP_NAMES = frozenset({
-    "abs", "log",
-    "delay", "delta", "roc", "ma", "ema", "std", "sum", "max", "min",
-    "corr", "beta", "resid_std",
-    "rank", "zscore", "winsorize", "group_rank", "neutralize",
-    "mean", "group_mean",
-})
-
 
 @dataclass(frozen=True)
 class _Op:
@@ -239,6 +231,9 @@ _OPS: dict[str, _Op] = {
     "mean": _Op(_xs_mean, 1, 0, "xsec", "collapse"),
     "group_mean": _Op(_xs_group_mean, 2, 0, "xsec", "collapse", group=True),
 }
+
+# 算子名单一来源：由 _OPS 派生（cse.py / scripts/check_skill_sync.py 消费）
+OP_NAMES = frozenset(_OPS)
 
 _BINOPS: dict[type, Callable] = {
     ast.Add: lambda a, b: a + b,

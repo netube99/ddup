@@ -82,23 +82,6 @@ def load_library(path: str | None = None) -> dict[str, dict]:
     return factors
 
 
-def compute_factor(
-    name: str,
-    df: pd.DataFrame,
-    library: dict | None = None,
-) -> pd.Series:
-    """按名字计算因子值，返回原始值（不做 rank / 标准化）。
-
-    df 为 MultiIndex (trade_date, symbol) 面板（纯逐行表达式也接受
-    当日截面）。命名引用按需递归计算并挂为工作副本的临时列。
-    表达式引用 industry / idx_ret / log_mktcap 等伪列时，df 须自行携带。
-    """
-    lib = library if library is not None else load_library()
-    _get_spec(name, lib)
-    work = df.copy() if _needs_work_copy(name, df, lib) else df
-    return _eval_named(name, work, lib, {})
-
-
 def compute_factors(
     names: list[str],
     df: pd.DataFrame,
@@ -107,7 +90,7 @@ def compute_factors(
     """批量计算，返回每列一个因子的 DataFrame。
 
     df 必须包含所有因子依赖的基础列和伪列（industry / log_mktcap / idx_ret）。
-    伪列不由此函数附着——调用方需先通过 btcore.engine.ensure_pseudo_columns
+    伪列不由此函数附着——调用方需先通过 btcore.factors.plan.ensure_pseudo_columns
     或等价方式准备。纯逐行表达式可接受当日截面；含 ts 算子的表达式需要
     MultiIndex (trade_date, symbol) 面板。
     """
@@ -228,18 +211,6 @@ def _check_cycles(factors: dict[str, dict]) -> None:
             visit(name, [])
 
 
-def _needs_work_copy(name: str, df: pd.DataFrame, lib: dict) -> bool:
-    """闭包中有引用未物化为 df 列时，需要工作副本挂临时列。"""
-    closure = resolve_closure([name], lib)
-    for node_name, spec in closure.items():
-        _, refs = spec_names(spec, set(closure))
-        if any(ref not in df.columns for ref in refs if ref in closure):
-            return True
-        if node_name != name and node_name not in df.columns:
-            return True
-    return False
-
-
 def _eval_named(
     name: str,
     df: pd.DataFrame,
@@ -302,9 +273,11 @@ def _detect_missing_columns(df: pd.DataFrame, spec: dict) -> set[str]:
 def compute_breadth(
     factor_name: str,
     backend,              # DataBackend (needs query_bars and get_calendar)
+    lib: dict,
     start: str,
     end: str,
-    library: dict | None = None,
+    *,
+    benchmark: str | None = None,
     chunk_days: int = 60,
 ) -> "pd.Series":
     """流式计算坍缩因子，返回 (trade_date,) 索引的日频 Series。
@@ -313,21 +286,24 @@ def compute_breadth(
     因此可以分块计算后拼接，内存占用 O(chunk_days × N_symbols) 而非
     O(N_dates × N_symbols)。
 
+    列推导 / 伪列需求 / warmup 窗口全部由 build_factor_plan 产物供给，
+    与引擎 preload 同一推导路径（无第二份手搓逻辑）。
+
     Args:
-        factor_name: 因子名（必须在 library 中注册且使用坍缩算子）
+        factor_name: 因子名（必须在 lib 中注册且使用坍缩算子）
         backend: DataBackend 实例
+        lib: 因子库（load_library() 产物）
         start: 起始日期 YYYYMMDD
         end: 结束日期 YYYYMMDD
-        library: 因子库，默认 load_library()
+        benchmark: 基准代码（闭包引用 idx_ret 时必需，透传 ensure_pseudo_columns）
         chunk_days: 每次处理的交易日数，默认 60
 
     Returns:
         pd.Series with index=trade_date (str), values=日频坍缩标量
     """
-    lib = library if library is not None else load_library()
     spec = _get_spec(factor_name, lib)
     # 局部 import 避免模块级循环（plan 模块级依赖 library.spec_names）
-    from btcore.factors import plan as factor_plan  # noqa: F811
+    from btcore.factors import plan as factor_plan
 
     kind = ops.collapse_kind(spec["expr"])
     if not kind:
@@ -335,9 +311,10 @@ def compute_breadth(
             f"compute_breadth 仅支持坍缩因子，{factor_name!r} 是保形因子"
         )
 
-    # Derive max window from factor DAG
+    # 供给计划与引擎 preload 同源：窗口 / 列 / 伪列需求都取 plan 产物
     closure = resolve_closure([factor_name], lib)
-    max_window = max(factor_plan.infer_windows(closure).values(), default=1)
+    fplan = factor_plan.build_factor_plan(closure, [factor_name])
+    max_window = max(fplan["windows"].values(), default=1)
 
     calendar = backend.get_calendar(start, end)
     if not len(calendar):
@@ -347,7 +324,7 @@ def compute_breadth(
     # 区间——否则区间前段 ts 窗口不足会静默算错（口径同引擎 preload）
     cal_start = (
         pd.Timestamp(start)
-        - pd.Timedelta(days=factor_plan._to_calendar_days(max_window))
+        - pd.Timedelta(days=factor_plan.to_calendar_days(max_window))
     ).strftime("%Y%m%d")
     calendar_all = backend.get_calendar(cal_start, end)
     if not len(calendar_all):
@@ -359,13 +336,11 @@ def compute_breadth(
     full_cal = lookback + request_days
     offset = len(lookback)
 
-    # Resolve needed columns
-    all_cols: set[str] = set()
-    for node_spec in closure.values():
-        cols, _ = spec_names(node_spec, set(closure))
-        all_cols |= cols
-    base_cols = sorted(all_cols)
-    base_cols = factor_plan.expand_columns(base_cols)
+    # 单面板（全市场）计算整闭包：请求列取主/广度两侧并集再展开
+    # （log_mktcap → total_mv 补列由 plan 的 mktcap 逻辑保证）
+    base_cols = factor_plan.expand_columns(
+        fplan["main_columns"] | fplan["breadth_columns"]
+    )
 
     results = []
     i = 0
@@ -387,20 +362,19 @@ def compute_breadth(
 
         df.sort_index(inplace=True)
         factor_plan.derive_fields(df)
-        # 伪列附着：group_mean 等坍缩因子引用 industry 时必须先附着分组列
-        # （2026-08-03 实证 F-BRD-02：此前从未附着，industry_mom 直接 ValueError，
-        #  docs 的"引擎同源"对 group_mean 不成立）
-        needs: dict[str, bool] = {}
-        for node_spec in closure.values():
-            cols, _ = spec_names(node_spec, set(closure))
-            if "industry" in cols:
-                needs["industry_main"] = True
-            if "log_mktcap" in cols:
-                needs["mktcap_main"] = True
-            if "idx_ret" in cols:
-                needs["index"] = True
-        if needs:
-            factor_plan.ensure_pseudo_columns(df, needs, "main", backend=backend)
+        # 伪列附着：group_mean 引用 industry、idx_ret、log_mktcap 时必须先附着
+        # （2026-08-03 实证 F-BRD-02：此前从未附着，industry_mom 直接 ValueError）。
+        # 单面板取 main 侧：主/广度两侧需求归并到 main 键
+        pneeds = fplan["needs"]
+        needs = {
+            "industry_main": pneeds["industry_main"] or pneeds["industry_breadth"],
+            "mktcap_main": pneeds["mktcap_main"] or pneeds["mktcap_breadth"],
+            "index": pneeds["index"],
+        }
+        if any(needs.values()):
+            factor_plan.ensure_pseudo_columns(
+                df, needs, "main", backend=backend, benchmark=benchmark
+            )
 
         # Compute factor for this chunk
         factor_df = compute_factors([factor_name], df, lib)

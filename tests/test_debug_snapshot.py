@@ -80,7 +80,7 @@ class TestEngineDebugMode:
         conn = init_backtest_db(":memory:")
         try:
             engine.run_id = 1
-            engine._compute_pending(calendar[0])
+            engine.compute_pending(calendar[0])
             for today in calendar:
                 if today not in engine.bars_by_date:
                     continue
@@ -99,7 +99,7 @@ class TestEngineDebugMode:
         conn = init_backtest_db(":memory:")
         try:
             engine.run_id = 1
-            engine._compute_pending(calendar[0])
+            engine.compute_pending(calendar[0])
             for today in calendar:
                 if today not in engine.bars_by_date:
                     continue
@@ -118,7 +118,7 @@ class TestEngineDebugMode:
         conn = init_backtest_db(":memory:")
         try:
             engine.run_id = 1
-            engine._compute_pending(calendar[0])
+            engine.compute_pending(calendar[0])
             for today in calendar:
                 if today not in engine.bars_by_date:
                     continue

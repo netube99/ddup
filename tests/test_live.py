@@ -99,7 +99,7 @@ class TestSeedOpening:
         h = acc.holdings["000001.SZ"]
         assert h.holding_days == 2  # 种子 = entry 至 init 前的结算次数
         assert h.locked is False    # entry < init
-        h.holding_days += 1         # 模拟 init 日 _compute_pending 递增
+        h.holding_days += 1         # 模拟 init 日 compute_pending 递增
         assert h.holding_days == 3  # 与 0603 买入、0605 晚结算的引擎口径一致
 
     def test_locked_when_entry_is_init_date(self):

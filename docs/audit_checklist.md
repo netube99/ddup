@@ -58,7 +58,7 @@
   边界：当日买入当日盘中触及止损价 → 不得成交（INV4 覆盖，但 fixture 无此节奏，需构造样本）。
 
 - [ ] **C3 T 日信号 T+1 执行** — select 当日产出名单次日撮合；条件单 T 声明 T+1 盘中触发。
-  静态：`engine.py:382-454` step 顺序（pending 来自前一决策点）；`_compute_pending:505+`。
+  静态：`engine.py:382-454` step 顺序（pending 来自前一决策点）；`compute_pending:505+`。
   动态：trade_log 中任意 BUY 的 date 必须晚于产生信号日（replay 对照 pending）。
 
 - [ ] **C4 前视屏蔽三重保护** — ①因子一次性物化为因果列；②provider 查询按模拟日钳制；③T→T+1 时序。
@@ -271,7 +271,7 @@
 
 ### 6.1 主循环与配置
 
-- [ ] **E-LOOP-01** step 日序 — 除权除息→TARGET 调仓或（手动卖→手动买）→离场条件单→入场条件单→结算落库→_compute_pending（`engine.py:382-454`）；异常回滚账户状态（`_save_state/_restore_state:759-782`）。
+- [ ] **E-LOOP-01** step 日序 — 除权除息→TARGET 调仓或（手动卖→手动买）→离场条件单→入场条件单→结算落库→compute_pending（`engine.py:382-454`）；异常回滚账户状态（`_save_state/_restore_state:759-782`）。
 - [ ] **E-LOOP-02** 无行情日跳过 + WARNING（`engine.py:280-284`）；首日播种用首日前一交易日截面（:276-278）。
 - [ ] **E-CFG-01** 配置校验覆盖表 — 已校验：slippage_ticks/condition_slippage_ticks（:110-126）、order_volume_ratio（:141-149）、execution_price（:151-155）。**未校验缺口**：`initial_capital` 无正数/有限校验（:100-103）、`max_positions` 无 ≥0 校验（:105-108，≤0 时 manual_buy 静默返回[]）、**费率四键无校验**（`costs.py:10-13`，负费率/NaN 静默虚增收益）。
   静态：确认缺口仍存在或已修；动态：构造负费率 config 观察是否静默（若静默=P1 缺口）。

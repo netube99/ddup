@@ -272,7 +272,7 @@ python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
 实盘化的核心设计：**账本（ledger）是唯一持久化状态，与策略完全解耦**。
 `ledger_fills`（append-only 真实成交）+ `ledger_meta`（账户元数据）是唯一手工
 数据源；每次 `signal` 把账本灌进回测引擎全量回放（真实成交替代撮合、公司行为
-走引擎原生路径、策略钩子逐日演化），末日 `_compute_pending` 的输出即次日操作单。
+*走引擎原生路径、策略钩子逐日演化），末日 `compute_pending` 的输出即次日操作单。
 策略可随意切换——换一份 YAML 重新回放即得该策略口径的操作单。
 
 ```bash
@@ -317,6 +317,7 @@ fills:                                          # 今日实际成交（可为空
 | `bench_universe_preload.py --start D --end D [--yaml path] [--skip-load] [--skip-engine]` | 性能基准：全市场 preload vs 沪深300+中证500+中证1000 成分并集 preload，分数据加载层（行数/耗时/内存）与端到端（engine.run 耗时）两层；调优 `get_universe` 时使用 |
 | `dump_fixtures.py` | 从真实行情库重新生成 `tests/fixtures/*.parquet` 测试 fixtures（无参数；数据库结构或数据更新后使用） |
 | `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，13 项结构检查；开发工具） |
+| `live_e2e_check.py [--bt-db 回测库] [--ledger 账本] [--yaml 策略]` | 实盘账本全链路回归（需真实行情库）：以回测 result.db 为 ground truth 连续模拟交易日的 init → 每日 sync → 每日 signal，校验 signal 操作单等于回测次日实际成交、sync 对账通过、错报持仓回滚拒绝、中途建账与全程回放等价 |
 
 ---
 

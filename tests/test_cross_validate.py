@@ -13,7 +13,7 @@ import sys
 import pandas as pd
 import pytest
 
-from scripts.cross_validate import (
+from research.cross_validate import (
     _expected_triggers,
     _min_commission_overhead,
     validate_trades,

@@ -10,33 +10,20 @@
 """
 
 import argparse
-import sqlite3
 import sys
 import time
 from datetime import date, timedelta
 
-from adapters.tushare import TushareBackend
 from btcore.engine import Engine
-from btcore.provider import DataProvider
+from btcore.filters import resolve_index_universe
 from btcore.strategy_loader import load_strategy
+from research import cli_common
 from strategies.examples.rolling_ranker import RollingRanker
 
 INDEX_CODES = ["000300.SH", "000905.SH", "000852.SH"]  # 沪深300 / 中证500 / 中证1000
 
 
-def index_union(conn: sqlite3.Connection, start: str, end: str) -> list[str]:
-    """回测区间内（含起始日前最近一期快照）指数成分并集。"""
-    lo = (date.fromisoformat(start) - timedelta(days=40)).strftime("%Y%m%d")
-    ph = ",".join("?" * len(INDEX_CODES))
-    rows = conn.execute(
-        f"SELECT DISTINCT con_code FROM index_weight"
-        f" WHERE index_code IN ({ph}) AND trade_date >= ? AND trade_date <= ?",
-        (*INDEX_CODES, lo, end),
-    ).fetchall()
-    return sorted(r[0] for r in rows)
-
-
-def bench_load(backend: TushareBackend, symbols: list[str] | None, start: str, end: str):
+def bench_load(backend, symbols: list[str] | None, start: str, end: str):
     """模拟 engine preload：含 365 天 lookback。"""
     lookback = (date.fromisoformat(start) - timedelta(days=365)).strftime("%Y%m%d")
     t0 = time.perf_counter()
@@ -50,14 +37,14 @@ class RollingRankerCropped(RollingRanker):
     """仅覆盖 get_universe：preload 裁剪到指数成分并集。"""
 
     def get_universe(self, provider, start: str, end: str) -> list[str]:
-        return index_union(provider.backend._conn, start, end)
+        return resolve_index_universe(provider.backend, INDEX_CODES, start, end)
 
 
 def bench_engine(yaml_path: str, start: str, end: str, cropped: bool) -> float:
     strategy = load_strategy(yaml_path)
     if cropped:
         strategy.__class__ = RollingRankerCropped
-    provider = DataProvider(TushareBackend())
+    provider = cli_common.make_provider()
     try:
         engine = Engine(strategy, provider, db_path=None)
         t0 = time.perf_counter()
@@ -77,9 +64,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.skip_load:
-        backend = TushareBackend()
+        provider = cli_common.make_provider()
+        backend = provider.backend
         try:
-            symbols = index_union(backend._conn, args.start, args.end)
+            symbols = resolve_index_universe(backend, INDEX_CODES,
+                                             args.start, args.end)
             print(f"指数成分并集: {len(symbols)} 只 (指数: {', '.join(INDEX_CODES)})",
                   flush=True)
 

@@ -35,12 +35,5 @@ def make_costs_fn(config: dict):
     return calc
 
 
-def calc_trade_costs(side: str, turnover: float) -> dict:
-    commission = max(turnover * COMMISSION_RATE, MIN_COMMISSION)
-    stamp_tax = turnover * STAMP_TAX_RATE if side == "SELL" else 0.0
-    transfer_fee = turnover * TRANSFER_FEE_RATE
-    return {
-        "commission": commission,
-        "stamp_tax": stamp_tax,
-        "transfer_fee": transfer_fee,
-    }
+# 缺省费率等价物：测试与撮合层共用同一工厂，单一实现
+calc_trade_costs = make_costs_fn({})

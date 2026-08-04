@@ -32,7 +32,7 @@ def make_engine():
     """搭建手动步进引擎：预载 bars → 排序 → 日历 → Engine → bars_by_date → on_start。
 
     返回 (engine, calendar)。调用方在循环前调一次
-    _compute_pending(calendar[0])，之后由 step() 结尾接力调用，
+    compute_pending(calendar[0])，之后由 step() 结尾接力调用，
     与 engine.run() 的真实时序一致（select 每日恰好一次）。
     """
     def _make(strategy, calendar_end, initial_capital=1_000_000, max_positions=10):

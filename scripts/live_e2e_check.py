@@ -18,6 +18,8 @@ import sys
 
 import yaml
 
+from research.cli_common import latest_run_id
+
 _p = argparse.ArgumentParser()
 _p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.db")
 _p.add_argument("--ledger", default="live/e2e_check.db")
@@ -35,7 +37,8 @@ BT_START = _args.start
 WINDOW = _args.days.split(",")
 
 conn = sqlite3.connect(BT)
-rid = conn.execute("SELECT MAX(run_id) FROM trade_log").fetchone()[0]
+# 最新 run 解析口径统一走 runs 表（此前查 trade_log，空 trade_log 的 run 会错位）
+rid = latest_run_id(conn)
 
 
 def _market_path():

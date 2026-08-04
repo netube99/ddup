@@ -549,7 +549,7 @@ layers = calc_layered_returns(factor_df["mom20"], fwd_ret, n_quantiles=5)
 corr_mat = calc_factor_corr(factor_df)
 ```
 
-`compute_factor(name, df, library)` 为单因子版本，返回原始值 Series（不做 rank / 标准化）。`compute_factors` 要求 df 自带全部依赖列与伪列（§9.3）。
+`compute_factors` 为批量计算（返回 DataFrame），要求 df 自带全部依赖列与伪列（§9.3）；已删除的单因子版本 `compute_factor` 不再提供——单因子评估用 `compute_factors([name])` 取列。
 
 ### 11.3 多因子合成
 
@@ -574,8 +574,8 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 
 **陷阱一：warmup 不足**
 
-- 症状：`compute_factor(s)` 返回的因子值前 N 天全是 NaN，IC 失真。
-- 根因：`compute_factor` 对传入 df 现算，不自动向前延伸窗口；df 起于 2024-01-02 而因子需 20 日窗口，前 19 天均为 NaN。引擎 preload 会自动前伸（`max(365, 最大窗口 × 1.5 + 10)` 日历天），研究侧需自行保证。
+- 症状：`compute_factors` 返回的因子值前 N 天全是 NaN，IC 失真。
+- 根因：`compute_factors` 对传入 df 现算，不自动向前延伸窗口；df 起于 2024-01-02 而因子需 20 日窗口，前 19 天均为 NaN。引擎 preload 会自动前伸（`max(365, 最大窗口 × 1.5 + 10)` 日历天），研究侧需自行保证。
 - 修复：取数时向前多取 `max(365, 最大窗口 × 1.5 + 10)` 个日历天；精确窗口行数可用 `btcore.factors.ops.infer_window` 静态推导（规则见 §7.2）。`compute_breadth` 例外：它自动前伸窗口（与引擎同源的 `infer_windows` 推导），传入起止日期即可，无需手动扩展。
 
 **陷阱二：口径自负**
@@ -587,7 +587,7 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 **陷阱三：ascending 语义写反**
 
 - 症状：IC 为正的因子在策略里选出了排名最低的股票。
-- 根因：`compute_factor` 返回原始值，不做 rank 也不考虑方向；`eval_factor_specs` 合成时 `ascending=false`（默认）= 值越大得分越高，`ascending=true` = 值越小得分越高。IC 为正 → `ascending=false`；IC 为负 → `ascending=true`。
+- 根因：`compute_factors` 返回原始值，不做 rank 也不考虑方向；`eval_factor_specs` 合成时 `ascending=false`（默认）= 值越大得分越高，`ascending=true` = 值越小得分越高。IC 为正 → `ascending=false`；IC 为负 → `ascending=true`。
 - 修复：按 IC 符号校对 ascending。
 
 **陷阱四：坍缩因子不可用于截面评估**
@@ -856,18 +856,17 @@ mkt_breadth20:
 load_library(path=None) -> dict[str, dict]
   # 加载并校验 library.yaml（缺省 factors/library.yaml），返回 {name: {expr, where?, description?}}
 
-compute_factor(name, df, library=None) -> pd.Series
-  # 单因子原始值；df 为 (trade_date, symbol) 面板（纯逐行表达式可接受当日截面），
-  # 依赖的伪列需 df 自带
-
 compute_factors(names, df, library=None) -> pd.DataFrame
-  # 批量计算，每列一个因子；同样要求 df 自带全部依赖列与伪列
+  # 批量计算，每列一个因子；同样要求 df 自带全部依赖列与伪列；
+  # 单因子评估用 compute_factors([name]) 取列（单因子版 compute_factor 已移除）
 
-compute_breadth(factor_name, backend, start, end, library=None, chunk_days=60) -> pd.Series
+compute_breadth(factor_name, backend, lib, start, end, *, benchmark=None, chunk_days=60) -> pd.Series
   # 流式计算坍缩因子为日频 Series（index=trade_date，值=当日全市场口径坍缩标量）。
   # 仅接受坍缩算子定义的因子，保形因子抛 ValueError；
   # 按 chunk_days 分片加载全市场数据，内存 O(chunk)；自动前伸 warmup 窗口
-  # （同引擎 infer_windows 推导），评估区间头部即有值
+  # （同引擎 infer_windows 推导），评估区间头部即有值；
+  # 数据准备与引擎 preload 同源（build_factor_plan 列/needs 产物），
+  # 因子引用 idx_ret 时必须传 benchmark（缺省会 fail-fast）
 
 resolve_spec(spec, library=None) -> dict
   # factor_specs 条目 → {name, weight, ascending, materialize_only}

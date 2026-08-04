@@ -109,7 +109,7 @@ class TestMaterialize:
 
     def _materialize(self, main, breadth):
         p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
-        plan.materialize(main, breadth, p, _NODES)
+        plan.materialize(main, breadth, p)
         return p
 
     def test_market_breadth_is_full_market(self, panels):
@@ -258,7 +258,7 @@ class TestCollapseIntegrity:
         )
 
         with caplog.at_level(logging.WARNING, logger="btcore.factors.plan"):
-            plan.materialize(main_df, breadth_df, p, {"test_collapse": {"expr": "mean(close_hfq)"}})
+            plan.materialize(main_df, breadth_df, p)
 
         warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("坍缩因子" in m and "无值" in m for m in warnings), \
@@ -279,8 +279,7 @@ class TestCollapseIntegrity:
         p = plan.build_factor_plan(
             {"test_collapse": {"expr": "mean(close_hfq)"}}, ["test_collapse"]
         )
-        plan.materialize(main_df, breadth_df, p,
-                         {"test_collapse": {"expr": "mean(close_hfq)"}})
+        plan.materialize(main_df, breadth_df, p)
 
         issues = plan.validate_materialization(main_df, p)
         assert issues == [], f"Expected no issues, got: {issues}"
@@ -307,8 +306,7 @@ class TestCollapseIntegrity:
         p = plan.build_factor_plan(
             {"test_collapse": {"expr": "mean(close_hfq)"}}, ["test_collapse"]
         )
-        plan.materialize(main_df, breadth_df, p,
-                         {"test_collapse": {"expr": "mean(close_hfq)"}})
+        plan.materialize(main_df, breadth_df, p)
 
         # NaN 占比 = 7/10 = 70% > 5%
         issues = plan.validate_materialization(main_df, p)
@@ -329,7 +327,7 @@ class TestValidateMaterialization:
         main = _mk_panel(dates, ["A", "B", "C"])
         breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
         p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
-        plan.materialize(main, breadth, p, _NODES)
+        plan.materialize(main, breadth, p)
         issues = plan.validate_materialization(main, p)
         assert all(i["level"] != "warning" for i in issues), issues
 
@@ -339,7 +337,7 @@ class TestValidateMaterialization:
         main = _mk_panel(dates, ["A", "B", "C"])
         breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
         p = plan.build_factor_plan(_NODES, ["rel_mom", "mom_z"])
-        plan.materialize(main, breadth, p, _NODES)
+        plan.materialize(main, breadth, p)
         # 人为制造大量 NaN
         main.loc[main.index[:200], "pct_above_ma20"] = np.nan
         issues = plan.validate_materialization(main, p)

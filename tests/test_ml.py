@@ -251,7 +251,7 @@ class TestGuardSamplesBasis:
             "holding_days": 5,
         }])
         samples = build_guard_samples(panel, pairs, self._spec(), lookahead=2)
-        # 成交当日 hd=1（引擎在成交日 _compute_pending 已 +1），逐交易日 +1；
+        # 成交当日 hd=1（引擎在成交日 compute_pending 已 +1），逐交易日 +1；
         # 日历日口径会跳过成交日且跨周末后漂移（0610 日历日 hd=5）
         assert samples["hold_days"].tolist() == [1.0, 2.0, 3.0, 4.0]
         # dts 同为交易日口径：0606/0607 距卖出 ∈ [1,2] → 正样本
@@ -307,24 +307,56 @@ class TestTradePairRounds:
     """extract_trade_pairs 回合语义：不限买入 trigger、多买多卖、残缺跳过。"""
 
     @staticmethod
-    def _db(tmp_path, rows):
-        p = tmp_path / "trades.db"
-        conn = sqlite3.connect(p)
+    def _insert_trade(conn, run_id, row):
+        date, sym, side, trig, price, shares = row[:6]
+        # 显式 net（红利/审计行）优先；缺省按无费用买卖净额
+        net = row[6] if len(row) > 6 else price * shares * (1 if side == "SELL" else -1)
         conn.execute(
-            "CREATE TABLE trade_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " date TEXT, symbol TEXT, side TEXT, trigger TEXT, price REAL,"
-            " shares INTEGER, net_amount REAL)"
+            "INSERT INTO trade_log (run_id, date, symbol, side, trigger,"
+            " price, shares, turnover, commission, net_amount)"
+            " VALUES (?,?,?,?,?,?,?,0,0,?)",
+            (run_id, date, sym, side, trig, price, shares, net),
         )
-        for date, sym, side, trig, price, shares in rows:
-            net = price * shares * (1 if side == "SELL" else -1)
-            conn.execute(
-                "INSERT INTO trade_log (date, symbol, side, trigger, price,"
-                " shares, net_amount) VALUES (?,?,?,?,?,?,?)",
-                (date, sym, side, trig, price, shares, net),
-            )
+
+    @classmethod
+    def _db(cls, tmp_path, rows):
+        """单 completed run 结果库；rows = (date, symbol, side, trigger, price, shares[, net])。"""
+        from btcore import database
+
+        p = tmp_path / "trades.db"
+        conn = database.init_backtest_db(str(p))
+        run_id = database.write_run(
+            conn, created_at="2024-01-01", strategy="t", start_date="20240101",
+            end_date="20240201", initial_capital=1e6, config_json="{}",
+            status="completed",
+        )
+        for row in rows:
+            cls._insert_trade(conn, run_id, row)
         conn.commit()
         conn.close()
         return str(p)
+
+    @classmethod
+    def _multi_db(cls, tmp_path, run_statuses, trades):
+        """多 run 结果库；trades 首元素为 run_statuses 的 0 基下标，其余同 _db。
+        返回 (db_path, run_ids)。"""
+        from btcore import database
+
+        p = tmp_path / "multi.db"
+        conn = database.init_backtest_db(str(p))
+        run_ids = [
+            database.write_run(
+                conn, created_at="2024-01-01", strategy="t",
+                start_date="20240101", end_date="20240201",
+                initial_capital=1e6, config_json="{}", status=status,
+            )
+            for status in run_statuses
+        ]
+        for row in trades:
+            cls._insert_trade(conn, run_ids[row[0]], row[1:])
+        conn.commit()
+        conn.close()
+        return str(p), run_ids
 
     def test_target_buy_round_paired(self, tmp_path):
         """TARGET 买入回合不再静默蒸发。"""
@@ -419,6 +451,105 @@ class TestTradePairRounds:
             pairs = extract_trade_pairs(db)
         assert len(pairs) == 0
         assert any("卖出股数超过买入" in r.message for r in caplog.records)
+
+    def test_run_id_filter_isolates_runs(self, tmp_path):
+        """多 run 同库：run_id 过滤不混入（同 symbol 交错交易只配对指定 run）。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db, run_ids = self._multi_db(tmp_path, ["completed", "completed"], [
+            (0, "20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            (1, "20240103", "X", "BUY", "MANUAL", 20.0, 100),
+            (0, "20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
+            (1, "20240111", "X", "SELL", "MANUAL", 22.0, 100),
+        ])
+        pairs = extract_trade_pairs(db, run_id=run_ids[0])
+        assert len(pairs) == 1
+        r = pairs.iloc[0]
+        assert r["buy_price"] == pytest.approx(10.0)
+        assert r["pnl"] == -100.0  # 900 - 1000，不含 run2 的 ±2000
+        pairs2 = extract_trade_pairs(db, run_id=run_ids[1])
+        assert len(pairs2) == 1
+        assert pairs2.iloc[0]["pnl"] == 200.0
+
+    def test_default_run_id_latest_completed_with_warning(self, tmp_path, caplog):
+        """run_id=None：多 run 时取最新 completed（running 不算）并告警所选。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db, run_ids = self._multi_db(tmp_path, ["completed", "running"], [
+            (0, "20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            (0, "20240110", "X", "SELL", "MANUAL", 11.0, 100),
+            (1, "20240102", "Y", "BUY", "MANUAL", 5.0, 100),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1 and pairs.iloc[0]["symbol"] == "X"
+        assert any(
+            f"run_id={run_ids[0]}" in r.message for r in caplog.records
+        )
+
+    def test_missing_runs_table_fails_fast(self, tmp_path):
+        """无 runs 表的库无法定位 run：明确报错而非静默混入全部交易。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        p = tmp_path / "legacy.db"
+        conn = sqlite3.connect(p)
+        conn.execute(
+            "CREATE TABLE trade_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " date TEXT, symbol TEXT, side TEXT, trigger TEXT, price REAL,"
+            " shares INTEGER, net_amount REAL)"
+        )
+        conn.close()
+        with pytest.raises(ValueError, match="runs"):
+            extract_trade_pairs(str(p))
+
+    def test_same_day_div_before_sell_includes_dividend(self, tmp_path, caplog):
+        """同日 DIV+SELL：DIV 落库 id 晚于 SELL 也按盘前口径先处理，
+        红利计入回合 pnl 且无残缺告警。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            # 引擎落库序：SELL（结算）先于 DIV（公司行为），id 更小
+            ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
+            ("20240110", "X", "DIV", "CORPORATE", 0.0, 0, 50.0),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        assert pairs.iloc[0]["pnl"] == -50.0  # 900 + 50 - 1000
+        assert not caplog.records
+
+    def test_same_day_stk_div_before_sell_not_oversold(self, tmp_path, caplog):
+        """同日 STK_DIV+SELL：送转落库晚于卖出也不误判超卖丢弃。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            ("20240110", "X", "SELL", "TREND_BREAK", 7.0, 140),
+            ("20240110", "X", "STK_DIV", "CORPORATE", 0.0, 140),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        r = pairs.iloc[0]
+        assert r["pnl"] == pytest.approx(7.0 * 140 - 1000.0)
+        assert r["buy_price"] == pytest.approx(1000.0 / 140, abs=1e-4)
+        assert not any("超卖" in rec.message for rec in caplog.records)
+
+    def test_adjust_rows_silently_skipped(self, tmp_path, caplog):
+        """实盘账本 ADJUST 现金审计行：不进回合、不进 pnl、无告警。"""
+        from btcore.ml.labels import extract_trade_pairs
+
+        db = self._db(tmp_path, [
+            ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
+            ("20240105", "", "ADJUST", "MANUAL", 0.0, 0, -500.0),
+            ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
+        ])
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
+            pairs = extract_trade_pairs(db)
+        assert len(pairs) == 1
+        assert pairs.iloc[0]["pnl"] == -100.0
+        assert not caplog.records
 
 
 # ── ONNX 相关用例 ──

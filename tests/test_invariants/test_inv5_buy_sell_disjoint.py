@@ -28,6 +28,6 @@ def test_inv5_buy_sell_disjoint_rejects(make_engine):
     strategy = Inv5Strategy()
     engine, calendar = make_engine(strategy, "20240610", max_positions=5)
 
-    # _compute_pending should raise because buy ∩ sell is non-empty
+    # compute_pending should raise because buy ∩ sell is non-empty
     with pytest.raises(ValueError, match="冲突"):
-        engine._compute_pending(calendar[0])
+        engine.compute_pending(calendar[0])

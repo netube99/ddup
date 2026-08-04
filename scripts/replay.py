@@ -6,6 +6,8 @@ import json
 import sqlite3
 import sys
 
+from research.cli_common import latest_run_id
+
 
 def main():
     parser = argparse.ArgumentParser(description="回放回测交易决策")
@@ -20,13 +22,13 @@ def main():
     conn = sqlite3.connect(args.db)
     if args.run_id is None:
         try:
-            row = conn.execute("SELECT MAX(run_id) FROM runs").fetchone()
+            rid = latest_run_id(conn)
         except sqlite3.OperationalError:
-            row = None  # 旧库无 runs 表，回退 run 1
-        if not row or row[0] is None:
+            rid = None  # 旧库无 runs 表，回退 run 1
+        if rid is None:
             print("结果库中无 run 记录", file=sys.stderr)
             sys.exit(1)
-        args.run_id = row[0]
+        args.run_id = rid
 
     query = "SELECT date, snapshot_json FROM debug_snapshots WHERE run_id = ?"
     params = [args.run_id]

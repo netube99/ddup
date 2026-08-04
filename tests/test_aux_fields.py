@@ -1,5 +1,5 @@
 """MockDataBackend 的 aux 表契约测试：moneyflow/cyq_perf/margin_detail
-经 LEFT JOIN 并入 bars（镜像 adapters/tushare.py 的 aux_tables 行为）。"""
+经 LEFT JOIN 并入 bars（镜像 adapters/tushare.py 的 extra_fields 行为）。"""
 
 from tests.conftest import MockDataBackend
 

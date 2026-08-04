@@ -19,9 +19,9 @@ import sys
 
 import pandas as pd
 
-from adapters.tushare import _DEFAULT_DB_PATH
+from adapters.tushare import get_default_db_path
 
-DB_PATH = _DEFAULT_DB_PATH
+DB_PATH = get_default_db_path()
 if not DB_PATH:
     raise SystemExit("错误: 请在 adapters/tushare.py 中设置 _DEFAULT_DB_PATH")
 if len(sys.argv) > 1:

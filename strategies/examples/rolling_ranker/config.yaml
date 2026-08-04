@@ -28,7 +28,7 @@ factor_specs:
 filter_rules:
   exclude_st: true
   exclude_new_stock: true
-  exclude_loss: true           # 排除 pe_ttm <= 0 的亏损股
+  exclude_loss: true           # 排除 eps < 0 的亏损股（后端无 eps 列时回退 pe_ttm <= 0）
   exclude_boards: ["BJ"]       # 排除北交所
   min_price: 3.0
 

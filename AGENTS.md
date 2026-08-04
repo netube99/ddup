@@ -115,8 +115,10 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - **因子类层次**：`Factor` / `CrossSection` / `ExprFactor` / `FunctionFactor` /
   `StrategyAdapter` / `FactorSpecItem` / `FactorPipeline` / `equal_weight_percentile` /
   `register_factor` 已删除，因子定义是纯 YAML 数据
-- **Strategy ABC 不得含行为开关**：只有声明式属性 `REQUIRED_FIELDS` / `FACTOR_SPECS` /
-  `FILTER_RULES`。不得有 `take_profit_mode` / `trailing_conservative` 等行为分支
+- **Strategy ABC 不得含行为开关**：只有声明式数据属性（`REQUIRED_FIELDS` /
+  `FACTOR_SPECS` / `FILTER_RULES` / `FACTOR_NODES` / `MODEL_SPECS` /
+  `CONDITION_FACTORS`），不得含 `take_profit_mode` / `trailing_conservative`
+  等行为分支开关
 - **因子算子运行时注册表**：算子表 `_OPS` 是固定 dict，不是可扩展注册表。
   自定义条件单 handler 通过 `register_condition_handler` / `register_buy_condition_handler`
   注册（进程级全局），但这是条件单机制，不是因子机制
@@ -203,7 +205,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 | 因子评估（IC/分层/相关性） | `research/factor_eval.py` | `docs/cli_and_research.md` |
 | Brinson 行业归因 | `research/attribution.py` | `docs/cli_and_research.md` |
 | 策略 YAML 加载 | `btcore/strategy_loader.py` | `docs/strategy_guide.md` |
-| select 返回协议与冲突校验 | `btcore/engine.py:_compute_pending` | `docs/strategy_guide.md` |
+| select 返回协议与冲突校验 | `btcore/engine.py:compute_pending` | `docs/strategy_guide.md` |
 | 填表法后端 | `btcore/generic_sql.py` | `docs/backend_guide.md` |
 | 条件单 dispatch 与自定义注册 | `btcore/match/conditions.py` | `docs/strategy_guide.md` |
 | 滑点模型（tick=0.01） | `btcore/slippage.py` | `docs/strategy_guide.md` |

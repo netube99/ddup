@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
 CREATE INDEX IF NOT EXISTS idx_ml_predictions_run ON ml_predictions(run_id);
 """
 
-_ALL_TABLES = ("runs", "account_daily", "holdings", "trade_log", "debug_snapshots")
+_ALL_TABLES = (
+    "runs", "account_daily", "holdings", "trade_log", "debug_snapshots",
+    "ml_predictions",
+)
 
 
 def init_backtest_db(path: str) -> sqlite3.Connection:
@@ -89,7 +92,7 @@ def init_backtest_db(path: str) -> sqlite3.Connection:
 
     同一 path 重复使用时，历史 run 保留，本次写入挂在新 run_id 下；
     holdings 是瞬态快照表，每次 run 开始清空。
-    检测到旧 schema（runs 无 run_id 列）时 DROP 全部四表重建——
+    检测到旧 schema（runs 无 run_id 列）时 DROP 全部六表重建——
     旧行为本来就是每 run 清空，丢弃旧库无回归。
     runs 缺 stats_json 列的老库走 ALTER TABLE 轻量迁移，历史 run 保留。
     """

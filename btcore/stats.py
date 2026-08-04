@@ -3,7 +3,7 @@ from collections import defaultdict, deque
 import numpy as np
 import pandas as pd
 
-from btcore.constants import CAL_DAYS_ANNUAL
+from btcore.constants import CAL_DAYS_ANNUAL, TRADE_EVENT_PRIORITY
 
 
 def calculate_statistics(
@@ -101,8 +101,6 @@ def calculate_statistics(
     result["loss_days"] = loss_days
     result["win_rate"] = profit_days / total_trade_days if total_trade_days > 0 else 0.0
 
-    result.update(_compute_tail_stats(rets))
-
     if not trade_log_df.empty:
         trades = trade_log_df[trade_log_df["side"] != "DIV"].copy()
         div_log = trade_log_df[trade_log_df["side"] == "DIV"].copy()
@@ -110,13 +108,16 @@ def calculate_statistics(
         trades = trade_log_df.copy()
         div_log = trade_log_df.copy()
 
+    # 真实成交行（BUY/SELL）：STK_DIV/ADJUST 公司行为行不计入笔数与标的数
+    exec_trades = trades[trades["side"].isin(["BUY", "SELL"])]
+
     if not trades.empty:
         buy_count = int((trades["side"] == "BUY").sum())
         sell_count = int((trades["side"] == "SELL").sum())
-        result["trade_count"] = len(trades)
+        result["trade_count"] = len(exec_trades)
         result["buy_count"] = buy_count
         result["sell_count"] = sell_count
-        result["unique_symbols"] = int(trades["symbol"].nunique())
+        result["unique_symbols"] = int(exec_trades["symbol"].nunique())
         result["daily_avg_turnover"] = trades["turnover"].sum() / n_days if n_days > 0 else 0.0
 
         avg_pos = _avg_positions_from_account_daily(account_daily_df)
@@ -189,30 +190,6 @@ def _compute_period_returns(dates: pd.DatetimeIndex, total_values: np.ndarray,
     return dict(zip(labels, rets))
 
 
-def _compute_tail_stats(daily_returns: np.ndarray) -> dict:
-    if len(daily_returns) < 3:
-        return {"var_95": 0.0, "es_95": 0.0, "skewness": 0.0, "excess_kurtosis": 0.0}
-    sorted_rets = np.sort(daily_returns)
-    var_idx = max(0, int(len(sorted_rets) * 0.05))
-    var_95 = float(sorted_rets[var_idx])
-    es_95 = float(np.mean(sorted_rets[:var_idx + 1]))
-    mean_ret = np.mean(daily_returns)
-    std_ret = np.std(daily_returns, ddof=1)
-    if std_ret > 0:
-        skewness = float(np.mean(((daily_returns - mean_ret) / std_ret) ** 3))
-        kurtosis = float(np.mean(((daily_returns - mean_ret) / std_ret) ** 4))
-        excess_kurtosis = kurtosis - 3.0
-    else:
-        skewness = 0.0
-        excess_kurtosis = 0.0
-    return {
-        "var_95": var_95,
-        "es_95": es_95,
-        "skewness": skewness,
-        "excess_kurtosis": excess_kurtosis,
-    }
-
-
 def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                          account_daily_df: pd.DataFrame,
                          holdings: dict | None = None) -> dict:
@@ -245,8 +222,9 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
     # 同日事件按 A 股时序：除息/送转（盘前）→ 买入 → 卖出。
     # 旧排序仅按 date（同日 SELL 先于 DIV），除息日清仓的持仓分红整体丢失
     # （2026-08-03 实证：champ 全周期 total_dividend_received 低估 -63%）。
-    _type_priority = {"DIV": 0, "STK_DIV": 0, "BUY": 1, "SELL": 2}
-    events.sort(key=lambda e: (e["date"], _type_priority.get(e["type"], 3)))
+    # ADJUST 行（live 衍生库，shares=0）同为盘前优先级，下方事件循环无匹配
+    # 分支自然跳过，不动 lot，无害。
+    events.sort(key=lambda e: (e["date"], TRADE_EVENT_PRIORITY.get(e["type"], 3)))
 
     # 每只股票维护 lot 队列: [{shares, cost_per_share, buy_date, dividend_accrued}]
     lots: dict[str, deque] = defaultdict(deque)
@@ -465,7 +443,6 @@ def _compute_cost_breakdown(trades: pd.DataFrame) -> dict:
     breakdown = {
         "buy_commission": buy_trades["commission"].sum(),
         "sell_commission": sell_trades["commission"].sum(),
-        "total_commission": trades["commission"].sum(),
         "stamp_tax": sell_trades["stamp_tax"].sum(),
         "transfer_fee": trades["transfer_fee"].sum(),
         "slippage": trades["slippage_amount"].sum(),

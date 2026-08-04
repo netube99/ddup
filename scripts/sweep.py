@@ -9,7 +9,6 @@ compare.py / report.py 原生可读；sweep_results 表保留参数标签汇总�
 """
 
 import argparse
-import itertools
 import json
 import sqlite3
 import subprocess
@@ -19,38 +18,8 @@ from pathlib import Path
 
 import yaml
 
-
-def nested_set(d, key_path, value):
-    """按 '.' 分割的路径设置嵌套值，支持列表整数下标（如 factor_specs.0.weight）。"""
-    keys = key_path.split(".")
-    for k in keys[:-1]:
-        if isinstance(d, list):
-            d = d[int(k)]
-        else:
-            d = d.setdefault(k, {})
-    if isinstance(d, list):
-        d[int(keys[-1])] = value
-    else:
-        d[keys[-1]] = value
-
-
-def expand_params(params_def):
-    """展开参数空间为笛卡尔积，返回 (param_label, param_dict) 列表。"""
-    keys = list(params_def.keys())
-    values = [params_def[k] for k in keys]
-    results = []
-    for combo in itertools.product(*values):
-        param_dict = dict(zip(keys, combo))
-        label_parts = []
-        for k, v in param_dict.items():
-            short_k = k.split(".")[-1]  # 取路径最后一段作为简称
-            if isinstance(v, float):
-                label_parts.append(f"{short_k}={v:.2f}")
-            else:
-                label_parts.append(f"{short_k}={v}")
-        label = ", ".join(label_parts)
-        results.append((label, param_dict))
-    return results
+from research.cli_common import latest_run_id
+from research.sweep import expand_params, nested_set
 
 
 def main():
@@ -118,10 +87,12 @@ def main():
             # 聚合结果：读取刚写入的 run 的 stats_json，附加参数标签
             try:
                 out_conn = sqlite3.connect(str(out_path))
-                row = out_conn.execute(
-                    "SELECT stats_json FROM runs "
-                    "ORDER BY run_id DESC LIMIT 1"
-                ).fetchone()
+                row = None
+                rid = latest_run_id(out_conn)
+                if rid is not None:
+                    row = out_conn.execute(
+                        "SELECT stats_json FROM runs WHERE run_id = ?", (rid,)
+                    ).fetchone()
 
                 if row and row[0]:
                     stats = json.loads(row[0])

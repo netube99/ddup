@@ -18,6 +18,19 @@ import pandas as pd
 from btcore.backend import DataBackend
 
 
+def benchmark_price_column(df: pd.DataFrame) -> str | None:
+    """基准价格列口径：优先 hfq_close，缺列回退 close；两列都没有返回 None。
+
+    后端基准表可能只提供裸价。engine 的 benchmark_nav 提取与
+    get_benchmark_returns 共用此单一口径。
+    """
+    if "hfq_close" in df.columns:
+        return "hfq_close"
+    if "close" in df.columns:
+        return "close"
+    return None
+
+
 class DataProvider:
     """前视防护门面（约定性防护，非强制）。
 
@@ -57,6 +70,10 @@ class DataProvider:
         即已钳到首日前一交易日，钩子内传未来日期也拿不到未来数据。
         """
         self._as_of_date = date_str
+
+    def get_as_of(self) -> str | None:
+        """当前钳制锚点（未钳制为 None）。引擎状态保存/恢复快照用。"""
+        return self._as_of_date
 
     # ── 策略用 (不含当日) ──
 
@@ -137,10 +154,7 @@ class DataProvider:
         bench = self._bench_cache[key]
         if bench is None or bench.empty:
             return None
-        # 列口径与 engine benchmark_nav 提取一致：优先 hfq_close，缺列回退
-        # close（后端基准表可能只提供裸价）；两列都没有则视为无基准数据
-        col = ("hfq_close" if "hfq_close" in bench.columns
-               else "close" if "close" in bench.columns else None)
+        col = benchmark_price_column(bench)
         if col is None:
             return None
         ret = bench[col].pct_change()

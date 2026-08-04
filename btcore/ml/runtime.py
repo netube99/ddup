@@ -6,7 +6,7 @@
 
   - scope=panel：preload 阶段对整个面板一次性批量推理，写 ml_<name> 列。
     输入全是因果物化列、逐行点态函数，前视安全由构造保证。
-  - scope=holding：决策时点（_compute_pending）逐持仓推理，账户态特征
+  - scope=holding：决策时点（compute_pending）逐持仓推理，账户态特征
     （hold_days / ret_from_entry）由本模块按统一公式计算，训练侧复用同一
     函数；分数注入该持仓的 bar dict，策略自行解释。
 

@@ -78,5 +78,5 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 - on_tick 返回 buy_conditions 以外的键；忘记 super()/prune()
 - 每日状态维护（冷却递减/trailing 更新/状态机）塞进调仓分支——select 每日都跑，维护放 on_tick
 - 策略里自查 SQLite 判断市场状态 → 用 provider.get_benchmark_trend()/get_historical_bars()（前视保护查询）
-- 研究侧用 compute_factor 评估坍缩因子 → compute_breadth（ddup-factor-research）
+- 研究侧用 `compute_factors` 评估坍缩因子 → 必须 `compute_breadth`（全市场口径，ddup-factor-research）
 - 策略自行加载 ONNX 逐日推理 → 绕开前视保护与物化体系，严禁（ddup-ml-research）

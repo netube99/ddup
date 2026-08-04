@@ -46,17 +46,19 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 | 符号 | 位置 | 职责 |
 |---|---|---|
-| `required_bar_columns` | engine.py:19 | preload 列裁剪：契约列 ∪ REQUIRED_FIELDS ∪ filter 列 ∪ fplan main_columns |
-| `class Engine` | engine.py:37 | 构造读 strategy.config：initial_capital/max_positions/滑点/benchmark/execution_price |
-| `run(start, end)` | engine.py:113 | preload → 因子/ML 物化 → 逐日 step → 统计落库 |
-| `_build_factor_plan` | engine.py:250 | FACTOR_SPECS + FACTOR_NODES → 因子供给计划 |
-| `_preload_breadth` | engine.py:265 | 广度面板：全市场 × 短窗口 × 窄列（坍缩因子专用） |
-| `step(today, day_bars, conn)` | engine.py:291 | 单日：公司行为 → 撮合 → 结算 → 次日决策 |
-| `_settle` | engine.py:365 | 估值 + 写 account_daily/holdings/trade_log |
-| `_compute_pending` | engine.py:404 | 决策计算：on_fills → on_tick → select → 校验 → calc_conditions |
-| `_inject_holding_model_scores` | engine.py:535 | holding scope 模型逐持仓打分，注入 bar dict |
-| `_write_ml_predictions` | engine.py:552 | ml_predictions 落盘 |
-| `_bars_to_dict` | engine.py:651 | 截面 DataFrame → {symbol: bar dict} |
+| `required_bar_columns` | engine.py:220 | preload 列裁剪：契约列 ∪ REQUIRED_FIELDS ∪ filter 列 ∪ fplan main_columns |
+| `class Engine` | engine.py:268 | 构造读 strategy.config：initial_capital/max_positions/滑点/benchmark/execution_price |
+| `run(start, end)` | engine.py:353 | init_backtest_db → prepare → write_run → 逐日 step → 统计落库 |
+| `prepare(start, end)` | engine.py:450 | 回测/实盘回放共用 preload 管线（无 DB 写入）：日历 → 前视锚定 → universe → 因子/ML 物化 → 裁切 → on_start |
+| `_build_factor_plan` | engine.py:514 | FACTOR_SPECS + FACTOR_NODES → 因子供给计划 |
+| `_preload_breadth` | engine.py:529 | 广度面板：全市场 × 短窗口 × 窄列（坍缩因子专用） |
+| `step(today, day_bars, conn)` | engine.py:555 | 单日：公司行为 → 撮合 → 结算 → 次日决策 |
+| `_settle` | engine.py:632 | 估值（委托 value_account）+ 写 account_daily/holdings/trade_log |
+| `compute_pending` | engine.py:649 | 决策计算（回测 step 结尾/实盘回放共用）：on_fills → on_tick → select → 校验 → calc_conditions |
+| `_inject_holding_model_scores` | engine.py:731 | holding scope 模型逐持仓打分，注入 bar dict |
+| `_write_ml_predictions` | engine.py:757 | ml_predictions 落盘 |
+| `bars_to_dict`（模块级） | engine.py:871 | 截面 DataFrame → {symbol: bar dict} |
+| `value_account`（模块级） | engine.py:879 | 估值结算（_settle/实盘回放共用）：last_price 更新 + 净值/盈亏 |
 
 ### 2.2 数据接入：backend.py / provider.py / generic_sql.py
 
@@ -67,10 +69,10 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
   - `get_dividends_on_date(date)`（backend.py:108）→ {symbol: {stk_div, cash_div}}
 - 可选能力鸭子类型（backend.py:120，getattr 探测，缺则软回退）：
   get_benchmark_bars / get_st_map / get_stock_industries / get_recent_listings / get_index_members
-- `DataProvider`（provider.py:21）前视防护门面：
-  - `get_engine_bars`（provider.py:37）含当日，仅引擎撮合/preload 用
-  - `get_historical_bars`（provider.py:58）不含当日，钳制 `min(end, _as_of_date)` 再截到前一交易日
-  - `_as_of_date` 由 Engine._compute_pending（engine.py:405）每日设置 —— 前视钳制锚点
+- `DataProvider`（provider.py:34）前视防护门面：
+  - `get_engine_bars`（provider.py:55）含当日，仅引擎撮合/preload 用
+  - `get_historical_bars`（provider.py:88）不含当日，钳制 `min(end, _as_of_date)` 再截到前一交易日
+  - `_as_of_date` 由 Engine.compute_pending 经 `provider.set_as_of`（engine.py:657）每日设置 —— 前视钳制锚点（preload 阶段 prepare 也锚定一次）
 - `GenericSQLBackend`（generic_sql.py:117）填表法后端：
   用户声明「表名.字段名」表单 dict，`_compile_form`（generic_sql.py:485）校验编译，
   `_check_schema`（generic_sql.py:371）初始化期落库校验所有表/列引用；
@@ -101,11 +103,11 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 | 模块 | 关键符号 | 职责 |
 |---|---|---|
-| ops.py | `_OPS`（ops.py:204，**固定 dict 非注册表**）、`eval_op_expr`（:367）、`validate_op_expr`（:277）、`has_op_expr`→`has_op_call`（:272）、`infer_window`（:318）、`collapse_kind`（:351） | 算子白名单：ts 族（delay/delta/roc/ma/ema/std/sum/max/min/corr/beta/resid_std）、截面保形（rank/zscore/winsorize/group_rank/neutralize/abs/log）、坍缩（mean/group_mean）；AST 白名单校验 |
+| ops.py | `_OPS`（ops.py:197，**固定 dict 非注册表**）、`eval_op_expr`（:369）、`validate_op_expr`（:275）、`has_op_call`（:269）、`infer_window`（:320）、`collapse_kind`（:353） | 算子白名单：ts 族（delay/delta/roc/ma/ema/std/sum/max/min/corr/beta/resid_std）、截面保形（rank/zscore/winsorize/group_rank/neutralize/abs/log）、坍缩（mean/group_mean）；AST 白名单校验 |
 | expr.py | `evaluate_expr`（expr.py:46）、`validate_expr`（:22） | 无算子纯表达式 → pandas.eval/numexpr 截面求值，禁函数调用/属性访问 |
-| plan.py | `REQUIRED_BAR_COLUMNS`（plan.py:34）、`build_factor_plan`（:157）、`materialize`（:273，两路供给：广度面板物化→投影→主面板物化）、`validate_materialization`（:322）、`ensure_pseudo_columns`（:118，industry/log_mktcap/idx_ret）、`derive_fields`（:83，hfq/pct_chg 派生） | 物化规划：拓扑序、warmup 窗口推导（_to_calendar_days :153 = rows×1.5+10）、广度/主面板分列 |
+| plan.py | `REQUIRED_BAR_COLUMNS`（plan.py:34）、`build_factor_plan`（:162）、`materialize`（:291，两路供给：广度面板物化→投影→主面板物化）、`validate_materialization`（:319）、`ensure_pseudo_columns`（:122，industry/log_mktcap/idx_ret）、`derive_fields`（:87，hfq/pct_chg 派生） | 物化规划：拓扑序、warmup 窗口推导（to_calendar_days :158 = rows×1.5+10）、广度/主面板分列 |
 | cse.py | `rewrite`（cse.py:24） | 公共子表达式消除：相同 AST 去重 + 高频 Call 子树提取为 `__cse_N` 临时节点 |
-| library.py | `load_library`（library.py:36）、`resolve_closure`（:138）、`compute_breadth`（:279，坍缩因子流式计算，chunk_days=60） | library.yaml 加载（{name:{expr,where?,description?}}），where 为求值后掩码（False→NaN），DFS 循环检测 |
+| library.py | `load_library`（library.py:50）、`resolve_closure`（:147）、`compute_breadth`（:273，坍缩因子流式计算，签名 `(factor_name, backend, lib, start, end, *, benchmark=None, chunk_days=60)`） | library.yaml 加载（{name:{expr,where?,description?}}），where 为求值后掩码（False→NaN），DFS 循环检测 |
 
 ### 2.5 撮合 btcore/match/
 
@@ -122,21 +124,21 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 ### 2.6 ML 子系统 btcore/ml/
 
-- **spec.py**：`ModelSpec`（spec.py:43）；`column` 属性 → `ml_<name>`（:74）；
-  scope = holding iff state_features 非空（:79）；`feature_order = features+raw+state`（:84，
-  训练/推理共享向量序）；`from_dict`（:88）meta v2 契约（META_VERSION=2 :33，
-  meta['version']==2 否则 fail-fast）；`parse_models`（:207）
+- **spec.py**：`ModelSpec`（spec.py:45）；`column` 属性 → `ml_<name>`（:70）；
+  scope = holding iff state_features 非空（:75）；`feature_order = features+raw+state`（:80，
+  训练/推理共享向量序）；`from_dict`（:85）meta v3 契约（META_VERSION=3 :33，
+  meta['version']!=3 否则 fail-fast）；`parse_models`（:225）
 - **dataset.py**：`build_panel`（dataset.py:22）—— **训练与引擎同一物化函数链**
   （build_factor_plan → query_bars → derive_fields → materialize → validate），无第二管线
 - **runtime.py**：`materialize_predictions`（runtime.py:88）panel scope 批量 ONNX 推理 →
-  写 `ml_<name>` 列（引擎在因子物化后、factor_universe 裁切前调用，engine.py:152-156）；
+  写 `ml_<name>` 列（引擎在因子物化后、factor_universe 裁切前调用，engine.py:498）；
   `holding_score`（:147）holding scope 决策时点逐持仓打分注入 bar dict；
   `compute_state_features`（:128，hold_days/ret_from_entry 训练推理同源）
 - **conditions.py**：`ML_EXIT` handler（conditions.py:18，次日 open 成交，
   复用条件单全部护栏：跌停递延/量 cap/T+1 跳过）
 - **trainer.py / labels.py / metrics.py / export.py**：`train_panel`（trainer.py:64，XGBoost
   回归 + 时间切分 embargo :29）/ `train_guard`（:132，holding 二分类）；
-  `xs_forward_return`（labels.py:26）；`export_model`（export.py:21，ONNX + meta v2 +
+  `xs_forward_return`（labels.py:26）；`export_model`（export.py:21，ONNX + meta v3 +
   sklearn/ONNX 预测一致性自校验 :83）
 
 ### 2.7 支撑模块
@@ -161,7 +163,10 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 `TushareBackend`（adapters/tushare.py:230）= GenericSQLBackend + 表单：
 stk_factor_pro（行情）/ trade_cal（日历）/ dividend（分红）/ stock_st / index_weight /
-idx_factor_pro（基准）等表映射 + aux_tables（moneyflow/cyq_perf/margin_detail）LEFT JOIN。
+idx_factor_pro（基准）等表映射 + extra_fields 填表（adapters/tushare.py:38）：
+moneyflow/cyq_perf/margin_detail 等表的字段以「别名: 表名.字段名」登记进 extra_fields，
+由 GenericSQLBackend 与契约列同一多表 outer join 面板物化（generic_sql.py:75-85）；
+引擎不消费这些列，策略经 REQUIRED_FIELDS 声明后可见。
 填了能力空位即装配对应鸭子类型方法。
 
 ### 3.2 factors/library.yaml
@@ -207,36 +212,37 @@ idx_factor_pro（基准）等表映射 + aux_tables（moneyflow/cyq_perf/margin_
 
 ## 4. 数据流
 
-### 4.1 run() preload 序列（engine.py:113-240，代码顺序）
+### 4.1 run()/prepare() preload 序列（engine.py:353 / 450-513，代码顺序）
 
 ```
-init_backtest_db → get_calendar → get_factor_universe / get_universe
-→ _build_factor_plan（warmup = fplan.main_days 或 365 天）
-→ get_engine_bars(load_symbols, columns=required_bar_columns(...))   ← 列裁剪生效点
-→ validate_required_columns（fail-fast）→ derive_fields（hfq/pct_chg）
-→ 因子物化：_preload_breadth → ensure_pseudo_columns → materialize → validate_materialization
-→ ML panel 物化：ml_runtime.materialize_predictions → bars_df['ml_<name>']   ← 必须在裁切前
-→ factor_universe 裁切到交易域（裁空 → ValueError）
-→ bars_by_date 懒切片（_DaySlicer，不复制面板）→ provider.attach_bars → strategy.on_start
+init_backtest_db → prepare()：
+  get_calendar → set_as_of（首日锚定）→ get_factor_universe / get_universe
+  → _build_factor_plan（warmup = fplan.main_days 或 365 天）
+  → get_engine_bars(load_symbols, columns=required_bar_columns(...))   ← 列裁剪生效点
+  → validate_required_columns（fail-fast）→ derive_fields（hfq/pct_chg）
+  → 因子物化：_preload_breadth → ensure_pseudo_columns → materialize → validate_materialization
+  → ML panel 物化：ml_runtime.materialize_predictions → bars_df['ml_<name>']   ← 必须在裁切前
+  → factor_universe 裁切到交易域（裁空 → ValueError）
+  → bars_by_date 懒切片（_DaySlicer，不复制面板）→ provider.attach_bars → strategy.on_start
 → write_run（独立事务，status=running）
-→ _compute_pending(prev_day)   ← 首日信号在前一交易日预计算（T 信号 T+1 撮合）
+→ compute_pending(prev_day)   ← 首日信号在前一交易日预计算（T 信号 T+1 撮合）
 → for today in calendar: step(today, day_bars, conn)
 → stats.calculate_statistics → write_run_stats + status=completed（异常 → failed）
 ```
 
-### 4.2 step() 单日序列（engine.py:291-363，代码顺序）
+### 4.2 step() 单日序列（engine.py:555-630，代码顺序）
 
 ```
-_bars_to_dict → _save_state（事务回滚快照）
+bars_to_dict → _save_state（事务回滚快照）
 → corporate.adjust                    除权除息
 → 撮合（全部 T+1：执行昨日 pending）：
     target_value → rebalance_to_targets
     否则 manual_sell → manual_buy
     → exit_conditions（条件卖）
     → entry_conditions（条件买，最后执行吃当日释放现金）
-→ _settle                             估值 + 写库
-→ _compute_pending(today)             算次日 pending：
-    provider._as_of_date = today      ← 前视钳制锚点
+→ _settle                             估值（value_account）+ 写库
+→ compute_pending(today)              算次日 pending：
+    provider.set_as_of(today)         ← 前视钳制锚点
     持仓 holding_days+1, locked=False（T+1 解锁）
     → holding 模型分数注入 → on_fills → on_tick → select → 返回协议校验
     → 逐持仓 calc_conditions
@@ -244,7 +250,7 @@ _bars_to_dict → _save_state（事务回滚快照）
 异常 → _restore_state + 重抛
 ```
 
-### 4.3 select 返回协议（engine.py:404-541 校验）
+### 4.3 select 返回协议（engine.py:649-730 校验）
 
 `select()` 返回 dict，键：`buy` / `sell` / `target_value` / `sell_shares` / `buy_weights` /
 `buy_conditions`。互斥与校验：buy∩sell=∅；target_value ⊥ buy/sell；buy_weights 键==buy、
@@ -258,10 +264,10 @@ _bars_to_dict → _save_state（事务回滚快照）
 |---|---|
 | 日期格式 | 全仓 `YYYYMMDD` str；面板 MultiIndex(trade_date, symbol) |
 | 价格体系 | 撮合/成本/估值用**裸价**（open/close/high/low）；因子/排名用**后复权**（*_hfq = 裸价 × adj_factor，由 derive_fields 物化为 *_hfq 列）。不可混用 |
-| T+1 | 买入当日 `Holding.locked=True`，次日 _compute_pending 解锁；锁定期间条件单跳过 |
+| T+1 | 买入当日 `Holding.locked=True`，次日 compute_pending 解锁；锁定期间条件单跳过 |
 | 信号-撮合错期 | T 日 select/条件单声明 → T+1 日 step 撮合（首日信号在 prev_day 预计算） |
 | 前视屏蔽 | ①因子一次性因果物化（滚动窗口仅用 ≤ 当日）；②provider 查询按 _as_of_date 钳制到前一交易日；③T 信号 T+1 撮合。约定性保护，无 GuardedProvider 包装器 |
-| 软回退 vs Fail-Fast | 可选能力缺失（ST/行业/指数成分表）→ 告警后继续；明确依赖缺失（必需列/因子名/表单引用/meta v2）→ 加载或 preload 直接 ValueError |
+| 软回退 vs Fail-Fast | 可选能力缺失（ST/行业/指数成分表）→ 告警后继续；明确依赖缺失（必需列/因子名/表单引用/meta v3）→ 加载或 preload 直接 ValueError |
 | 鸭子类型 | backend 能力方法、strategy.on_fills/on_tick 均 getattr 探测，缺失降级 |
 | materialize_only | factor_specs 标记位：物化为列供 calc_conditions/模型特征读取，不参与评分；loader 自动为模型 features 追加 |
 | ML 分数列 | `ml_<name>`：panel scope 物化为面板列（裁切前）；holding scope 决策时点注入 bar dict。策略不得自行加载 ONNX 逐日推理 |
@@ -273,7 +279,7 @@ _bars_to_dict → _save_state（事务回滚快照）
 
 ## 6. 测试
 
-- `tests/conftest.py:66 MockDataBackend`：从 `tests/fixtures/*.parquet`（10 个文件，已提交）
+- `tests/conftest.py:67 MockDataBackend`：从 `tests/fixtures/*.parquet`（10 个文件，已提交）
   读数据，完整复刻 DataBackend 接口；helper：make_holding/make_account/make_bar
 - `tests/test_invariants/` 8 个不变量（16 测试，手动步进引擎）：
   INV1 账户恒等式 / INV2 手数整百 / INV3 现金非负 / INV4 T+1 锁定 /

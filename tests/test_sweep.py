@@ -5,7 +5,7 @@ import sys
 
 import yaml
 
-from scripts.sweep import expand_params, nested_set
+from research.sweep import expand_params, nested_set
 
 
 def test_nested_set_existing_key():

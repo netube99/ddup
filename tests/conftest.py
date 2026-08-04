@@ -9,7 +9,8 @@ from btcore.types import Account, Holding
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
-# 镜像 adapters/tushare.py 的 aux_tables：辅助日线表 LEFT JOIN 进 bars
+# 镜像 adapters/tushare.py 的 extra_fields：moneyflow/cyq_perf/margin_detail
+# 等辅助日线表的列与契约列一起 LEFT JOIN 进 bars
 _AUX_TABLES = ["moneyflow", "cyq_perf", "margin_detail"]
 
 # make_bar 的 up_limit/down_limit 缺省按主板 ±10% 推算；显式传 None 表示缺失

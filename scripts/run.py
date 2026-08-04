@@ -16,10 +16,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from adapters.tushare import TushareBackend
 from btcore.engine import Engine
-from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
+from research import cli_common
 from research.report import generate_report
 
 
@@ -48,7 +47,7 @@ def main() -> int:
     args = parser.parse_args()
 
     strategy = load_strategy(args.yaml)
-    provider = DataProvider(TushareBackend())
+    provider = cli_common.make_provider()
     try:
         engine = Engine(strategy, provider, initial_capital=args.capital, db_path=args.out)
 

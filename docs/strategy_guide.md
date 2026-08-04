@@ -1036,6 +1036,10 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 | `net_amount` | REAL | 净现金流 |
 | `reason` | TEXT | 备注 |
 
+**turnover 口径**：回测库 turnover = 滑点前名义成交额（price 为滑点后成交价，
+故 turnover ≠ price × shares）；实盘账本衍生库（research/live.py 回放）turnover =
+真实成交额（= price × shares，实盘中 price 即真实成交价，无滑点概念）。
+
 **debug_snapshots**（仅 `Engine(debug=True)` 写入，PK = (run_id, date)）：`run_id` / `date` / `snapshot_json`（account/pending/holdings_detail/bars_subset）。
 
 **其余表**：`holdings`（瞬态持仓快照，每次 run 开始清空，含 `conditions_json`）；`ml_predictions`（ML 分数落盘，PK = (run_id, date, symbol, model)，见 ml_guide）。

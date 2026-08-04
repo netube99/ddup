@@ -5,7 +5,6 @@ import pytest
 
 from btcore.factors.library import (
     compute_breadth,
-    compute_factor,
     compute_factors,
     load_library,
     resolve_closure,
@@ -94,14 +93,14 @@ class TestCompute:
             {"dv_ttm": [2.0, 3.0, 1.0], "pb": [1.0, 2.0, -1.0]},
             index=["A", "B", "C"],
         )
-        values = compute_factor("value", df)
+        values = compute_factors(["value"], df)["value"]
         assert values["A"] == pytest.approx(2.0)
         assert values["B"] == pytest.approx(1.5)
         assert pd.isna(values["C"])
 
     def test_ts_factor_on_panel(self):
         df = _panel(30)
-        values = compute_factor("mom20", df)
+        values = compute_factors(["mom20"], df)["mom20"]
         d = df.index.get_level_values("trade_date").max()
         close_a = df["close_hfq"].loc[:, "A"]
         assert values[(d, "A")] == pytest.approx(
@@ -112,9 +111,9 @@ class TestCompute:
         """引用未物化的命名因子时递归计算（zscore(mom20) 不依赖 mom20 列）。"""
         lib = load_library()
         df = _panel(30)
-        values = compute_factor("mom_z", df, lib)
+        values = compute_factors(["mom_z"], df, lib)["mom_z"]
         d = df.index.get_level_values("trade_date").max()
-        mom = compute_factor("mom20", df, lib).loc[d]
+        mom = compute_factors(["mom20"], df, lib)["mom20"].loc[d]
         assert values[(d, "A")] == pytest.approx(
             (mom["A"] - mom.mean()) / mom.std()
         )
@@ -122,7 +121,7 @@ class TestCompute:
     def test_unknown_name(self):
         df = pd.DataFrame({"close": [1.0]}, index=["A"])
         with pytest.raises(ValueError, match="可用"):
-            compute_factor("nope", df)
+            compute_factors(["nope"], df)
 
     def test_compute_factors_batch(self):
         df = _panel(30)
@@ -136,7 +135,7 @@ class TestCompute:
         bars = backend.query_bars(None, "20240603", "20240614")
         # fixture 区间短，用短窗口 ts 因子验证接口衔接
         lib = {"mom3": {"expr": "roc(close_hfq, 3)"}}
-        values = compute_factor("mom3", bars, lib)
+        values = compute_factors(["mom3"], bars, lib)["mom3"]
         assert values.index.names == ["trade_date", "symbol"]
         fwd = bars["pct_chg"].groupby(level="symbol").shift(-1)
         ic, _ = calc_ic(values, fwd, date_col="trade_date")
@@ -177,7 +176,7 @@ class TestComputeBreadth:
         lib = load_library(path)
         backend = MockDataBackend()
         with pytest.raises(ValueError, match="仅支持坍缩因子"):
-            compute_breadth("mom", backend, "20240603", "20240607", lib)
+            compute_breadth("mom", backend, lib, "20240603", "20240607")
 
     def test_collapse_matches_full_compute(self, tmp_path):
         """坍缩因子分块计算应与全量 compute_factors 一致。"""
@@ -197,7 +196,7 @@ class TestComputeBreadth:
 
         # 流式分块计算（chunk_days=5 覆盖全部日期避免边界效应）
         daily_stream = compute_breadth(
-            "pct_above", backend, "20240603", "20240614", lib, chunk_days=10
+            "pct_above", backend, lib, "20240603", "20240614", chunk_days=10
         )
 
         # 对齐日期比较
@@ -224,7 +223,7 @@ class TestComputeBreadth:
                 return []
 
         backend = EmptyCalBackend()
-        result = compute_breadth("pct_above", backend, "20240603", "20240614", lib)
+        result = compute_breadth("pct_above", backend, lib, "20240603", "20240614")
         assert isinstance(result, pd.Series)
         assert len(result) == 0
 
@@ -234,10 +233,94 @@ class TestComputeBreadth:
         backend = MockDataBackend()
         cal = backend.get_calendar("20240603", "20240628")
         # adv_dec_ratio = mean(roc(close_hfq, 1) > 0)，窗口 2 行
-        full = compute_breadth("adv_dec_ratio", backend, cal[0], cal[10], lib)
-        late = compute_breadth("adv_dec_ratio", backend, cal[3], cal[10], lib)
+        full = compute_breadth("adv_dec_ratio", backend, lib, cal[0], cal[10])
+        late = compute_breadth("adv_dec_ratio", backend, lib, cal[3], cal[10])
         assert full.loc[cal[3]] == pytest.approx(late.loc[cal[3]])
         assert full.loc[cal[3]] != 0.0
+
+    def test_log_mktcap_collapse_requests_total_mv(self, tmp_path):
+        """归并 plan 口径回归：log_mktcap 坍缩因子自动补请求 total_mv。
+
+        改动前手搓列推导只 expand_columns（伪列直接丢弃），从不补 total_mv，
+        ensure_pseudo_columns 取 df["total_mv"] 直接 KeyError。
+        """
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  mktcap_mean:\n    expr: \"mean(log_mktcap + close)\"\n",
+        )
+        lib = load_library(path)
+        backend = MockDataBackend()
+        result = compute_breadth(
+            "mktcap_mean", backend, lib, "20240603", "20240614"
+        )
+        assert len(result) > 0
+        assert result.notna().all()  # fixture total_mv 全正，log 后无 NaN
+
+    def test_idx_ret_collapse_needs_benchmark(self, tmp_path):
+        """归并 plan 口径回归：idx_ret 坍缩因子透传 benchmark 后可用。
+
+        改动前 ensure_pseudo_columns 拿不到 benchmark，引用 idx_ret 的坍缩
+        因子必抛 ValueError；不传 benchmark 仍须 fail-fast（与引擎同口径）。
+        """
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  idx_mean:\n    expr: \"mean(idx_ret + close)\"\n",
+        )
+        lib = load_library(path)
+        backend = MockDataBackend()
+        with pytest.raises(ValueError, match="benchmark"):
+            compute_breadth("idx_mean", backend, lib, "20240603", "20240614")
+        result = compute_breadth(
+            "idx_mean", backend, lib, "20240603", "20240614",
+            benchmark="000300.SH",
+        )
+        assert result.dropna().shape[0] > 0  # 首日 pct_change 为 NaN 属正常
+
+    def test_group_mean_values_match_hand_compute(self, tmp_path):
+        """行为不变回归：industry_mom 形态坍缩因子的值与手算一致。"""
+
+        class TinyBackend:
+            """4 股 × 5 日 × 2 行业的最小合成 backend（收盘价逐日不变）。"""
+
+            def __init__(self):
+                dates = ["20240603", "20240604", "20240605",
+                         "20240606", "20240607"]
+                self._cal = dates
+                idx = pd.MultiIndex.from_product(
+                    [dates, ["A", "B", "C", "D"]],
+                    names=["trade_date", "symbol"],
+                )
+                # A/B=IND1（均值 20），C/D=IND2（均值 30）
+                self._bars = pd.DataFrame(
+                    {"close": [10.0, 30.0, 20.0, 40.0] * len(dates)}, index=idx
+                )
+
+            def get_calendar(self, start, end):
+                return [d for d in self._cal if start <= d <= end]
+
+            def query_bars(self, symbols, start, end, columns=None):
+                dates = self._bars.index.get_level_values("trade_date")
+                df = self._bars[(dates >= start) & (dates <= end)].copy()
+                if columns is not None:
+                    df = df.loc[:, sorted(set(columns))]
+                return df
+
+            def get_stock_industries(self, ts_codes):
+                return {c: ("IND1" if c in ("A", "B") else "IND2")
+                        for c in ts_codes}
+
+        path = _write_lib(
+            tmp_path,
+            "factors:\n  ind_mean:\n    expr: \"group_mean(close, industry)\"\n",
+        )
+        lib = load_library(path)
+        result = compute_breadth(
+            "ind_mean", TinyBackend(), lib, "20240603", "20240607"
+        )
+        assert list(result.index) == TinyBackend().get_calendar("20240603",
+                                                                "20240607")
+        # 日频标量 = 每日首行（symbol A，IND1）的分组均值 = (10+30)/2
+        assert (result == 20.0).all()
 
 
 class TestBoolSumSemantics:
@@ -272,18 +355,20 @@ class TestBoolSumSemantics:
 
     def test_ema_bullish_is_arithmetic_score(self):
         df = self._panel()
-        values = compute_factor("ema_bullish", df)
+        values = compute_factors(["ema_bullish"], df)["ema_bullish"]
         expect = (
             (df["ema_5"] > df["ema_20"]).astype(int)
             + (df["ema_20"] > df["ema_60"]).astype(int)
             + (df["ema_60"] > df["ema_250"]).astype(int)
         )
-        pd.testing.assert_series_equal(values, expect.astype(float), check_dtype=False)
+        pd.testing.assert_series_equal(
+            values, expect.astype(float).rename(values.name), check_dtype=False
+        )
         assert values.max() == 3.0  # 全多头行必须得 3 分（修复前 OR 只得 1）
 
     def test_bear_signal_count_is_arithmetic_score(self):
         df = self._panel()
-        values = compute_factor("bear_signal_count", df)
+        values = compute_factors(["bear_signal_count"], df)["bear_signal_count"]
         ema_sum = (
             (df["ema_5"] > df["ema_20"]).astype(int)
             + (df["ema_20"] > df["ema_60"]).astype(int)
@@ -295,7 +380,9 @@ class TestBoolSumSemantics:
             + (ema_sum < 3).astype(int)
             + (df["dmi_pdi"] < df["dmi_mdi"]).astype(int)
         )
-        pd.testing.assert_series_equal(values, expect.astype(float), check_dtype=False)
+        pd.testing.assert_series_equal(
+            values, expect.astype(float).rename(values.name), check_dtype=False
+        )
         assert values.max() >= 2.0  # 必须出现多信号叠加值（修复前 OR 只得 0/1）
 
 
@@ -323,7 +410,7 @@ class TestBreadthGroupMean:
         )
         lib = load_library(path)
         result = compute_breadth(
-            "ind_mom1", backend, "20240603", "20240628", lib, chunk_days=10
+            "ind_mom1", backend, lib, "20240603", "20240628", chunk_days=10
         )
         assert isinstance(result, pd.Series)
         assert len(result) > 0

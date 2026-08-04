@@ -103,7 +103,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
     trades = []
     for idx, symbol in enumerate(eligible):
         n_left = len(eligible) - idx
-        # 循环内实时复查（引擎 _compute_pending 已查重，这里兜底）：
+        # 循环内实时复查（引擎 compute_pending 已查重，这里兜底）：
         # 名单重复或前一笔已成交时跳过，避免重复扣款 + 持仓覆盖
         if symbol in account.holdings:
             continue

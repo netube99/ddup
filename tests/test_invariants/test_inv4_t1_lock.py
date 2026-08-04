@@ -29,12 +29,12 @@ class Inv4Strategy:
 
 
 def test_inv4_t1_lock_unlocks_after_step(make_engine):
-    """After engine.step(), _compute_pending runs and unlocks all holdings."""
+    """After engine.step(), compute_pending runs and unlocks all holdings."""
     strategy = Inv4Strategy()
     engine, calendar = make_engine(strategy, "20240610", max_positions=1)
     calendar = calendar[:2]
 
-    engine._compute_pending(calendar[0])
+    engine.compute_pending(calendar[0])
 
     conn = init_backtest_db(":memory:")
     try:
@@ -42,7 +42,7 @@ def test_inv4_t1_lock_unlocks_after_step(make_engine):
         holdings = list(engine.account.holdings.values())
         assert len(holdings) > 0, "Expected at least one holding after buy"
 
-        # After step(), _compute_pending has run and unlocked holdings
+        # After step(), compute_pending has run and unlocked holdings
         for h in holdings:
             assert not h.locked, (
                 f"INV4 FAILED: holding should be unlocked after step, "

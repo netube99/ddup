@@ -17,13 +17,12 @@
 
 import importlib
 import logging
-from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
 
 from btcore.factors.library import load_library, resolve_closure, resolve_spec
-from btcore.filters import INDEX_LOOKBACK_DAYS
+from btcore.filters import resolve_index_universe
 from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL, parse_models
 from btcore.strategy import Strategy
 
@@ -154,8 +153,16 @@ def build_strategy(
         # 策略可经 ConditionBuilder 的 model_exit 规则自行生成该条件单
         from btcore.ml import conditions as ml_conditions
         ml_conditions.register()
-    _attach_index_universe(strategy, rules)
-    _attach_factor_universe(strategy, rules)
+    _attach_universe(
+        strategy, rules, "index_universe", "get_universe",
+        "index_universe 已开启但 backend 未提供 get_index_members，"
+        "白名单规则不生效",
+    )
+    _attach_universe(
+        strategy, rules, "factor_universe", "get_factor_universe",
+        "factor_universe 已配置但 backend 未提供 get_index_members，"
+        "因子计算域不生效，回退为交易域",
+    )
 
     return strategy
 
@@ -209,69 +216,36 @@ def load_strategy(path: str) -> Strategy:
     )
 
 
-def _attach_index_universe(strategy: Strategy, filter_rules: dict) -> None:
-    """filter_rules.index_universe 配置且策略未自定义 get_universe 时，
-    生成默认 get_universe：指数成分区间并集，供引擎 preload 裁剪数据量。
+def _attach_universe(
+    strategy: Strategy,
+    filter_rules: dict,
+    rule_key: str,
+    hook_name: str,
+    warn_text: str,
+) -> None:
+    """filter_rules[rule_key] 配置且策略未自定义 hook_name 时，生成默认宇宙
+    hook：指数成分区间并集，供引擎 preload 裁剪数据量。
     逐日精确成分仍由 StockFilter 在 filter() 里按快照取交集。
     """
-    codes = filter_rules.get("index_universe")
-    if not codes or type(strategy).get_universe is not Strategy.get_universe:
-        return
-    codes = list(codes)
-    warned = False
-
-    def get_universe(provider, start: str, end: str) -> list[str] | None:
-        nonlocal warned
-        if not hasattr(provider.backend, "get_index_members"):
-            if not warned:
-                warned = True
-                logger.warning(
-                    "index_universe 已开启但 backend 未提供 get_index_members，"
-                    "白名单规则不生效"
-                )
-            return None
-        lookback = (
-            date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
-        ).strftime("%Y%m%d")
-        snapshots = provider.backend.get_index_members(codes, lookback, end)
-        if not snapshots:
-            return None
-        return sorted(set().union(*snapshots.values()))
-
-    strategy.get_universe = get_universe
-
-
-def _attach_factor_universe(strategy: Strategy, filter_rules: dict) -> None:
-    """filter_rules.factor_universe 配置且策略未自定义 get_factor_universe 时，
-    生成默认 get_factor_universe：指数成分区间并集，供引擎 preload 加载因子计算所需数据。
-    """
-    codes = filter_rules.get("factor_universe")
+    codes = filter_rules.get(rule_key)
     if not codes:
         return
-    if type(strategy).get_factor_universe is not Strategy.get_factor_universe:
+    # 策略自定义 hook 时不挂接
+    if getattr(type(strategy), hook_name) is not getattr(Strategy, hook_name):
         return
     codes = list(codes)
     warned = False
 
-    def get_factor_universe(provider, start: str, end: str) -> list[str] | None:
+    def universe_hook(provider, start: str, end: str) -> list[str] | None:
         nonlocal warned
         if not hasattr(provider.backend, "get_index_members"):
             if not warned:
                 warned = True
-                logger.warning(
-                    "factor_universe 已配置但 backend 未提供 get_index_members，"
-                    "因子计算域不生效，回退为交易域"
-                )
+                logger.warning(warn_text)
             return None
-        lookback = (
-            date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
-        ).strftime("%Y%m%d")
-        snapshots = provider.backend.get_index_members(codes, lookback, end)
-        if not snapshots:
-            return None
-        return sorted(set().union(*snapshots.values()))
+        return resolve_index_universe(provider.backend, codes, start, end)
 
-    strategy.get_factor_universe = get_factor_universe
+    setattr(strategy, hook_name, universe_hook)
 
 
 def _resolve_class(spec, path: str) -> type:

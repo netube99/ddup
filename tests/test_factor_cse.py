@@ -97,7 +97,7 @@ class TestMaterializeEquivalence:
         }
         p = plan.build_factor_plan(nodes, ["f1", "f2"])
         assert p["cse_temp"]                          # 确实发生了提取
-        plan.materialize(panel, None, p, nodes)
+        plan.materialize(panel, None, p)
         ref = self._reference(panel.copy(), nodes)
         for col in ("f1", "f2"):
             assert ((panel[col] - ref[col]).abs().fillna(0) < 1e-12).all(), col
@@ -111,7 +111,7 @@ class TestMaterializeEquivalence:
             "b": {"expr": "roc(close_hfq, 20)"},
         }
         p = plan.build_factor_plan(nodes, ["a", "b"])
-        plan.materialize(panel, None, p, nodes)
+        plan.materialize(panel, None, p)
         assert ((panel["a"] - panel["b"]).abs().fillna(0) < 1e-12).all()
         assert (panel["a"].isna() == panel["b"].isna()).all()
 
@@ -121,7 +121,7 @@ class TestMaterializeEquivalence:
             "f2": {"expr": "ma(close_hfq, 20) * 2"},
         }
         p = plan.build_factor_plan(nodes, ["f1", "f2"])
-        plan.materialize(panel, None, p, nodes)
+        plan.materialize(panel, None, p)
         ref = self._reference(panel.copy(), nodes)
         assert (panel["f1"].isna() == ref["f1"].isna()).all()
         assert ((panel["f1"] - ref["f1"]).abs().fillna(0) < 1e-12).all()

@@ -29,7 +29,7 @@ def test_inv1_account_identity(make_engine):
     engine, calendar = make_engine(strategy, "20240607", max_positions=10)
     calendar = calendar[:2]
 
-    engine._compute_pending(calendar[0])
+    engine.compute_pending(calendar[0])
 
     conn = init_backtest_db(":memory:")
     try:
