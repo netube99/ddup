@@ -128,8 +128,12 @@ def write_run(conn: sqlite3.Connection, **kwargs) -> int:
 def write_daily(conn: sqlite3.Connection, run_id: int, date: str, cash: float,
                 total_value: float, daily_pnl: float, cumulative_pnl: float,
                 initial_capital: float, n_holdings: int = 0):
+    # 显式列名（HYG-06）：schema 增列时位置 VALUES 会错位
     conn.execute(
-        "INSERT OR REPLACE INTO account_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO account_daily"
+        " (run_id, date, cash, total_value, daily_pnl, cumulative_pnl,"
+        " initial_capital, n_holdings)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (run_id, date, cash, total_value, daily_pnl, cumulative_pnl,
          initial_capital, n_holdings),
     )
@@ -137,9 +141,14 @@ def write_daily(conn: sqlite3.Connection, run_id: int, date: str, cash: float,
 
 def write_holdings(conn: sqlite3.Connection, account):
     conn.execute("DELETE FROM holdings")
+    # 循环外取一次时间戳（HYG-06）：同一快照所有行共享 updated_at
+    updated_at = datetime.datetime.now().isoformat()
     for symbol, holding in account.holdings.items():
         conn.execute(
-            "INSERT INTO holdings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO holdings"
+            " (symbol, entry_date, entry_price, shares, cost, conditions_json,"
+            " last_price, holding_days, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 symbol,
                 holding.entry_date,
@@ -149,7 +158,7 @@ def write_holdings(conn: sqlite3.Connection, account):
                 json.dumps(holding.conditions, default=str),
                 holding.last_price,
                 holding.holding_days,
-                datetime.datetime.now().isoformat(),
+                updated_at,
             ),
         )
 

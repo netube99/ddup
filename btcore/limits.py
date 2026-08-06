@@ -42,7 +42,9 @@ def _missing(v) -> bool:
 def _get_plate_rate(symbol: str, today: str) -> float | None:
     if symbol.endswith(".BJ"):
         return PLATE_LIMIT_RULES["BJ"]["rate"]
-    if symbol.startswith("688"):
+    if symbol.startswith(("688", "689")):
+        # 科创板 688 + 科创板 CDR 689 同规则（EDGE-04：689 此前漏入
+        # default 10%，与 688 同为 20%）
         return PLATE_LIMIT_RULES["688"]["rate"]
     prefix = symbol[:3]
     if prefix.startswith("30"):

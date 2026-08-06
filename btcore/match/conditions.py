@@ -1,9 +1,9 @@
 import logging
 
 from btcore.match.core import (
-    INVALID_PRICE,
     LIMIT_UNKNOWN,
-    LIMIT_UP,
+    _cash_affordable,
+    _warn_skip_reason,
     apply_partial_sell,
     cap_by_volume,
     check_tradable,
@@ -88,13 +88,11 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
         if bar is None:
             _warn("%s 无当日行情（停牌/缺数据）, 跳过条件单", symbol)
             continue
-
-        trade_date = bar_get(bar, "trade_date", "")
-        _, down = limits_fn(symbol, bar, trade_date)
-        if down is None:
-            _warn("[%s] %s 涨跌停无法判定, 跳过条件单",
-                           trade_date, symbol)
+        # PERF-04: 空条件持仓不白算涨跌停（limits_fn 含 Decimal quantize，
+        # 相对昂贵）；涨跌停判定也只在条件触发后才需要
+        if not holding.conditions:
             continue
+        trade_date = bar_get(bar, "trade_date", "")
 
         for cond in holding.conditions:
             # 防御：engine.compute_pending 已 validate_condition_types 前置校验，
@@ -107,6 +105,14 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             executed, fill_price, log_params = handler(holding, cond, bar)
             if not executed:
                 continue
+            # 条件已触发，此时才需要 down（PERF-04）；LIMIT_UNKNOWN 语义
+            # 保持：down 缺失时跳过该持仓（后续条件单同样无法判定）
+            _, down = limits_fn(symbol, bar, trade_date)
+            if down is None:
+                _warn_skip_reason(
+                    LIMIT_UNKNOWN, "SELL", _warn, trade_date, symbol
+                )
+                break
             if not is_valid_price(fill_price):
                 _warn(
                     "[%s] %s 条件单 %s 成交价非法 (%s), 顺延",
@@ -145,15 +151,19 @@ def handle_stop_loss(holding, cond: dict, bar) -> tuple:
 
     成交规则: open <= stop → fill at open;
              low <= stop 且 open > stop → fill at stop;
-             否则不触发。显式 None 的 open/low 视为不触发。
+             否则不触发。缺 open/low 或价格非正视为不触发（EDGE-01：
+             与 take_profit/limit_buy 缺键语义对齐——bar_get 回退 0.0 会让
+             0 <= stop 恒真 → 每日"成交价非法顺延"误告警）。
     """
     stop_price = cond["price"]
-    open_price = bar_get(bar, "open", 0.0)
-    low_price = bar_get(bar, "low", open_price)
+    open_price = bar_get(bar, "open")
+    low_price = bar_get(bar, "low")
 
-    if open_price is not None and open_price <= stop_price:
+    if (open_price is not None and is_valid_price(open_price)
+            and open_price <= stop_price):
         return True, open_price, {"trigger_price": stop_price}
-    if low_price is not None and low_price <= stop_price:
+    if (low_price is not None and is_valid_price(low_price)
+            and low_price <= stop_price):
         return True, stop_price, {"trigger_price": stop_price}
     return False, 0.0, {"trigger_price": stop_price}
 
@@ -217,17 +227,8 @@ def entry_conditions(account, bars: dict, orders: list[dict],
 
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", fill_price, up, down)
-        if reason == LIMIT_UNKNOWN:
-            _warn("[%s] %s 涨跌停无法判定, 跳过条件买入",
-                           trade_date, symbol)
-            continue
-        if reason == INVALID_PRICE:
-            _warn("[%s] %s 条件买入成交价非法 (%s), 跳过",
-                           trade_date, symbol, fill_price)
-            continue
-        if reason == LIMIT_UP:
-            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
-                           trade_date, symbol, fill_price, up)
+        if reason is not None:
+            _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue
 
         if order.get("shares") is not None:
@@ -240,12 +241,12 @@ def entry_conditions(account, bars: dict, orders: list[dict],
                            trade_date, symbol)
             continue
 
-        est_price = slip_fn(fill_price,
-                           account.slippage_ticks if slip_ticks is None else slip_ticks, 1)
-        est_costs = costs_fn("BUY", est_price * shares)
-        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
-        if account.cash < est_net:
-            _warn("[%s] %s 条件买入现金不足 (need=%.2f cash=%.2f) 跳过",
+        affordable, est_net = _cash_affordable(
+            account, fill_price, shares, slip_fn, costs_fn,
+            slip_ticks=slip_ticks,
+        )
+        if not affordable:
+            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
                            trade_date, symbol, est_net, account.cash)
             continue
 

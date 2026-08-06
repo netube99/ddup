@@ -127,6 +127,20 @@ class GenericSQLBackend(DataBackend):
         self._conn.row_factory = sqlite3.Row
         self._check_schema()
         self._div_idx: dict[str, dict] | None = None
+        # PERF-08：可选分红查询窗口（ex_date BETWEEN start AND end，YYYYMMDD）；
+        # 引擎 prepare() 开头经 getattr 探测调用。未设置时 _div_idx 首次构建
+        # 保持全表加载现状
+        self._div_bounds: tuple[str, str] | None = None
+
+    def set_dividend_bounds(self, start: str, end: str) -> None:
+        """设置分红查询窗口（ex_date BETWEEN start AND end，YYYYMMDD）。
+
+        首次构建 _div_idx 时按窗口剪枝，避免整张 dividend 表全量拉入内存；
+        未调用时行为与现状完全一致。引擎在 prepare() 开头调用，应传入回测
+        [start, end] 区间。若 _div_idx 已构建，本调用不重建索引（窗口应
+        在任何 get_dividends_on_date 之前设置）。
+        """
+        self._div_bounds = (start, end)
 
     def close(self):
         self._conn.close()
@@ -195,7 +209,14 @@ class GenericSQLBackend(DataBackend):
             sec = self._c["sections"]["dividends"]
             sym, _ = self._keys(sec["table"])
             frag, fparams = self._filter_sql(sec["table"])
-            where = f" WHERE {frag}" if frag else ""
+            # PERF-08：有窗口时按 ex_date 剪枝（ex_date 列名来自表单
+            # dividend_ex_date 配置，经 _q() 引用真实物理列名）
+            where_parts = [frag] if frag else []
+            bounds_params: list = []
+            if self._div_bounds is not None:
+                where_parts.append(f"{_q(sec['ex_date'])} BETWEEN ? AND ?")
+                bounds_params = [self._div_bounds[0], self._div_bounds[1]]
+            where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
             table = sec["table"]
             # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
             # 事件级归并）；通用后端无这两列时退化到值级归并
@@ -210,7 +231,7 @@ class GenericSQLBackend(DataBackend):
                 f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
                 f"{sel_extra}"
                 f" FROM {_q(table)}{where}{order_by}",
-                fparams,
+                (*fparams, *bounds_params),
             ).fetchall()
             if has_event_cols:
                 self._div_idx = self._build_div_idx_event(rows)
@@ -320,6 +341,19 @@ class GenericSQLBackend(DataBackend):
                                sec["adj_table"], code)
                 merged["hfq_close"] = merged["close"]
             else:
+                # EDGE-11：adj 表部分日期缺失 → merged adj_factor NaN → hfq_close
+                # NaN 洞 → 下游 pct_change/dropna 静默出洞；检测占比并告警。
+                # 全空路径已在上方告警，这里只覆盖部分缺失（不重复告警）
+                missing_adj = merged["adj_factor"].isna()
+                missing_n = int(missing_adj.sum())
+                if missing_n > 0:
+                    miss_dates = merged.loc[missing_adj, "trade_date"]
+                    logger.warning(
+                        "benchmark %s 复权因子缺失 %d/%d 日（%s ~ %s），"
+                        "hfq_close 将出现 NaN 洞",
+                        code, missing_n, len(merged),
+                        miss_dates.min(), miss_dates.max(),
+                    )
                 # hfq 锚定区间首日：close * adj_factor / first_adj
                 first_adj = adj.iloc[0]["adj_factor"]
                 merged["hfq_close"] = (

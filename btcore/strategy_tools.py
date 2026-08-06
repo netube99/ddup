@@ -13,6 +13,15 @@ from btcore.types import bar_get
 
 logger = logging.getLogger(__name__)
 
+# conditions 声明式规则顶层键（与 strategy_loader._CONDITION_KEYS 一致；
+# loader 路径先行校验，这里覆盖 cls(config=...) 直接构造路径——EDGE-09）。
+# 校验只查顶层规则键，不校验条件单 dict 的 type 名（type 由
+# register_condition_handler 注册集 + validate_condition_types 管辖，
+# 自定义 handler 类型不受影响）。
+_CONDITION_KEYS = frozenset({
+    "stop_loss_pct", "take_profit_pct", "trailing_pct", "model_exit",
+})
+
 
 def bars_to_df(bars: dict) -> pd.DataFrame:
     """当日截面 dict-of-dicts → symbol 索引的 DataFrame，供 eval_factor_specs 使用。"""
@@ -44,19 +53,15 @@ def eval_factor_specs(
 
     for spec in factor_specs or []:
         name = spec["name"]
-        if spec.get("materialize_only"):
-            if name not in df.columns:
-                raise ValueError(
-                    f"因子列 {name!r} 不在截面数据里——引擎未物化"
-                    "（策略缺少 FACTOR_NODES？请经 strategy_loader 加载）"
-                )
-            factor_df[name] = df[name]
-            continue
+        # DUP-08a: 列校验提到循环顶部，materialize_only 与评分分支共用
         if name not in df.columns:
             raise ValueError(
                 f"因子列 {name!r} 不在截面数据里——引擎未物化"
                 "（策略缺少 FACTOR_NODES？请经 strategy_loader 加载）"
             )
+        if spec.get("materialize_only"):
+            factor_df[name] = df[name]
+            continue
         values = df[name]
         factor_df[name] = values
         weight = float(spec.get("weight", 1.0))
@@ -87,8 +92,41 @@ class ConditionBuilder:
     """
 
     def __init__(self, rules: dict):
-        self._rules = rules or {}
+        rules = rules or {}
+        self._validate_rules(rules)
+        self._rules = rules
         self._high: dict[str, float] = {}
+
+    @staticmethod
+    def _validate_rules(rules: dict) -> None:
+        """条件声明顶层键/取值校验（与 strategy_loader._validate_conditions
+        同口径，覆盖程序化直接构造路径——EDGE-09）。"""
+        if not isinstance(rules, dict):
+            raise ValueError("conditions 必须是 dict")
+        for key, value in rules.items():
+            if key not in _CONDITION_KEYS:
+                raise ValueError(
+                    f"未知 conditions 键 {key!r}，支持: {sorted(_CONDITION_KEYS)}"
+                )
+            if key == "model_exit":
+                # [{model, threshold}]：holding scope 模型分数超阈值时生成 ML_EXIT
+                if not isinstance(value, list):
+                    raise ValueError("conditions.model_exit 必须是 list")
+                for i, rule in enumerate(value):
+                    if not isinstance(rule, dict) or "model" not in rule:
+                        raise ValueError(
+                            f"conditions.model_exit[{i}] 必须是含 model 键的 mapping"
+                        )
+                    th = rule.get("threshold", 0.5)
+                    if not isinstance(th, (int, float)) or not 0 < th < 1:
+                        raise ValueError(
+                            f"conditions.model_exit[{i}].threshold 必须 ∈ (0,1): {th!r}"
+                        )
+                continue
+            if not isinstance(value, (int, float)) or not 0 < value < 1:
+                raise ValueError(
+                    f"conditions.{key} 必须是 (0,1) 内的数值: {value!r}"
+                )
 
     def calc(self, symbol, entry_price, bar, holding_days) -> list[dict]:
         """与 Strategy.calc_conditions 同签名，返回条件单 dict 列表。"""

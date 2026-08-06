@@ -1,10 +1,8 @@
 import logging
 
 from btcore.match.core import (
-    INVALID_PRICE,
-    LIMIT_DOWN,
-    LIMIT_UNKNOWN,
-    LIMIT_UP,
+    _cash_affordable,
+    _warn_skip_reason,
     apply_partial_sell,
     cap_by_volume,
     check_tradable,
@@ -34,7 +32,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
     trades = []
     for symbol in sell_symbols:
         if symbol not in account.holdings:
-            logger.info("卖出名单含未持仓标的 %s, 跳过", symbol)
+            # EDGE-06: 走 _warn（此前 logger.info 不响应 quiet_skips）
+            _warn("卖出名单含未持仓标的 %s, 跳过", symbol)
             continue
         holding = account.holdings[symbol]
         bar = bars.get(symbol)
@@ -47,17 +46,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
 
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("SELL", exec_px, up, down)
-        if reason == LIMIT_UNKNOWN:
-            _warn("[%s] %s 涨跌停无法判定, 跳过卖出",
-                           trade_date, symbol)
-            continue
-        if reason == INVALID_PRICE:
-            _warn("[%s] %s 成交价非法 (%s), 跳过卖出",
-                           trade_date, symbol, exec_px)
-            continue
-        if reason == LIMIT_DOWN:
-            _warn("[%s] %s 跌停不卖, fill=%s limit_down=%s",
-                           trade_date, symbol, exec_px, down)
+        if reason is not None:
+            _warn_skip_reason(reason, "SELL", _warn, trade_date, symbol)
             continue
 
         desired = holding.shares if shares_map is None else shares_map.get(
@@ -120,17 +110,8 @@ def manual_buy(account, bars: dict, buy_symbols: list,
 
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", exec_px, up, down)
-        if reason == LIMIT_UNKNOWN:
-            _warn("[%s] %s 涨跌停无法判定, 跳过买入",
-                           trade_date, symbol)
-            continue
-        if reason == INVALID_PRICE:
-            _warn("[%s] %s 成交价非法 (%s), 跳过买入",
-                           trade_date, symbol, exec_px)
-            continue
-        if reason == LIMIT_UP:
-            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
-                           trade_date, symbol, exec_px, up)
+        if reason is not None:
+            _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue
 
         if weights_map is not None:
@@ -145,10 +126,10 @@ def manual_buy(account, bars: dict, buy_symbols: list,
                            trade_date, symbol, exec_px)
             continue
 
-        est_price = slip_fn(exec_px, account.slippage_ticks, 1)
-        est_costs = costs_fn("BUY", est_price * shares)
-        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
-        if account.cash < est_net:
+        affordable, est_net = _cash_affordable(
+            account, exec_px, shares, slip_fn, costs_fn
+        )
+        if not affordable:
             _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
                            trade_date, symbol, est_net, account.cash)
             continue
@@ -179,7 +160,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
     """按目标市值调仓（trigger="TARGET"）。先卖后买释放现金。
 
     只调整出现在 targets 里的标的；未列出的持仓不动（不自动清仓），
-    target=0 显式清仓（零碎股一并卖出，卖出不要求整手）。
+    target=0 显式清仓：零碎股一并卖出（卖出不要求整手），且不受成交量
+    cap 截断（EDGE-02：截断会残留持仓且当日不重试）。
     加仓按加权均价更新 entry_price；当天新买/加仓部分会把整个持仓
     锁一天（locked 是持仓级布尔，保守行为），次日统一解锁。
     """
@@ -212,29 +194,22 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
 
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("SELL", exec_px, up, down)
-        if reason == LIMIT_UNKNOWN:
-            _warn("[%s] %s 涨跌停无法判定, 跳过卖出",
-                           trade_date, symbol)
-            continue
-        if reason == INVALID_PRICE:
-            _warn("[%s] %s 成交价非法 (%s), 跳过卖出",
-                           trade_date, symbol, exec_px)
-            continue
-        if reason == LIMIT_DOWN:
-            _warn("[%s] %s 跌停不卖, fill=%s limit_down=%s",
-                           trade_date, symbol, exec_px, down)
+        if reason is not None:
+            _warn_skip_reason(reason, "SELL", _warn, trade_date, symbol)
             continue
 
         if full_exit:
-            # 显式清仓: 零碎股一并卖出（卖出不要求整手）
+            # 显式清仓: 零碎股一并卖出（卖出不要求整手），不受成交量 cap
+            # 截断（EDGE-02：截断后残留持仓且当日不重试）
             desired = holding.shares
+            shares = desired
         else:
             desired = min(int(amount / exec_px / 100) * 100, holding.shares)
-        shares = cap_by_volume(bar, desired, account)
-        if shares < 100:
-            _warn("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
-                           trade_date, symbol)
-            continue
+            shares = cap_by_volume(bar, desired, account)
+            if shares < 100:
+                _warn("[%s] %s 可卖股数不足 100 (受成交量约束), 跳过",
+                               trade_date, symbol)
+                continue
 
         trade = execute_sell(account, holding, bar, exec_px, "TARGET",
                              costs_fn, slip_fn, shares=shares)
@@ -262,17 +237,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
 
         up, down = limits_fn(symbol, bar, trade_date)
         reason = check_tradable("BUY", exec_px, up, down)
-        if reason == LIMIT_UNKNOWN:
-            _warn("[%s] %s 涨跌停无法判定, 跳过买入",
-                           trade_date, symbol)
-            continue
-        if reason == INVALID_PRICE:
-            _warn("[%s] %s 成交价非法 (%s), 跳过买入",
-                           trade_date, symbol, exec_px)
-            continue
-        if reason == LIMIT_UP:
-            _warn("[%s] %s 涨停不买, price=%s limit_up=%s",
-                           trade_date, symbol, exec_px, up)
+        if reason is not None:
+            _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue
 
         shares = int(amount / exec_px / 100) * 100
@@ -282,10 +248,10 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
                            trade_date, symbol)
             continue
 
-        est_price = slip_fn(exec_px, account.slippage_ticks, 1)
-        est_costs = costs_fn("BUY", est_price * shares)
-        est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
-        if account.cash < est_net:
+        affordable, est_net = _cash_affordable(
+            account, exec_px, shares, slip_fn, costs_fn
+        )
+        if not affordable:
             _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
                            trade_date, symbol, est_net, account.cash)
             continue

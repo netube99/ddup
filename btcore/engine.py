@@ -1,4 +1,5 @@
 import copy
+import difflib
 import json
 import logging
 import math
@@ -23,6 +24,22 @@ _SELECT_KEYS = frozenset({
     "buy", "sell", "buy_conditions", "target_value",
     "sell_shares", "buy_weights", "sell_reasons",
 })
+
+# 引擎消费的全部 config 键（_validate_engine_config + Engine.__init__ +
+# make_costs_fn + Strategy 侧 conditions）；EDGE-05 未知键 typo 告警的比对集。
+# 策略自定义键不在其中且与已知键编辑距离远，不会误报。
+_ENGINE_CONFIG_KEYS = frozenset({
+    "slippage_ticks", "condition_slippage_ticks", "order_volume_ratio",
+    "execution_price", "initial_capital", "max_positions", "benchmark",
+    "quiet_skips", "ml_log",
+    "commission_rate", "min_commission", "stamp_tax_rate",
+    "transfer_fee_rate",
+    "conditions", "models_meta",
+})
+
+# 因子物化验证 issue 的合法 level → 日志方法白名单（EDGE-08）。
+# 未知 level 按 warning 处理并告警，杜绝 getattr(logger, level) 崩 run。
+_FACTOR_ISSUE_LEVELS = {"warning": logger.warning, "error": logger.error}
 
 
 def _check_symbol_list(symbols: list, which: str) -> None:
@@ -62,15 +79,64 @@ def _validate_engine_config(config: dict) -> None:
             not isinstance(order_volume_ratio, (int, float))
             or isinstance(order_volume_ratio, bool)
             or not math.isfinite(order_volume_ratio)
-            or order_volume_ratio <= 0):
+            or order_volume_ratio <= 0 or order_volume_ratio > 1):
+        # EDGE-03: >1 时 cap_by_volume 可超当日成交量（物理不可能），拒掉
         raise ValueError(
-            f"order_volume_ratio 必须是正数或 None: {order_volume_ratio!r}"
+            f"order_volume_ratio 必须是 (0,1] 内的数值或 None: "
+            f"{order_volume_ratio!r}"
         )
     execution_price = config.get("execution_price", "open")
     if execution_price not in ("open", "close"):
         raise ValueError(
             f"execution_price 只支持 'open'/'close': {execution_price!r}"
         )
+
+    # EDGE-05: 与已知引擎键编辑距离小的未知键发 WARNING（防 typo 静默回退
+    # 默认值，如 slippage_tick / commision_rate / max_position）；
+    # 策略自定义键与已知键距离远，不告警
+    for key in config:
+        if key in _ENGINE_CONFIG_KEYS:
+            continue
+        match = difflib.get_close_matches(
+            key, _ENGINE_CONFIG_KEYS, n=1, cutoff=0.6
+        )
+        if match:
+            logger.warning(
+                "config 含未知键 %r（将被忽略，疑似 typo，最接近已知键: %r）",
+                key, match[0],
+            )
+
+
+def _validate_buy_conditions(conds: list) -> list:
+    """buy_conditions 协议校验：结构 / 必填键 / 价格 / value-shares 二选一。
+
+    从 _validate_select_actions 拆出（DUP-03），行为不变；与 sell/buy/
+    target_value 的交叉冲突校验仍留在调用方。
+    """
+    if not isinstance(conds, list):
+        raise ValueError("buy_conditions 必须是订单 dict 的 list")
+    for i, order in enumerate(conds):
+        if not isinstance(order, dict):
+            raise ValueError(f"buy_conditions[{i}] 必须是 dict: {order!r}")
+        missing = {"symbol", "type", "price"} - set(order)
+        if missing:
+            raise ValueError(f"buy_conditions[{i}] 缺必填键: {missing}")
+        if not _is_valid_positive(order["price"]):
+            raise ValueError(
+                f"buy_conditions[{i}].price 必须是正数: {order['price']!r}"
+            )
+        has_value = order.get("value") is not None
+        has_shares = order.get("shares") is not None
+        if has_value == has_shares:
+            raise ValueError(
+                f"buy_conditions[{i}] 必须在 value/shares 中恰填一个"
+            )
+        sizing = order.get("value") if has_value else order.get("shares")
+        if not _is_valid_positive(sizing):
+            raise ValueError(
+                f"buy_conditions[{i}] value/shares 必须是正数: {sizing!r}"
+            )
+    return conds
 
 
 def _validate_select_actions(actions, on_tick_result):
@@ -180,30 +246,7 @@ def _validate_select_actions(actions, on_tick_result):
         if total_w > 1.0 + 1e-10:
             raise ValueError(f"buy_weights 权重之和必须 ≤ 1: {total_w}")
 
-    buy_conds = actions.get("buy_conditions") or []
-    if not isinstance(buy_conds, list):
-        raise ValueError("buy_conditions 必须是订单 dict 的 list")
-    for i, order in enumerate(buy_conds):
-        if not isinstance(order, dict):
-            raise ValueError(f"buy_conditions[{i}] 必须是 dict: {order!r}")
-        missing = {"symbol", "type", "price"} - set(order)
-        if missing:
-            raise ValueError(f"buy_conditions[{i}] 缺必填键: {missing}")
-        if not _is_valid_positive(order["price"]):
-            raise ValueError(
-                f"buy_conditions[{i}].price 必须是正数: {order['price']!r}"
-            )
-        has_value = order.get("value") is not None
-        has_shares = order.get("shares") is not None
-        if has_value == has_shares:
-            raise ValueError(
-                f"buy_conditions[{i}] 必须在 value/shares 中恰填一个"
-            )
-        sizing = order.get("value") if has_value else order.get("shares")
-        if not _is_valid_positive(sizing):
-            raise ValueError(
-                f"buy_conditions[{i}] value/shares 必须是正数: {sizing!r}"
-            )
+    buy_conds = _validate_buy_conditions(actions.get("buy_conditions") or [])
     bc_symbols = {o["symbol"] for o in buy_conds}
     if bc_symbols & sell:
         raise ValueError(f"同日卖出与条件买入冲突: {bc_symbols & sell}")
@@ -321,8 +364,16 @@ class Engine:
         # ML 模型（strategy_loader 依据 YAML models 节挂接；未配置为空列表）
         self._model_specs = list(getattr(strategy, "MODEL_SPECS", None) or [])
         self._holding_models = [m for m in self._model_specs if m.scope == SCOPE_HOLDING]
-        # ml_log: "full" 落盘全截面分数；缺省只落盘决策相关标的
-        self._ml_log_full = config.get("ml_log") == "full"
+        # ml_log: "full" 落盘全截面分数；缺省只落盘决策相关标的。
+        # EDGE-07: 大小写不敏感（"FULL"/"Full" 等价 "full"）；非法取值 WARNING
+        # 并按非 full 处理（此前 "FULL"/"all" 等静默当非 full）
+        ml_log = config.get("ml_log")
+        if ml_log is not None and str(ml_log).lower() != "full":
+            logger.warning(
+                "config.ml_log 取值 %r 非法，仅支持 None 或 'full'"
+                "（按非 full 处理）", ml_log,
+            )
+        self._ml_log_full = ml_log is not None and str(ml_log).lower() == "full"
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
         self.run_id = 0
         self.bars_df: pd.DataFrame | None = None
@@ -393,13 +444,11 @@ class Engine:
                     continue
                 self.step(today, day_bars, conn)
 
-            account_daily_df = pd.read_sql_query(
-                "SELECT * FROM account_daily WHERE run_id = ? ORDER BY date",
-                conn, params=(self.run_id,),
-            )
-            trade_log_df = pd.read_sql_query(
-                "SELECT * FROM trade_log WHERE run_id = ? ORDER BY id",
-                conn, params=(self.run_id,),
+            # CONS-02: 统一经 read_run_data 读取（trade_log ORDER BY date, id，
+            # 与回放/离线重算同一排序；此前内联 SELECT 为 ORDER BY id，
+            # 乱序写入时事件序漂移）。stats_json 此刻尚未落库，第三返回值忽略
+            account_daily_df, trade_log_df, _ = database.read_run_data(
+                conn, self.run_id
             )
             bench_fn = getattr(self.provider.backend, "get_benchmark_bars", None)
             benchmark = (
@@ -430,6 +479,9 @@ class Engine:
                 stats_payload["benchmark_code"] = self.benchmark
                 database.write_run_stats(conn, self.run_id, stats_payload)
                 database.update_run_status(conn, self.run_id, "completed")
+                # PERF-06: 终态持仓快照——运行期不再逐日全量重写 holdings
+                # （回测中无读方），run 收尾写一次供外部工具读取
+                database.write_holdings(conn, self.account)
             return {
                 "account_daily": account_daily_df,
                 "trade_log": trade_log_df,
@@ -453,6 +505,14 @@ class Engine:
         日历 → 前视锚定 → universe → 因子物化（广度+主面板）→ ML 分数物化
         → 面板裁切 → provider.attach_bars → strategy.on_start。返回交易日历。
         """
+        # PERF-08: 后端可选实现分红窗口剪枝（S2 GenericSQLBackend 的
+        # set_dividend_bounds）；鸭子类型探测，未实现则保持全表加载现状
+        set_dividend_bounds = getattr(
+            self.provider.backend, "set_dividend_bounds", None
+        )
+        if set_dividend_bounds is not None:
+            set_dividend_bounds(start, end)
+
         calendar = self.provider.get_calendar(start, end)
         if not calendar:
             raise ValueError("日历为空")
@@ -490,7 +550,16 @@ class Engine:
             # 物化后验证
             issues = factor_plan.validate_materialization(bars_df, fplan)
             for issue in issues:
-                getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
+                # EDGE-08: level 白名单 {warning, error}；未知 level 按
+                # warning 处理并告警，杜绝 getattr(logger, level) 崩 run
+                level = _FACTOR_ISSUE_LEVELS.get(issue["level"])
+                if level is None:
+                    logger.warning(
+                        "[因子验证] 未知 issue level %r, 按 warning 处理",
+                        issue["level"],
+                    )
+                    level = logger.warning
+                level("[因子验证] %s", issue["message"])
         if self._model_specs:
             # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
             # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
@@ -555,6 +624,19 @@ class Engine:
     def step(self, today: str, day_bars: pd.DataFrame, conn):
         bars_dict = bars_to_dict(day_bars, today)
 
+        # PERF-05: 同日同 symbol 涨跌停价只算一次。limits.get_limit_prices
+        # 是 (symbol, trade_date) 的确定性纯函数——rebalance 卖出/买入两阶段、
+        # manual_sell 部分卖出后 exit_conditions 再查同 symbol 时都复用缓存。
+        limits_memo: dict[tuple[str, str], tuple] = {}
+
+        def memo_limits(symbol, bar, trade_date):
+            key = (symbol, trade_date)
+            cached = limits_memo.get(key)
+            if cached is None:
+                cached = limits.get_limit_prices(symbol, bar, trade_date)
+                limits_memo[key] = cached
+            return cached
+
         self._save_state()
 
         try:
@@ -571,14 +653,14 @@ class Engine:
                     manual_buy_trades = match.manual.rebalance_to_targets(
                         self.account, bars_dict, targets,
                         self.max_positions,
-                        limits.get_limit_prices, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, apply_slippage,
                         quiet=self.quiet_skips,
                     )
                 else:
                     manual_sell_trades = match.manual.manual_sell(
                         self.account, bars_dict,
                         self.pending_actions.get("sell", []),
-                        limits.get_limit_prices, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, apply_slippage,
                         shares_map=self.pending_actions.get("sell_shares"),
                         trigger="MANUAL",
                         reasons_map=self.pending_actions.get("sell_reasons"),
@@ -589,14 +671,14 @@ class Engine:
                         self.account, bars_dict,
                         self.pending_actions.get("buy", []),
                         self.max_positions,
-                        limits.get_limit_prices, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, apply_slippage,
                         weights_map=self.pending_actions.get("buy_weights"),
                         quiet=self.quiet_skips,
                     )
 
                 condition_trades = match.conditions.exit_conditions(
                     self.account, bars_dict,
-                    limits.get_limit_prices, self.costs_fn, apply_slippage,
+                    memo_limits, self.costs_fn, apply_slippage,
                     quiet=self.quiet_skips,
                     slip_ticks=self.condition_slippage_ticks,
                 )
@@ -606,7 +688,7 @@ class Engine:
                     self.account, bars_dict,
                     self.pending_actions.get("buy_conditions") or [],
                     self.max_positions,
-                    limits.get_limit_prices, self.costs_fn, apply_slippage,
+                    memo_limits, self.costs_fn, apply_slippage,
                     quiet=self.quiet_skips,
                     slip_ticks=self.condition_slippage_ticks,
                 )
@@ -639,7 +721,8 @@ class Engine:
             self.account.daily_pnl, self.account.cumulative_pnl,
             self.initial_capital, len(self.account.holdings),
         )
-        database.write_holdings(conn, self.account)
+        # PERF-06: 不再逐日 write_holdings（运行期无读方）——终态快照在
+        # run() 收尾 update_run_status 之后写一次
         for trade in trades:
             database.write_trade(conn, self.run_id, trade)
         # 公司行为衍生行（DIV/STK_DIV）与实盘回放共用同一构造口径

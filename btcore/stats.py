@@ -1,9 +1,13 @@
+import logging
+import math
 from collections import defaultdict, deque
 
 import numpy as np
 import pandas as pd
 
 from btcore.constants import CAL_DAYS_ANNUAL, TRADE_EVENT_PRIORITY
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_statistics(
@@ -14,6 +18,16 @@ def calculate_statistics(
     annual_days: int = CAL_DAYS_ANNUAL,
     holdings: dict | None = None,
 ) -> dict:
+    """全量统计指标。
+
+    键约定（CONS-03 / EDGE-17 双口径说明）：
+    - total_dividend_received: 仅已实现 trip 分红（旧口径，保持不变）；
+      total_dividend_accrued: 已实现 trip 分红 + 期末未平仓 lot 的
+      dividend_accrued（含未实现分红的全口径）。
+    - max_drawdown_recovery_days: 回撤未修复时保留旧语义 len(after_dd)（含谷值日，
+      消费方 research/report.py 的 _int 无法渲染 None，故不动旧键值）；
+      此时新增键 max_dd_unrecovered=True 显式标记。
+    """
     result: dict = {}
 
     if account_daily_df.empty:
@@ -33,6 +47,7 @@ def calculate_statistics(
     daily_returns = np.insert(daily_returns, 0, 0.0)
 
     n_days = len(total_values)
+    avg_total_value = np.mean(total_values)
     total_return = (total_values[-1] / initial_capital - 1) if initial_capital > 0 else 0.0
 
     n_years = n_days / annual_days if n_days > 0 else 1.0
@@ -44,7 +59,7 @@ def calculate_statistics(
     result["final_value"] = total_values[-1]
     result["total_days"] = n_days
 
-    dates = pd.to_datetime(account_daily_df["date"], format="mixed")
+    dates = pd.to_datetime(account_daily_df["date"], format="%Y%m%d")
     result["start_date"] = dates.iloc[0].strftime("%Y-%m-%d")
     result["end_date"] = dates.iloc[-1].strftime("%Y-%m-%d")
 
@@ -82,6 +97,7 @@ def calculate_statistics(
             max_dd = dd
             max_dd_start = current_start
             max_dd_end = i
+    max_dd_unrecovered = False
     if max_dd_end > max_dd_start:
         peak_val = total_values[max_dd_start]
         after_dd = total_values[max_dd_end:]
@@ -89,9 +105,13 @@ def calculate_statistics(
         if np.any(recovered):
             dd_recovery_days = int(np.argmax(recovered))
         else:
+            # 未修复：保留旧值 len(after_dd)（消费方 _int 无法渲染 None），
+            # 新增 max_dd_unrecovered 显式标记（EDGE-17）
             dd_recovery_days = len(after_dd)
+            max_dd_unrecovered = True
     result["max_drawdown"] = max_dd
     result["max_drawdown_recovery_days"] = dd_recovery_days
+    result["max_dd_unrecovered"] = max_dd_unrecovered
     result["calmar"] = (annualized_return / max_dd) if max_dd > 0 else 0.0
 
     profit_days = int(np.sum(rets > 0))
@@ -102,11 +122,11 @@ def calculate_statistics(
     result["win_rate"] = profit_days / total_trade_days if total_trade_days > 0 else 0.0
 
     if not trade_log_df.empty:
-        trades = trade_log_df[trade_log_df["side"] != "DIV"].copy()
-        div_log = trade_log_df[trade_log_df["side"] == "DIV"].copy()
+        trades = trade_log_df[trade_log_df["side"] != "DIV"]
+        div_log = trade_log_df[trade_log_df["side"] == "DIV"]
     else:
-        trades = trade_log_df.copy()
-        div_log = trade_log_df.copy()
+        trades = trade_log_df
+        div_log = trade_log_df
 
     # 真实成交行（BUY/SELL）：STK_DIV/ADJUST 公司行为行不计入笔数与标的数
     exec_trades = trades[trades["side"].isin(["BUY", "SELL"])]
@@ -130,7 +150,6 @@ def calculate_statistics(
             result["avg_positions"] = avg_pos
 
         total_turnover = trades["turnover"].sum()
-        avg_total_value = np.mean(total_values)
         result["turnover_rate"] = (total_turnover / avg_total_value) if avg_total_value > 0 else 0.0
     else:
         result["trade_count"] = 0
@@ -150,8 +169,9 @@ def calculate_statistics(
     result.update(_compute_cost_breakdown(trades))
     result.update(
         _compute_trading_friction(
-            trades, account_daily_df, result["cost_breakdown"],
+            trades, result["cost_breakdown"],
             result["round_trip"]["trip_detail"], annual_days,
+            total_values, initial_capital, n_days, avg_total_value,
         )
     )
     result.update(_compute_management_complexity(trades, account_daily_df))
@@ -193,12 +213,17 @@ def _compute_period_returns(dates: pd.DatetimeIndex, total_values: np.ndarray,
 def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                          account_daily_df: pd.DataFrame,
                          holdings: dict | None = None) -> dict:
-    """全事件流时序 FIFO。
+    """全事件流时序 FIFO（CONS-01：pnl 统一为含费用口径）。
 
     BUY / SELL / DIV 按日期排序后逐日处理：
-    - BUY: 创建新 lot 入队 (shares, cost_per_share, buy_date, dividend_accrued=0)
+    - BUY: 创建新 lot 入队 (shares, cost_total=abs(net_amount 含费用),
+      buy_date, dividend_accrued=0)
     - DIV: 按除息日当前各 lot 持股比例分发红利到 lot.dividend_accrued
-    - SELL: FIFO 弹 lot，每个 lot 自带分红，卖出时一并结算
+    - SELL: FIFO 弹 lot，买入成本与卖出净收入均按比例分摊 net_amount
+      （含费用），每个 lot 自带分红，卖出时一并结算
+
+    pnl = 卖出净额(含费) - 买入成本(含费) + 已分配分红——与
+    symbol_contribution / ML 标签同一净额口径（三处不再各自为政）。
 
     修复 L1（多次部分卖出时分红基数未扣减已售份额）和
     L2（除息日后买入仍被分配分红）两个 bug。
@@ -206,12 +231,26 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
     if trades.empty and div_log.empty:
         return {"round_trip": {"trip_detail": [], "open_positions": [], "summary": {}}}
 
-    # 构建统一事件流: BUY / SELL / DIV / STK_DIV 四类, 按日期排序
+    # 构建统一事件流: BUY / SELL / DIV / STK_DIV 四类, 按日期排序。
+    # CONS-01：BUY/SELL 携带 net_amount（含费用净额，BUY 为负）——往返盈亏
+    # 统一为含费用口径（与 symbol_contribution / ML 标签一致）。
     events = []
     for _, row in trades.iterrows():
+        side = row["side"]
+        price = float(row["price"])
+        shares = int(row["shares"])
+        net = row.get("net_amount")
+        if net is None or (isinstance(net, float) and math.isnan(net)):
+            # 防御：非引擎构造的 trade_log 缺 net_amount 时回退裸价口径
+            # （引擎/真实库 schema 必含 net_amount，此路径不应出现）
+            logger.warning(
+                "trade_log 缺 net_amount，回退裸价口径（%s %s %s）",
+                row["date"], row["symbol"], side,
+            )
+            net = (price * shares) if side == "SELL" else -(price * shares)
         events.append({
-            "date": row["date"], "symbol": row["symbol"], "type": row["side"],
-            "shares": int(row["shares"]), "price": row["price"],
+            "date": row["date"], "symbol": row["symbol"], "type": side,
+            "shares": shares, "price": price, "net_amount": float(net),
             "trigger": row.get("trigger", "") or "",
         })
     for _, row in div_log.iterrows():
@@ -233,9 +272,11 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
     for event in events:
         sym = event["symbol"]
         if event["type"] == "BUY":
+            # cost_total 含费用（abs(net_amount)）；部分卖出按比例分摊，
+            # 送转缩放时总成本不变（每股成本自动下摊）
             lots[sym].append({
                 "shares": event["shares"],
-                "cost_per_share": event["price"],
+                "cost_total": abs(event["net_amount"]),
                 "buy_date": event["date"],
                 "dividend_accrued": 0.0,
             })
@@ -249,8 +290,8 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                 for lot in lots[sym]:
                     lot["dividend_accrued"] += lot["shares"] * per_share_div
         elif event["type"] == "STK_DIV":
-            # 送转增股：按比例缩放 lot 队列（shares × ratio、成本每股 ÷ ratio），
-            # 总成本不变；除权后卖出才能与引擎口径对得上
+            # 送转增股：按比例缩放 lot 队列（shares × ratio，总成本不变），
+            # 除权后卖出才能与引擎口径对得上
             total_open = sum(lot["shares"] for lot in lots[sym])
             if total_open <= 0:
                 continue
@@ -259,13 +300,11 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
             for lot in lots[sym]:
                 scaled = int(lot["shares"] * ratio)
                 lot["shares"] = scaled
-                lot["cost_per_share"] = lot["cost_per_share"] / ratio
                 new_total += scaled
             if new_total < event["shares"]:
                 lots[sym][0]["shares"] += event["shares"] - new_total
         elif event["type"] == "SELL":
             sell_shares = event["shares"]
-            sell_price = event["price"]
             sell_date = event["date"]
 
             remaining = sell_shares
@@ -273,15 +312,17 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                 lot = lots[sym][0]
                 matched = min(remaining, lot["shares"])
 
-                buy_cost = matched * lot["cost_per_share"]
-                sell_proceeds = matched * sell_price
+                # CONS-01 含费用口径：买入成本按比例分摊买入净额（含费），
+                # 卖出净收入按比例分摊卖出净额（含费），分红不受费用影响
+                matched_cost = lot["cost_total"] * (matched / lot["shares"])
+                sell_net = event["net_amount"] * (matched / sell_shares)
                 matched_div = (
                     lot["dividend_accrued"] * (matched / lot["shares"])
                     if lot["shares"] > 0 else 0.0
                 )
 
-                pnl = sell_proceeds - buy_cost + matched_div
-                pnl_pct = pnl / buy_cost if buy_cost > 0 else 0.0
+                pnl = sell_net - matched_cost + matched_div
+                pnl_pct = pnl / matched_cost if matched_cost > 0 else 0.0
 
                 hold_start = pd.Timestamp(lot["buy_date"])
                 hold_end = pd.Timestamp(sell_date)
@@ -303,8 +344,18 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
                     lots[sym].popleft()
                 else:
                     lot["shares"] -= matched
+                    lot["cost_total"] -= matched_cost
                     lot["dividend_accrued"] -= matched_div
                 remaining -= matched
+
+            if remaining > 0:
+                # CONS-04：SELL 超出未平仓 lot 股数时 realized pnl 静默少算，
+                # 不 raise（兼容脏数据），但必须告警
+                logger.warning(
+                    "SELL 超出未平仓 lot：%s %s 卖出 %d 股，其中 %d 股无 lot 匹配"
+                    "（realized pnl 将少算，请检查 trade_log 数据完整性）",
+                    sell_date, sym, sell_shares, remaining,
+                )
 
     # 剩余 lots = 未平仓持仓
     open_positions = []
@@ -313,10 +364,14 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
 
     for sym, sym_lots in lots.items():
         for lot in sym_lots:
-            cost_basis = lot["shares"] * lot["cost_per_share"]
+            # cost_basis 含费用（CONS-01，与已实现口径一致）
+            cost_basis = lot["cost_total"]
             total_open_cost += cost_basis
 
-            last_price = final_prices.get(sym, lot["cost_per_share"])
+            last_price = final_prices.get(
+                sym,
+                lot["cost_total"] / lot["shares"] if lot["shares"] > 0 else 0.0,
+            )
             open_pnl = lot["shares"] * last_price - cost_basis + lot["dividend_accrued"]
 
             hold_start = pd.Timestamp(lot["buy_date"])
@@ -352,7 +407,14 @@ def _compute_round_trips(trades: pd.DataFrame, div_log: pd.DataFrame,
         "win_count": len(win_trips),
         "loss_count": len(loss_trips),
         "win_loss_ratio": len(win_trips) / len(loss_trips) if len(loss_trips) > 0 else 0.0,
+        # 双口径（CONS-03）：旧键 total_dividend_received 只计已实现 trip 分红，
+        # 保持不变；新键 total_dividend_accrued 追加期末未平仓 lot 的
+        # dividend_accrued（未实现分红不再静默低估）
         "total_dividend_received": sum(t["dividend_received"] for t in trip_detail),
+        "total_dividend_accrued": (
+            sum(t["dividend_received"] for t in trip_detail)
+            + sum(p["dividend_received"] for p in open_positions)
+        ),
         "avg_pnl": np.mean([t["pnl"] for t in completed_trips]) if completed_trips else 0.0,
         "avg_holding_days": (
             np.mean([t["holding_days"] for t in completed_trips]) if completed_trips else 0.0
@@ -405,13 +467,18 @@ def _compute_symbol_contribution(trades: pd.DataFrame, div_log: pd.DataFrame,
     if trades.empty:
         return {"symbol_contribution": {}}
 
+    # PERF-02：一次性 groupby 查表替代循环内全表布尔过滤（O(S×D) → O(S)）
+    div_by_symbol = (
+        div_log.groupby("symbol")["net_amount"].sum() if not div_log.empty else None
+    )
+
     contribution = {}
     for sym, grp in trades.groupby("symbol"):
         buy_rows = grp[grp["side"] == "BUY"]
         sell_rows = grp[grp["side"] == "SELL"]
         realized_pnl = sell_rows["net_amount"].sum() + buy_rows["net_amount"].sum()
         div_amount = (
-            div_log[div_log["symbol"] == sym]["net_amount"].sum() if not div_log.empty else 0.0
+            div_by_symbol.get(sym, 0.0) if div_by_symbol is not None else 0.0
         )
 
         unrealized_pnl = 0.0
@@ -452,10 +519,16 @@ def _compute_cost_breakdown(trades: pd.DataFrame) -> dict:
     return {"cost_breakdown": breakdown}
 
 
-def _compute_trading_friction(trades: pd.DataFrame, account_daily_df: pd.DataFrame,
-                              cost_breakdown: dict, trip_detail: list,
-                              annual_days: int) -> dict:
-    """散户视角的交易磨损：费用/滑点对收益的侵蚀程度。"""
+def _compute_trading_friction(trades: pd.DataFrame, cost_breakdown: dict,
+                              trip_detail: list, annual_days: int,
+                              total_values: np.ndarray, initial_capital: float,
+                              n_days: int, avg_total_value: float) -> dict:
+    """散户视角的交易磨损：费用/滑点对收益的侵蚀程度。
+
+    HYG-06：total_values/initial_capital/n_days/avg_total_value 由
+    calculate_statistics 一次性算好传入（n_years 由 n_days 派生，口径相同），
+    消除两处重复计算与潜在漂移。
+    """
     zero = {
         "total_cost": 0.0,
         "cost_per_trade": 0.0,
@@ -469,13 +542,9 @@ def _compute_trading_friction(trades: pd.DataFrame, account_daily_df: pd.DataFra
         return {"trading_friction": zero}
 
     total_cost = float(cost_breakdown["total_cost"])
-    total_values = account_daily_df["total_value"].values
-    initial_capital = account_daily_df["initial_capital"].iloc[0]
-    n_days = len(total_values)
     n_years = n_days / annual_days if n_days > 0 else 1.0
 
     total_turnover = float(trades["turnover"].sum())
-    avg_total_value = float(np.mean(total_values)) if n_days > 0 else 0.0
     gross_profit = sum(t["pnl"] for t in trip_detail if t["pnl"] > 0)
 
     friction = {
@@ -578,17 +647,21 @@ def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
 
     rf_daily = risk_free_rate / annual_days if annual_days > 0 else 0.0
 
-    bench_var = np.var(bench_rets, ddof=1)
+    # TEST-07：len<2 时 np.var/np.std(ddof=1) 触发 "Degrees of freedom <= 0"
+    # RuntimeWarning（2 日窗口仅 1 个收益样本）；长度守卫输出 NaN 而非告警。
+    # 数值语义与原路径一致（nan > 0 为 False → beta/ir 仍走 0.0 分支）。
+    bench_var = float(np.var(bench_rets, ddof=1)) if len(bench_rets) > 1 else float("nan")
     if bench_var > 0:
         beta = float(np.cov(strat_rets, bench_rets, ddof=1)[0, 1] / bench_var)
     else:
         beta = 0.0
 
     excess = strat_rets - bench_rets
-    tracking_error = float(np.std(excess, ddof=1) * np.sqrt(annual_days))
+    excess_std = float(np.std(excess, ddof=1)) if len(excess) > 1 else float("nan")
+    tracking_error = excess_std * np.sqrt(annual_days)
     ir = (
-        float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(annual_days))
-        if np.std(excess, ddof=1) > 0 else 0.0
+        float(np.mean(excess) / excess_std * np.sqrt(annual_days))
+        if excess_std > 0 else 0.0
     )
 
     strat_mean = np.mean(strat_rets) if len(strat_rets) > 0 else 0.0

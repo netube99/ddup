@@ -101,6 +101,13 @@ class Strategy(ABC):
         """
         self._filter = None
         if self.FILTER_RULES:
+            # DUP-08b（降级说明）：index_universe 在此处（StockFilter 构建）
+            # 与 strategy_loader._attach_universe 的 universe hook 各自调用一次
+            # backend.get_index_members([start-45, end])——同一区间双查。
+            # 注入方案：universe hook 把 resolve_index_snapshots 的按日快照
+            # map 缓存到策略实例，on_start 传入 StockFilter 跳过自建——需改
+            # strategy_loader.py + filters.py（不在 S1 清单内），降级为注释，
+            # 由后续批次实施。
             self._filter = StockFilter(
                 provider.backend, first_date, self.FILTER_RULES, end_date=end_date
             )

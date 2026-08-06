@@ -1,4 +1,5 @@
 import logging
+import weakref
 from bisect import bisect_right
 from datetime import date, datetime, timedelta
 
@@ -10,20 +11,48 @@ logger = logging.getLogger(__name__)
 # 保证回测首日也有 ≤ 当日的快照可用
 INDEX_LOOKBACK_DAYS = 45
 
+# DUP-08b：loader 的 universe hook 与 StockFilter 会对同一
+# (backend, codes, start, end) 区间各调一次 get_index_members——
+# 模块级缓存去重。键用 weakref 而非 id()：Python 对象 id 会被 GC 复用，
+# 裸 id 键会让新 backend 命中旧 backend 的缓存（串数据）。
+# 命中时校验 referent 存活，已回收的条目删除。
+_INDEX_SNAPSHOT_CACHE: dict[tuple, dict[str, set[str]]] = {}
+
+
+def _cache_key(backend, codes, start: str, end: str):
+    return (weakref.ref(backend), tuple(sorted(codes)), start, end)
+
 
 def resolve_index_snapshots(backend, codes, start: str, end: str) -> dict[str, set[str]]:
     """指数成分快照 map：{快照日: {成分股}}，前溯 INDEX_LOOKBACK_DAYS。
 
     前溯保证窗口首日也有 ≤ 当日的快照（快照是月频的）。
     codes 为空或 backend 无 get_index_members 能力时返回 {}。
+    同 (backend, codes, start, end) 区间结果进程内缓存（DUP-08b）。
     """
     if not codes or not hasattr(backend, "get_index_members"):
         return {}
+    try:
+        key = _cache_key(backend, codes, start, end)
+        cacheable = True
+    except TypeError:
+        # 不可弱引用的 backend（如 SimpleNamespace 测试桩）：跳过缓存
+        key = None
+        cacheable = False
+    if cacheable:
+        cached = _INDEX_SNAPSHOT_CACHE.get(key)
+        if cached is not None:
+            if key[0]() is not None:
+                return cached
+            del _INDEX_SNAPSHOT_CACHE[key]  # referent 已回收，条目作废
     lookback = (
         date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
     ).strftime("%Y%m%d")
     raw = backend.get_index_members(list(codes), lookback, end) or {}
-    return {str(d): set(v) for d, v in raw.items()}
+    result = {str(d): set(v) for d, v in raw.items()}
+    if cacheable:
+        _INDEX_SNAPSHOT_CACHE[key] = result
+    return result
 
 
 def resolve_index_universe(backend, codes, start: str, end: str) -> list[str] | None:

@@ -76,6 +76,45 @@ def check_tradable(side: str, price, up, down) -> str | None:
     return None
 
 
+def _warn_skip_reason(reason: str, side: str, warn, trade_date: str,
+                      symbol: str) -> None:
+    """涨跌停/非法价格导致跳过（warn + continue）的统一告警（DUP-01）。
+
+    撮合 5 路径共用同一文案，防漂移：manual_sell / manual_buy /
+    rebalance 买卖两阶段 / entry_conditions 的 check_tradable 三连，
+    以及 exit_conditions 的 LIMIT_UNKNOWN（down 缺失）。
+    warn 透传调用点 quiet 语义（quiet 时 logger.debug）。
+    """
+    verb = "买入" if side == "BUY" else "卖出"
+    if reason == LIMIT_UNKNOWN:
+        warn("[%s] %s 涨跌停无法判定, 跳过%s", trade_date, symbol, verb)
+    elif reason == INVALID_PRICE:
+        warn("[%s] %s 成交价非法, 跳过%s", trade_date, symbol, verb)
+    elif reason == LIMIT_UP:
+        warn("[%s] %s 涨停不买, 跳过%s", trade_date, symbol, verb)
+    elif reason == LIMIT_DOWN:
+        warn("[%s] %s 跌停不卖, 跳过%s", trade_date, symbol, verb)
+    else:
+        warn("[%s] %s 不可成交 (%s), 跳过%s", trade_date, symbol, reason, verb)
+
+
+def _cash_affordable(account, base_price: float, shares: int, slip_fn,
+                     costs_fn, slip_ticks: int | None = None) -> tuple:
+    """估算买入净支出并检查现金是否足够（DUP-02，三处买入路径共用）。
+
+    口径：滑点后价格 × 股数 + 佣金 + 过户费（与 execute_buy 出账一致）。
+    Returns: (affordable, est_net)。现金不足时 affordable=False，est_net
+    供调用点告警展示 need 值。
+    """
+    est_price = slip_fn(
+        base_price,
+        account.slippage_ticks if slip_ticks is None else slip_ticks, 1,
+    )
+    est_costs = costs_fn("BUY", est_price * shares)
+    est_net = est_price * shares + est_costs["commission"] + est_costs["transfer_fee"]
+    return account.cash >= est_net, est_net
+
+
 def _execute_trade(account, side: str, symbol: str, bar, shares: int,
                    fill_price: float, trigger: str, costs_fn, slip_fn,
                    slip_ticks: int | None = None) -> Trade:

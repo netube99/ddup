@@ -105,7 +105,16 @@ def _apply_cash_div(account, holding, cash_div: float, today: str,
         scale = pre_close / (pre_close + cash_div)
         _rescale_holding(holding, scale)
     else:
+        # EDGE-12：缺 bar（bar=None）或 pre_close<=0 时 scale=None——cost 照减但
+        # entry_price 与条件锚点不 rescale（apply_condition_rescale 静默跳过），
+        # 数据洞必须显式告警（正常引擎流程每日每 symbol 至多告警一次）
         scale = None
+        logger.warning(
+            "cash_div %s %s 缺 bar 或 pre_close<=0（bar=%r），scale=None："
+            "entry_price/条件锚点不 rescale",
+            today, holding.symbol,
+            None if bar is None else "pre_close<=0",
+        )
 
     log.append({
         "date": today, "symbol": holding.symbol,

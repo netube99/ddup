@@ -44,11 +44,11 @@ class DataProvider:
         self._prev_day_cache: dict[str, str | None] = {}
         self._bars_df: pd.DataFrame | None = None
         self._as_of_date: str | None = None
-        # 基准指数面板精确键缓存：(code, start, end) → frame|None。
-        # 只对同区间重复调用去重（如 trend + returns 同日连调）；逐日滑窗
-        # 调用每窗回源一次——单标的索引查询，成本可忽略。
-        # 长回测每日一窗，缓存有界增长（≈ 回测天数 × 1 键），刻意不清理
-        self._bench_cache: dict[tuple[str, str, str], pd.DataFrame | None] = {}
+        # 基准指数缓存：(code, start, end) → pct_change 后的 returns Series | None
+        # （PERF-07：存处理结果而非原始 frame——同区间重复调用跳过 SQL 回源与
+        # pct_change/dropna 重算；逐日滑窗调用每窗回源一次，单标的索引查询成本
+        # 可忽略）。长回测每日一窗，缓存有界增长（≈ 回测天数 × 1 键），刻意不清理
+        self._bench_cache: dict[tuple[str, str, str], pd.Series | None] = {}
 
     # ── 引擎用 (含当日) ──
 
@@ -150,16 +150,22 @@ class DataProvider:
         ).strftime("%Y%m%d")
         key = (self.benchmark, lookback_start, prev)
         if key not in self._bench_cache:
-            self._bench_cache[key] = bench_fn(self.benchmark, lookback_start, prev)
-        bench = self._bench_cache[key]
-        if bench is None or bench.empty:
+            bench = bench_fn(self.benchmark, lookback_start, prev)
+            if bench is None or bench.empty:
+                cached: pd.Series | None = None
+            else:
+                col = benchmark_price_column(bench)
+                if col is None:
+                    cached = None
+                else:
+                    ret = bench[col].pct_change()
+                    ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
+                    cached = ret.dropna()
+            self._bench_cache[key] = cached
+        cached = self._bench_cache[key]
+        if cached is None:
             return None
-        col = benchmark_price_column(bench)
-        if col is None:
-            return None
-        ret = bench[col].pct_change()
-        ret.index = pd.Index(pd.to_datetime(ret.index).strftime("%Y%m%d"))
-        return ret.dropna()
+        return cached
 
     def get_benchmark_trend(self, end_date: str, window: int = 30) -> float | None:
         """返回基准指数近 window 日累计收益（前视保护）。
