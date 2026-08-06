@@ -74,7 +74,7 @@ conditions:
 加载期校验（全部 fail-fast，无静默降级）：
 
 - `artifact` 必填、必须是已存在的 `.onnx` 文件；meta 缺失（引擎路径）、
-  meta 版本不是 2、YAML 内联 features 与 meta 不一致 → 直接报错
+  meta 版本不是 3、YAML 内联 features 与 meta 不一致 → 直接报错
 - 模型的 `features.factors` 自动并入因子闭包统一物化（不参与评分），
   享受 warmup 推导 / 列裁剪等全部既有机制；因子名不在因子库中直接报错
 - `features.raw` 自动并入引擎向 backend 请求的列
@@ -116,7 +116,15 @@ completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
 评估输出：
 
 - panel：每日截面 Spearman IC（mean / ICIR / 正值占比 / 有效天数）+
-  十分层多空收益与单调性，与 `research/factor_eval` 同口径
+  十分层多空收益与单调性。指标与 `research/factor_eval` 同源，但**键名与
+  分层形态有差异**（EDGE-16，跨工具对比时勿直接混用）：
+  - 键名：训练侧 `btcore/ml/metrics.summarize_ic` 用 `ic_pos_ratio`，
+    `research/factor_eval.summarize_ic` 用 `ic_positive_ratio`
+    （`icir` 两侧同名同义）
+  - 分层：训练侧 `layered_returns` 输出**各层平均前向收益**标量
+    （`layer_mean` + `long_short`/`monotonic`，缺省 10 层）；
+    `factor_eval.calc_layered_returns` 输出**各档累计收益曲线**
+    （cumprod 序列，缺省 5 档），多空收益取末值之差
 - holding：AUC / precision@0.5 / recall@0.5（正类 = 即将发生 TB 亏损离场）
 
 产出物（写到 `artifact` 声明路径）：

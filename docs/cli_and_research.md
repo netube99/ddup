@@ -78,7 +78,8 @@ python scripts/run.py strategies/my_strategy/config.yaml \
 
 ```bash
 python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
-    [--universe CSI300] [--forward N | --decay 1,3,5,10,20] [--n-quantiles N]
+    [--universe CSI300] [--forward N | --decay 1,3,5,10,20] [--n-quantiles N] \
+    [--benchmark 000300.SH]
 ```
 
 | 参数 | 说明 |
@@ -90,6 +91,7 @@ python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
 | `--forward` | 前瞻收益天数，默认 5 |
 | `--decay` | IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）；不能与非默认的 `--forward` 同用 |
 | `--n-quantiles` | 分层回测档数，默认 5 |
+| `--benchmark` | 基准指数代码（如 `000300.SH`）；因子表达式引用 `idx_ret`（市场相对强弱）时必需，口径同引擎（见 [factor_library.md](./factor_library.md)） |
 
 **口径与引擎同源**：
 
@@ -657,5 +659,6 @@ best = combine_factors(factor_df, fwd_ret, method="icir")  # 供策略使用
 | `--universe` | factor_eval | CSI300/CSI500/CSI1000 或指数代码，默认全市场 |
 | `--forward` / `--decay` | factor_eval | 前瞻天数（默认 5）/ IC 衰减模式 |
 | `--n-quantiles` | factor_eval | 分层档数，默认 5 |
+| `--benchmark` | factor_eval | 基准指数代码（因子引用 `idx_ret` 时必需） |
 | `--dry-run` | sweep | 仅打印参数组合 |
 | `method` / `window` | combine_factors | equal/ic/icir；IC 滚动窗口默认 60 |

@@ -228,7 +228,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 521 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+- 539 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
   ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、

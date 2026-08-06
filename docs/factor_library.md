@@ -286,9 +286,13 @@ factors:
     expr: "zscore(gpr) + zscore(npr) + zscore(rev_yoy)"  # 算子 + 算术 + 命名引用
 
   ema_bullish:
-    expr: "(ema_5 > ema_20) + (ema_20 > ema_60) + (ema_60 > ema_250)"  # 布尔值可直接相加
+    expr: "(ema_5 > ema_20) * 1 + (ema_20 > ema_60) * 1 + (ema_60 > ema_250) * 1"  # 布尔值 ×1 显式算术化
     description: "EMA 多头排列得分（0-3）"
 ```
+
+> ⚠️ 布尔加法陷阱（F-EMA-01）：numexpr 求值下 `True + True = True`（bool 加法
+> 语义 = OR），裸布尔相加的计分是 0/1 而非 0~3。必须用 `* 1` 把布尔显式转为
+> 0/1 数值后再相加——`library.yaml` 的 ema_bullish 即此写法（`(a > b) * 1 + (c > d) * 1`）。
 
 ---
 
@@ -943,3 +947,40 @@ eval_factor_specs(df, factor_specs) -> tuple[pd.DataFrame, pd.Series]
    ```
 
 无需额外注册——列名对齐即可。伪列对应的后端方法（`get_stock_industries` / `get_benchmark_bars`）见 §9.3。详见 `./backend_guide.md`。
+
+---
+
+## 18. 零引用因子清单（研究性保留，勿删）
+
+`library.yaml` 现有 **126** 个因子，其中 **86** 个在
+`strategies/` / `research/` / `scripts/` / `docs/` / `tests/` 五处**零命中**
+（未被任何策略因子引用、未被评估/研究脚本调用）。它们保留的原因：
+
+- **ML 模型 meta 可能引用**：已训练模型的特征契约按名锁定，删定义会让
+  老模型加载期失败（`未知因子`），且研究循环会复用这些因子做新实验；
+- 研究性/待验证因子：历史审计确认低 IC 或与在产因子高相关，列入淘汰清单
+  待重验，不是缺陷。
+
+> 判定口径：`grep -w <因子名> strategies/ research/ scripts/ docs/ tests/`
+> 全零命中即计入（library.yaml 自身定义不计）。清单可能随研究进展变化，
+> 勿手工维护为"完整"承诺。
+
+零引用因子（86 个）：
+
+```
+ma_close_20 ma_close_60 limit_solidity limit_streak lhb_inflow block_premium
+dc_big_money dc_inflow_ma5 hot_money rev_5d mom_z_60 lg_net_rate
+elg_net_rate md_net_rate total_net_rate lg_net_ma5 elg_net_ma5 lg_net_z
+winner_rate_z cost_concentration close_vs_cost50 margin_change margin_balance_z margin_ma5
+vol_ratio_z amount_z amt_ma5_ratio mom10 rev10_z vol10
+vol60 holder_count strength_raw strength_z attack_z net_buy_pressure
+pct_b kdj_golden mfi_z rev_yoy_z profit_yoy_z gpr_z
+npr_z bvps_p_z growth_value mom5_neutral mom10_neutral cci_z_neutral
+pct_b_neutral pdi_mdi_neutral inst_net_buy_z inst_buy_pct kpl_seal_z kpl_lianban
+pledge_risk amihud_illiq high_low_range vol_price_corr20 shrink_ratio downside_vol20
+ret_skew20 ret_kurt20 max_dd_20 calmar_20 mf_streak5 mf_big_small_div
+mf_mom5 ln_mktcap ln_floatcap sharpe_20 limit_up_pct new_high_ratio20
+accrual_z cfo_quality leverage_change close_vs_ma60 bb_position atr_pct
+mf_raw mf_chg roc_1 rsi_z bb_width adx_trend
+volume_impulse turnover_chg
+```

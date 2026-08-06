@@ -17,20 +17,20 @@ factors/     用户因子 library.yaml（可编辑，纯 YAML 数据，无因子
 strategies/  用户策略（可编辑）：examples/ selected/ exploring/ archive/
 research/    研究工具库（无 CLI）：factor_eval/composite/attribution/report
 scripts/     CLI 入口：run/report/compare/factor_eval/ml_train/sweep/replay/cross_validate
-tests/       407 测试 + fixtures/*.parquet + test_invariants/（INV1-INV8）
+tests/       539 测试 + fixtures/*.parquet + test_invariants/（INV1-INV8）
 ```
 
 依赖单向：btcore 不 import 用户层；engine.py 不被 btcore 内部 import；`scripts/check_anticorrupt.py` 强制。
 
 ## 关键入口
 
-- `Engine.run(start, end)`（btcore/engine.py:113）：preload → 因子/ML 物化 → 逐日 step → 统计落库
-- `Engine.step`（engine.py:291）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
-- `Engine.compute_pending`（engine.py:404）：on_fills → on_tick → select → 校验 → calc_conditions
+- `Engine.run(start, end)`（btcore/engine.py:404）：preload → 因子/ML 物化 → 逐日 step → 统计落库
+- `Engine.step`（engine.py:624）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
+- `Engine.compute_pending`（engine.py:732）：on_fills → on_tick → select → 校验 → calc_conditions
 - `Strategy` ABC（btcore/strategy.py:8）：声明式属性 REQUIRED_FIELDS/FACTOR_SPECS/FILTER_RULES +
   钩子 get_universe/on_start/on_fills/on_tick/select/calc_conditions
-- `strategy_loader.load_strategy(path)`（strategy_loader.py:147）：YAML → Strategy；
-  策略模型 features 以 materialize_only 并入因子闭包（build_strategy :101）
+- `strategy_loader.load_strategy(path)`（strategy_loader.py:170）：YAML → Strategy；
+  策略模型 features 以 materialize_only 并入因子闭包（build_strategy :116）
 - 因子：`ops.eval_op_expr`（factors/ops.py:367，_OPS 固定算子表）；
   `plan.build_factor_plan`（factors/plan.py:157）/ `materialize`（:273 两路供给：广度面板→主面板）
 - 撮合：`match.conditions.exit_conditions`(:57)/`entry_conditions`(:166)；

@@ -128,6 +128,41 @@ def check_config_defaults(skills: dict[str, str], errors: list[str]) -> None:
                 f"ddup-strategy-craft: config {key} 默认值 skill={val} engine={defaults[key]}"
             )
 
+
+def check_docs_facts(skills: dict[str, str], errors: list[str]) -> None:
+    """docs/ 关键事实断言（DOC-03/04 曾两次漂移，纳入机械检查防再犯）。
+
+    只对账可被代码验证的硬事实：ml_guide 的 meta 版本引用必须与
+    btcore.ml.spec.META_VERSION 一致；factor_library 的 ema_bullish 示例
+    必须用 `* 1` 显式算术化（numexpr bool 加法是 OR，裸布尔相加与
+    library.yaml 定义矛盾）。
+    """
+    from btcore.ml.spec import META_VERSION
+
+    ml_guide = (ROOT / "docs" / "ml_guide.md").read_text(encoding="utf-8")
+    if f"meta 版本不是 {META_VERSION}" not in ml_guide:
+        errors.append(
+            f"docs/ml_guide.md: 未写明 'meta 版本不是 {META_VERSION}'"
+            f"（spec.py META_VERSION={META_VERSION}）"
+        )
+    for v in set(re.findall(r"meta 版本不是 (\d+)", ml_guide)) - {str(META_VERSION)}:
+        errors.append(
+            f"docs/ml_guide.md: 'meta 版本不是 {v}' 与 META_VERSION={META_VERSION} 冲突"
+        )
+
+    factor_lib = (ROOT / "docs" / "factor_library.md").read_text(encoding="utf-8")
+    section = _section(factor_lib, "### 6.4")
+    if "* 1" not in section:
+        errors.append(
+            "docs/factor_library.md §6.4: ema_bullish 示例未用 `* 1` 算术化"
+            "（numexpr bool 加法 = OR，需与 library.yaml 定义一致）"
+        )
+    if "布尔值可直接相加" in section:
+        errors.append(
+            "docs/factor_library.md §6.4: 仍宣称布尔值可直接相加"
+            "（numexpr bool 加法 = OR，与 library.yaml ema_bullish 矛盾）"
+        )
+
 def main() -> int:
     if not SKILLS_DIR.is_dir():
         print(f"跳过：{SKILLS_DIR} 不存在")
@@ -144,6 +179,7 @@ def main() -> int:
     check_condition_keys(skills, errors)
     check_ml_contract(skills, errors)
     check_config_defaults(skills, errors)
+    check_docs_facts(skills, errors)
     if errors:
         print("skill 与代码漂移：")
         for e in errors:

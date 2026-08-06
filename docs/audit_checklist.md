@@ -314,8 +314,8 @@
 
 ## 7. 统计与结果库
 
-- [ ] **R-STATS-01** 往返盈亏口径 — 统一事件流 BUY/SELL/DIV/STK_DIV（`btcore/stats.py:216-311`，事件流 232 起）；STK_DIV 缩放 lot 队列（股数×比例、成本÷比例）；超卖静默丢弃是防线不是 bug。
-  动态：构造送转案例，stats 的 round_trip pnl 与手算对账（2026-08 修复实证：10送10 后卖 200 股曾 pnl 错算，8593bfd）。
+- [ ] **R-STATS-01** 往返盈亏口径 — 统一事件流 BUY/SELL/DIV/STK_DIV（`btcore/stats.py:216-311`，事件流 232 起）；STK_DIV 缩放 lot 队列（股数×比例、总成本不变）；**pnl 含费用口径（CONS-01：买入成本与卖出净额均按比例分摊 net_amount，与 symbol_contribution/ML 标签一致）**；超卖静默丢弃改告警（CONS-04）。
+  动态：构造送转案例，stats 的 round_trip pnl 与手算对账（2026-08 修复实证：10送10 后卖 200 股曾 pnl 错算，8593bfd；CONS-01 后含费用口径 1013.39-1007.1=+6.29）。
 - [ ] **R-STATS-02** stats_json 键名契约 — annualized_return/sharpe/calmar + 嵌套 round_trip/trading_friction；report/cross_validate 消费同一键名（2026-08 已对齐，c18c269）。
 - [ ] **R-DB-01** schema 迁移 — 旧库无 stats_json 列 ALTER 补列，历史 run 读侧现场重算（缺 benchmark/期末浮盈口径略少，`research/report.py:78-116`）。
 - [ ] **R-DB-02** 多 run 累积 — 同库复用保留历史 run；holdings 表每次 run 清空（瞬态快照）；sweep 写标准 runs 表（2026-08 已修，5a1caeb）。
@@ -326,7 +326,7 @@
 ## 8. ML 子系统
 
 - [ ] **M-META-01** meta v3 契约 — version≠3 一律拒绝（`btcore/ml/spec.py:33,127-131`）；列序=factors+raw+state_features；scaler 维度加载期 fail-fast（:185-200）+ 运行时 RuntimeError 兜底（`runtime.py:46-57`）；artifact_sha256 随 config_json 落盘（:214-222）。
-- [ ] **M-SCOPE-01** 双 scope — state_features 非空→holding 否则 panel（spec.py:75-77）；panel 物化 ml_<name> 列（`runtime.py:94-123`；`engine.py:245`）；holding 决策时点批量注入 bar dict（`runtime.py:160-195`；`engine.py:521-523`）。
+- [ ] **M-SCOPE-01** 双 scope — state_features 非空→holding 否则 panel（spec.py:75-77）；panel 物化 ml_<name> 列（`runtime.py:94-123`；`engine.py:567`）；holding 决策时点批量注入 bar dict（`runtime.py:160-195`；`engine.py:814-838`）。
   边界：混用 scope 的引用防线（loader ValueError）逐条触发验证。
 - [ ] **M-STATE-01** state_features 口径 — hold_days 交易日口径；ret_from_entry **裸价/裸价**（v2→v3 修复点，`runtime.py:139-157`）。
   边界：除权日持仓的 ret_from_entry 连续（v2 曾跳变 −15pp）；fixture 无除权-持仓联合场景，真实库构造用例。

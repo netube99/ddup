@@ -16,11 +16,11 @@ btcore/        全部机制/基础设施（引擎、ABC、因子机制、撮合�
   match/       撮合：core（共享结算原语）/ conditions（条件单）/ manual（普通买卖）
   ml/          ML 子系统：spec / dataset / trainer / labels / runtime / conditions / metrics / export
 adapters/      用户数据后端实现（可编辑）—— tushare.py 是对 GenericSQLBackend 的填表
-factors/       用户因子定义 library.yaml（可编辑，88 个因子，纯 YAML 数据）
+factors/       用户因子定义 library.yaml（可编辑，126 个因子，纯 YAML 数据）
 strategies/    用户策略（可编辑）：examples/ 教学参考、selected/ 精选、exploring/ 实验、archive/
 research/      研究工具库（纯 importable 模块，无 CLI）：因子评估、合成、归因、HTML 报告
 scripts/       可执行 CLI 入口（回测、报告、评估、训练、扫描、回放、校验）
-tests/         pytest 套件（407 测试）+ fixtures/*.parquet + test_invariants/（INV1-INV8）
+tests/         pytest 套件（539 测试）+ fixtures/*.parquet + test_invariants/（INV1-INV8）
 docs/          设计文档（index.md 是导航入口）
 results/       回测结果库（*.db，SQLite，多 run 累积）
 ```
@@ -42,7 +42,7 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 ## 2. 核心机制层 btcore/
 
-### 2.1 引擎 engine.py（657 行）—— 主循环
+### 2.1 引擎 engine.py（987 行）—— 主循环
 
 | 符号 | 位置 | 职责 |
 |---|---|---|
@@ -171,7 +171,7 @@ moneyflow/cyq_perf/margin_detail 等表的字段以「别名: 表名.字段名�
 
 ### 3.2 factors/library.yaml
 
-88 个因子，纯数据：`- name: {expr, where?, description}`。引用基础列（裸价/复权/扩展列
+126 个因子，纯数据：`- name: {expr, where?, description}`。引用基础列（裸价/复权/扩展列
 如 turnover_rate/pe_ttm/total_mv）与其他因子名构成 DAG。禁止出现 `btcore/factors/builtin.py`
 （反破坏 linter 检查）——引擎只提供表达式机制，不内置任何具体因子。
 
@@ -284,9 +284,9 @@ bars_to_dict → _save_state（事务回滚快照）
 - `tests/test_invariants/` 8 个不变量（16 测试，手动步进引擎）：
   INV1 账户恒等式 / INV2 手数整百 / INV3 现金非负 / INV4 T+1 锁定 /
   INV5 买卖互斥 / INV6 公司行为一致性 / INV7 条件单成交价∈[low,high] / INV8 涨跌停跳过
-- 其余 35 个顶层测试文件（391 测试）按域分布：引擎撮合、成本/限制/公司行为、数据后端
-  （generic_sql 34 个）、因子系统（ops/plan/cse/library/eval）、策略加载、统计/结果库/报告、
-  ML（test_ml.py 27 个，含训练面板与引擎物化一致性）
+- 其余 41 个顶层测试文件（519 个用例；含参数化展开共 539 passed）按域分布：引擎撮合、
+  成本/限制/公司行为、数据后端（generic_sql 34 个）、因子系统（ops/plan/cse/library/eval）、
+  策略加载、统计/结果库/报告、ML（test_ml.py 54 个，含训练面板与引擎物化一致性）
 - 命令：`pytest tests/ -v`；`ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/`；
   `python scripts/check_anticorrupt.py`
 
