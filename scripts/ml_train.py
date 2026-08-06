@@ -46,8 +46,6 @@ from btcore.ml.spec import SCOPE_HOLDING, ModelSpec
 from btcore.ml.trainer import train_guard, train_panel
 from research import cli_common
 
-logger = logging.getLogger(__name__)
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="ML 模型训练 — 与引擎同一物化路径")
@@ -110,28 +108,30 @@ def main() -> int:
         print(f"错误: 因子库中缺少特征因子: {missing}")
         return 1
 
+    provider = None
     try:
-        backend = cli_common.make_provider().backend
+        provider = cli_common.make_provider()
+        backend = provider.backend
     except ImportError:
         print("错误: 无法导入 adapters.tushare.TushareBackend")
         return 1
     print(f"后端: {type(backend).__name__}")
 
-    # 训练域：index_universe 成分并集，未配置则全市场；
-    # 面板构建后再按 point-in-time 成分过滤（训练域 = 引擎逐日计算域）
-    symbols = None
-    pit_members = None
-    index_codes = (doc.get("filter_rules") or {}).get("index_universe", [])
-    if index_codes:
-        snaps = resolve_index_snapshots(backend, index_codes, args.start, args.end)
-        if snaps:
-            symbols = sorted(set().union(*snaps.values()))
-            pit_members = snaps
-            print(f"训练域: {len(symbols)} 只（index_universe 并集，PIT 过滤）")
-
-    benchmark = (doc.get("config") or {}).get("benchmark")
-
     try:
+        # 训练域：index_universe 成分并集，未配置则全市场；
+        # 面板构建后再按 point-in-time 成分过滤（训练域 = 引擎逐日计算域）
+        symbols = None
+        pit_members = None
+        index_codes = (doc.get("filter_rules") or {}).get("index_universe", [])
+        if index_codes:
+            snaps = resolve_index_snapshots(backend, index_codes, args.start, args.end)
+            if snaps:
+                symbols = sorted(set().union(*snaps.values()))
+                pit_members = snaps
+                print(f"训练域: {len(symbols)} 只（index_universe 并集，PIT 过滤）")
+
+        benchmark = (doc.get("config") or {}).get("benchmark")
+
         if is_holding:
             return _train_holding(
                 args, spec, backend, symbols, library, benchmark, pit_members,
@@ -142,6 +142,9 @@ def main() -> int:
     except (ValueError, RuntimeError) as e:
         print(f"错误: {e}")
         return 1
+    finally:
+        if provider is not None:
+            provider.backend.close()
 
 
 def _train_panel(
@@ -186,7 +189,17 @@ def _train_holding(
 
     trade_symbols = sorted(pairs_df["symbol"].unique())
     if symbols is not None:
-        trade_symbols = sorted(set(trade_symbols) & set(symbols)) or trade_symbols
+        inter = set(trade_symbols) & set(symbols)
+        if not inter:
+            # 空交集：训练域过滤后无任何样本，延后到 apply_pit_members 才会
+            # 以误导性错误暴露——这里直接 fail-fast 并打印两侧规模
+            print(
+                f"错误: 交易回合标的与训练域（index_universe）无交集——"
+                f"trade_log 标的 {len(trade_symbols)} 只，训练域 {len(symbols)} 只。"
+                f"请检查 --db 回测与策略 filter_rules.index_universe 是否一致"
+            )
+            return 1
+        trade_symbols = sorted(inter)
 
     print(f"holding scope 模型: {len(spec.features)} 因子 + "
           f"{len(spec.raw_features)} raw + {len(spec.state_features)} 账户态, "

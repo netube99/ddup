@@ -73,8 +73,22 @@ def evaluate_expr(
         result = pd.Series(result, index=df.index)
     if where:
         _validate_cached(where, engine)
-        result = result.where(df.eval(where, engine=engine))
+        result = result.where(where_mask(df.eval(where, engine=engine)))
     return result
+
+
+def where_mask(cond: pd.Series) -> pd.Series:
+    """where 条件统一为布尔掩码（F-EX-02：NaN → False，掩码该行）。
+
+    纯表达式路径与算子路径共用同一语义：条件值 NaN / 0 / False → 掩码
+    （求值后置 NaN，保行不删行），非零 / True → 保留。
+    布尔列原样返回；数值列（裸列引用 / 除法产物）归一为 bool——
+    此前算子路径 .astype(bool) 会把 NaN 转 True（保留行），与纯表达式
+    路径的 NaN 掩码语义相反，是两路径漂移的根因。
+    """
+    if cond.dtype == bool:
+        return cond
+    return cond.fillna(False).astype(bool)
 
 
 # evaluate_expr 每次调用都 validate 的代价是 AST parse + 单行试算，

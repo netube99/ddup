@@ -146,25 +146,41 @@ def _xs_group_rank(x: pd.Series, g: pd.Series) -> pd.Series:
 
 
 def _xs_neutralize(x: pd.Series, g: pd.Series, size: pd.Series) -> pd.Series:
-    """逐日对 行业哑变量 + size 做 OLS 取残差（行业/市值中性化）。"""
-    df = pd.DataFrame({"x": x, "g": g, "s": size})
+    """逐日对 行业哑变量 + size 做 OLS 取残差（行业/市值中性化）。
 
-    def _resid(sub: pd.DataFrame) -> pd.Series:
-        d = pd.get_dummies(sub["g"], dtype=float, drop_first=True)
-        xm = pd.concat([d, sub["s"]], axis=1)
-        xm.insert(0, "_const", 1.0)
-        mat = xm.to_numpy(dtype=float)
-        y = sub["x"].to_numpy(dtype=float)
-        ok = ~np.isnan(y) & ~np.isnan(mat).any(axis=1)
+    向量化实现：按日分块直接构造 numpy 设计矩阵（const + 哑变量 + size），
+    消除逐日 get_dummies/concat/DataFrame 重复分配。哑变量列序与缺失语义与
+    pd.get_dummies(drop_first=True) 逐位一致（缺失类别不产生列、该行全 0）。
+    ``ok.sum() <= mat.shape[1]`` 门槛语义保持（该日整体输出 NaN）。
+    """
+    gv = g.to_numpy()
+    sv = size.to_numpy(dtype=float)
+    xv = x.to_numpy(dtype=float)
+    out = np.full(len(x), np.nan)
+    # 按日分组（sort=False：组按首现序，组内保持原行序）
+    for _, pos in x.groupby(level=_DATE, sort=False).indices.items():
+        g_d = gv[pos]
+        y_d = xv[pos]
+        # 当日类别 = 非缺失类别排序；drop_first 丢弃首个类别。
+        # 缺失类别行哑变量全 0（与 get_dummies 同语义，不产生 NaN 列）
+        valid = ~pd.isna(g_d)
+        cats = np.unique(g_d[valid]) if valid.any() else np.empty(0, dtype=object)
+        n_dummy = max(len(cats) - 1, 0)
+        mat = np.empty((len(pos), n_dummy + 2), dtype=float)
+        mat[:, 0] = 1.0
+        if n_dummy:
+            dummy = np.zeros((len(pos), n_dummy), dtype=float)
+            dummy[valid] = (g_d[valid, None] == cats[1:][None, :]).astype(float)
+            mat[:, 1:-1] = dummy
+        mat[:, -1] = sv[pos]
+        ok = ~np.isnan(y_d) & ~np.isnan(mat).any(axis=1)
         if ok.sum() <= mat.shape[1]:
-            return pd.Series(np.nan, index=sub.index)
-        coef, *_ = np.linalg.lstsq(mat[ok], y[ok], rcond=None)
-        resid = np.full(len(y), np.nan)
-        resid[ok] = y[ok] - mat[ok] @ coef
-        return pd.Series(resid, index=sub.index)
-
-    out = df.groupby(level=_DATE, sort=False, group_keys=False).apply(_resid)
-    return out.reindex(x.index)
+            continue  # 该日样本不足以识别所有系数 → 整体 NaN（门槛语义不变）
+        coef, *_ = np.linalg.lstsq(mat[ok], y_d[ok], rcond=None)
+        resid = np.full(len(pos), np.nan)
+        resid[ok] = y_d[ok] - mat[ok] @ coef
+        out[pos] = resid
+    return pd.Series(out, index=x.index)
 
 
 # ── xsec 坍缩族：逐日截面聚合，立即广播/map 回面板网格 ──

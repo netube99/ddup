@@ -22,11 +22,13 @@
 纯函数模块：不依赖 engine / match / database / provider。
 """
 
+from collections import deque
+
 import numpy as np
 import pandas as pd
 
 from btcore.factors import cse, ops
-from btcore.factors.expr import evaluate_expr, extract_expr_names
+from btcore.factors.expr import evaluate_expr, extract_expr_names, where_mask
 from btcore.factors.library import spec_names
 
 # 数据契约必需列（docs/backend_guide.md）——缺列直接报错，不走语义不精确的兜底
@@ -104,13 +106,25 @@ def derive_fields(bars_df: pd.DataFrame) -> None:
 
 
 def derive_idx_ret(df: pd.DataFrame, backend, benchmark: str | None) -> pd.Series:
-    """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。"""
+    """指数参照序列（benchmark hfq_close 的日收益）按日期广播进面板。
+
+    trade_date 必须是 %Y%m%d 字符串（面板契约）：backend 返回 Timestamp 时
+    dates.map(ret) 会静默全 NaN，这里 fail-fast 而非产出坏列。
+    """
     bench_fn = getattr(backend, "get_benchmark_bars", None)
     if not (callable(bench_fn) and benchmark):
         raise ValueError(
             "因子引用 idx_ret 需要 benchmark 且 backend 提供 get_benchmark_bars"
         )
     dates = df.index.get_level_values("trade_date")
+    if not dates.empty and (
+        not pd.api.types.is_string_dtype(dates)
+        or not (isinstance(dates[0], str) and len(dates[0]) == 8 and dates[0].isdigit())
+    ):
+        raise ValueError(
+            "idx_ret 派生要求 trade_date 为 %Y%m%d 字符串面板，收到 "
+            f"{type(dates[0]).__name__}: {dates[0]!r}（backend 日历必须返回字符串日期）"
+        )
     bench = bench_fn(benchmark, dates.min(), dates.max())
     if bench is None or bench.empty:
         raise ValueError(f"基准 {benchmark} 无数据, 无法派生 idx_ret")
@@ -369,10 +383,10 @@ def _topo_order(nodes: dict[str, dict], entry_names: list[str]) -> list[str]:
         for ref in refs:
             indegree[name] += 1
             rdeps[ref].add(name)
-    queue = sorted(n for n in names if indegree[n] == 0)
+    queue = deque(sorted(n for n in names if indegree[n] == 0))
     order = []
     while queue:
-        name = queue.pop(0)
+        name = queue.popleft()
         order.append(name)
         for dependent in sorted(rdeps[name]):
             indegree[dependent] -= 1
@@ -388,7 +402,8 @@ def _eval_spec_on(df: pd.DataFrame, spec: dict) -> pd.Series:
         values = ops.eval_op_expr(df, spec["expr"])
         where = spec.get("where")
         if where:
-            values = values.where(ops.eval_op_expr(df, where).astype(bool))
+            # F-EX-02：与纯表达式路径同语义（NaN/0/False 掩码）
+            values = values.where(where_mask(ops.eval_op_expr(df, where)))
     else:
         values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
     return values
@@ -399,8 +414,13 @@ def _project(
     breadth_df: pd.DataFrame,
     name: str,
     kind: str,
+    group_col: str = "industry",
 ) -> None:
-    """坍缩节点从广度面板投影回主面板（原地写列）。"""
+    """坍缩节点从广度面板投影回主面板（原地写列）。
+
+    group_col: 分组坍缩（group_mean 等）的组键列名（F-OP-04：不再硬编码
+    industry；组键缺列时 fail-fast，防静默错投影）。
+    """
     import logging
 
     main_dates = main_df.index.get_level_values("trade_date")
@@ -408,11 +428,17 @@ def _project(
         per_date = breadth_df[name].groupby(level="trade_date").first()
         main_df[name] = main_dates.map(per_date)
     else:
+        if group_col not in breadth_df.columns:
+            raise ValueError(
+                f"坍缩因子 {name!r} 分组投影需要组键列 {group_col!r}，"
+                "但广度面板无此列——请检查伪列附着需求"
+            )
         per_group = breadth_df.groupby(
-            [breadth_df.index.get_level_values("trade_date"), breadth_df["industry"]]
+            [breadth_df.index.get_level_values("trade_date"),
+             breadth_df[group_col]]
         )[name].first()
         key = pd.MultiIndex.from_arrays(
-            [main_dates, main_df["industry"].to_numpy()]
+            [main_dates, main_df[group_col].to_numpy()]
         )
         main_df[name] = per_group.reindex(key).to_numpy()
     missing = main_dates[main_df[name].isna()].unique()

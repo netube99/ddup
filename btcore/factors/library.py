@@ -18,7 +18,7 @@ import pandas as pd
 import yaml
 
 from btcore.factors import ops
-from btcore.factors.expr import evaluate_expr, extract_expr_names, validate_expr
+from btcore.factors.expr import evaluate_expr, extract_expr_names, validate_expr, where_mask
 
 # 缺省因子库：repo 根下顶层 factors/library.yaml（用户可编辑的定义文件）
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "factors" / "library.yaml"
@@ -51,7 +51,8 @@ def load_library(path: str | None = None) -> dict[str, dict]:
     """加载并校验因子库，返回 {name: {expr, where?, description?}}。
 
     加载期对每条 expr 分流校验（纯表达式走 validate_expr，算子表达式走
-    validate_op_expr），where 只允许纯表达式；随后对全库做命名引用环检测。
+    validate_op_expr）；where 只允许纯表达式，除非 expr 本身含算子调用
+    （此时 where 可走同一算子求值器）；随后对全库做命名引用环检测。
     """
     lib_path = Path(path) if path else _DEFAULT_PATH
     with open(lib_path, encoding="utf-8") as f:
@@ -66,15 +67,25 @@ def load_library(path: str | None = None) -> dict[str, dict]:
         if not isinstance(spec, dict) or "expr" not in spec:
             raise ValueError(f"因子 {name!r} 缺少 expr: {lib_path}")
         try:
-            if ops.has_op_call(spec["expr"]):
+            expr_has_ops = ops.has_op_call(spec["expr"])
+            if expr_has_ops:
                 ops.validate_op_expr(spec["expr"])
             else:
                 validate_expr(spec["expr"])
-            if spec.get("where"):
-                if ops.has_op_call(spec["where"]):
-                    ops.validate_op_expr(spec["where"])
+            where = spec.get("where")
+            if where:
+                where_has_ops = ops.has_op_call(where)
+                if where_has_ops and not expr_has_ops:
+                    # 纯 expr 因子物化期走 evaluate_expr（pandas.eval），
+                    # 无法求值算子 where——加载期 fail-fast，而非运行中才崩
+                    raise ValueError(
+                        "expr 无算子调用，where 不允许算子"
+                        "（where 只允许纯表达式，除非 expr 本身含算子）"
+                    )
+                if where_has_ops:
+                    ops.validate_op_expr(where)
                 else:
-                    validate_expr(spec["where"])
+                    validate_expr(where)
         except ValueError as exc:
             raise ValueError(f"因子 {name!r} 表达式非法: {exc}") from exc
 
@@ -243,7 +254,8 @@ def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
             values = ops.eval_op_expr(df, spec["expr"])
             where = spec.get("where")
             if where:
-                values = values.where(ops.eval_op_expr(df, where).astype(bool))
+                # F-EX-02：与纯表达式路径同语义——where 为 False/0/NaN 都掩码
+                values = values.where(where_mask(ops.eval_op_expr(df, where)))
         else:
             values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
     except Exception as e:
@@ -265,7 +277,7 @@ def _detect_missing_columns(df: pd.DataFrame, spec: dict) -> set[str]:
         if ops.has_op_call(text):
             cols, _ = ops.extract_op_names(text, set())
         else:
-            cols = extract_expr_names(text) - set()
+            cols = extract_expr_names(text)
         missing |= {c for c in cols if c not in df.columns}
     return missing
 
@@ -380,7 +392,23 @@ def compute_breadth(
         factor_df = compute_factors([factor_name], df, lib)
 
         # Extract daily scalar (collapse factors: same value for all symbols on a date)
-        daily = factor_df.groupby(level="trade_date")[factor_name].first()
+        # F-BRD-03：group_mean 因子同一日不同行业组值不同，first() 只取排序
+        # 首行（任意行业组，有损：223/243 日多行业组，worst 0.198 vs [-0.027,0.299]）。
+        # 显式口径：各行业组值等权平均（industry 伪列已由 ensure_pseudo_columns 附着在 df）
+        spec = lib[factor_name]
+        expr = str(spec["expr"]).lstrip()
+        if expr.startswith("group_mean("):
+            vals = factor_df[factor_name]
+            grp = pd.DataFrame(
+                {"v": vals.to_numpy(), "g": df["industry"].to_numpy()},
+                index=vals.index,
+            )
+            per_group = grp.groupby(
+                [grp.index.get_level_values("trade_date"), grp["g"]]
+            )["v"].first()
+            daily = per_group.groupby(level="trade_date").mean()
+        else:
+            daily = factor_df.groupby(level="trade_date")[factor_name].first()
         # Filter to actual chunk range (exclude overlap)
         daily = daily.loc[actual_start:actual_end]
         results.append(daily)

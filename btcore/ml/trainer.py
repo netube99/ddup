@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from btcore.ml import metrics as ml_metrics
+from btcore.ml import scaler as ml_scaler
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,12 @@ def _fit_scaler(x_train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _scale(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    """标准化并在其后把缺失填 0（= 训练段均值），与推理侧同一口径。"""
-    return np.nan_to_num((x - mean) / std, nan=0.0)
+    """标准化并在其后把缺失/±inf 填 0（= 训练段均值），与推理侧同一实现。
+
+    数学本体在 btcore.ml.scaler.standardize（CONS-07/DUP-07：训练、推理、
+    导出校验三侧收敛为同一函数，任何一侧不得手写第二份）。
+    """
+    return ml_scaler.standardize(x, mean, std)
 
 
 def _split_train_val(dates: pd.Series, val_ratio: float = 0.15):

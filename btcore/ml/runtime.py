@@ -19,6 +19,7 @@ import logging
 import numpy as np
 import pandas as pd
 
+from btcore.ml import scaler as ml_scaler
 from btcore.ml.spec import SCOPE_PANEL, ModelSpec
 from btcore.types import bar_get
 
@@ -44,10 +45,15 @@ def _get_session(artifact: str):
 
 
 def _apply_scaler(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
+    """应用标准化并把缺失/±inf 填 0（数学本体 = btcore.ml.scaler.standardize）。
+
+    标准化空间的 0 = 训练段均值——训练/推理/导出校验三侧共用同一实现
+    （DUP-07/CONS-07），任何一侧不得手写第二份。
+    """
     if spec.scaler_mean and len(spec.scaler_mean) == arr.shape[1]:
         mean = np.asarray(spec.scaler_mean, dtype=np.float32)
         std = np.asarray(spec.scaler_std, dtype=np.float32)
-        arr = (arr - mean) / np.where(std > 1e-10, std, 1.0)
+        return ml_scaler.standardize(arr, mean, std)
     elif spec.scaler_mean:
         raise RuntimeError(
             f"模型 {spec.name} scaler 维度 {len(spec.scaler_mean)} != 特征维度 "
@@ -59,12 +65,12 @@ def _apply_scaler(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
 def _run_batch(spec: ModelSpec, arr: np.ndarray) -> np.ndarray:
     """批量推理，返回 1-D 分数：分类取正类概率，回归取预测值。
 
-    缺失值（NaN）与 ±inf 在 scaler 之后填 0 —— 标准化空间的 0 = 训练段
-    均值，缺失/发散被解释为中性的"平均水准"（训练侧把 ±inf 归一为 NaN，
-    两侧同口径）。若在 scaler 之前填 0，缺失会映射成远离均值的极端输入。
+    缺失值（NaN）与 ±inf 在 scaler 之后填 0（_apply_scaler 即共享的
+    standardize，内含 fill）——标准化空间的 0 = 训练段均值，缺失/发散被
+    解释为中性的"平均水准"（训练侧把 ±inf 归一为 NaN，两侧同口径）。
+    若在 scaler 之前填 0，缺失会映射成远离均值的极端输入。
     """
     arr = _apply_scaler(spec, arr.astype(np.float32, copy=False))
-    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     sess = _get_session(spec.artifact)
     input_name = sess.get_inputs()[0].name
     outputs = sess.run(None, {input_name: arr})
@@ -157,20 +163,33 @@ def compute_state_features(names: list[str], bar: dict, holding) -> dict[str, fl
     return out
 
 
+def assemble_feature_value(state: dict, bar, name: str) -> tuple[float, bool]:
+    """单特征行组装：state 优先 → bar 兜底 → NaN；返回 (值, 是否缺失)。
+
+    训练样本（labels.build_guard_samples）与推理输入（_feature_vector）
+    共用同一实现——训练与推理的特征行组装不允许两侧漂移（DUP-06）。
+    缺失保留 NaN，由 scaler 之后填 0 承接（= 训练段均值）。
+    """
+    v = state.get(name)
+    if v is None:
+        v = bar_get(bar, name, None)
+    if v is None:
+        return np.nan, True
+    f = float(v)
+    if f != f:  # NaN（含 numpy 标量）→ 缺失
+        return np.nan, True
+    return f, False
+
+
 def _feature_vector(spec: ModelSpec, bar: dict, holding) -> tuple[np.ndarray, int]:
     """单持仓特征向量（市场特征 + 账户态），缺失保留 NaN，返回 (向量, 缺失数)。"""
     state = compute_state_features(spec.state_features, bar, holding)
     values: list[float] = []
     nan_count = 0
     for name in spec.feature_order:
-        v = state.get(name)
-        if v is None:
-            v = bar_get(bar, name, None)
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            values.append(np.nan)
-            nan_count += 1
-        else:
-            values.append(float(v))
+        v, missing = assemble_feature_value(state, bar, name)
+        values.append(v)
+        nan_count += int(missing)
     return np.array(values, dtype=np.float32), nan_count
 
 

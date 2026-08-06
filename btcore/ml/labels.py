@@ -16,15 +16,21 @@ trainer 在 scaler 之后填 0（= 训练段均值）。
 import logging
 import sqlite3
 
-import numpy as np
 import pandas as pd
 
 from btcore.constants import TRADE_EVENT_PRIORITY
-from btcore.ml.runtime import compute_state_features
+from btcore.ml.runtime import assemble_feature_value, compute_state_features
 from btcore.ml.spec import ModelSpec
 from btcore.types import Holding
 
 logger = logging.getLogger(__name__)
+
+# trade_log 列名常量（本文件内单一来源）：与 btcore.database.SCHEMA_SQL 的
+# canonical schema 对应（id/run_id 仅用于排序与过滤，不入列集）。本轮不跨
+# 文件统一（constants.py 归属 S2 维护），列名变更需与 database.py 同步。
+TRADE_LOG_SELECT_COLS = (
+    "symbol", "date", "side", "trigger", "price", "shares", "net_amount",
+)
 
 
 def xs_forward_return(panel: pd.DataFrame, horizon: int) -> pd.DataFrame:
@@ -94,8 +100,8 @@ def extract_trade_pairs(result_db_path: str, run_id: int | None = None) -> pd.Da
     db = sqlite3.connect(result_db_path)
     run_id = _resolve_run_id(db, run_id)
     rows = db.execute(
-        "SELECT symbol, date, side, trigger, price, shares, net_amount "
-        "FROM trade_log WHERE run_id = ? ORDER BY date, id",
+        "SELECT " + ", ".join(TRADE_LOG_SELECT_COLS)
+        + " FROM trade_log WHERE run_id = ? ORDER BY date, id",
         (run_id,),
     ).fetchall()
     db.close()
@@ -210,6 +216,10 @@ def build_guard_samples(
         dts = g.index.get_level_values("trade_date")
         pos_bars = g[(dts >= pos.buy_date) & (dts <= pos.sell_date)]
         if len(pos_bars) < 3:
+            logger.warning(
+                "[ML标签] %s 回合 %s → %s 仅 %d 个交易日，跳过（需 >= 3）",
+                sym, pos.buy_date, pos.sell_date, len(pos_bars),
+            )
             continue
 
         is_positive_pair = pos.trigger == "TREND_BREAK" and pos.pnl < 0
@@ -246,9 +256,9 @@ def build_guard_samples(
             row = {"label": label, "trade_date": trade_date}
             state = compute_state_features(spec.state_features, bar, holding)
             for name in feature_cols:
-                v = state.get(name, day.get(name))
-                # 缺失保留 NaN：trainer 在 scaler 之后填 0（训练段均值）
-                row[name] = float(v) if v is not None and v == v else np.nan
+                # 与推理侧共用同一行组装（state 优先→bar 兜底→NaN）：
+                # 缺失保留 NaN，trainer 在 scaler 之后填 0（训练段均值）
+                row[name], _ = assemble_feature_value(state, bar, name)
             samples.append(row)
 
     return pd.DataFrame(samples)

@@ -94,10 +94,9 @@ def _verify(spec, result: TrainResult, onnx_path: Path, meta: dict,
     )
     onnx_out = ml_runtime._run_batch(runtime_spec, rows)
 
-    # sklearn 侧应用与推理侧完全相同的变换（_apply_scaler + 缺失/发散填 0），
-    # 不重复内联第三份 scaler 数学，避免口径漂移
+    # sklearn 侧应用与推理侧完全相同的变换：_apply_scaler 内部即共享的
+    # standardize（含缺失/发散填 0，DUP-07）——不内联第二份 scaler 数学
     x = ml_runtime._apply_scaler(runtime_spec, rows)
-    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     if spec.state_features:
         sk_out = result.model.predict_proba(x)[:, 1]
     else:

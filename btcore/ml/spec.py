@@ -136,7 +136,6 @@ class ModelSpec:
                 "先运行 scripts/ml_train.py 训练导出"
             )
 
-        # 旧版 meta 的 track 键与 YAML role 键已废弃：scope 由 state_features 推导
         if "role" in d:
             logger.warning(
                 "models.%s 的 role 键已废弃（scope 由 state_features 自动推导），忽略",
@@ -184,10 +183,17 @@ class ModelSpec:
             )
 
         # scaler 维度必须等于特征契约维度（meta 与特征不一致 = 静默错分，
-        # fail-fast；旧版/手改 meta 在此拦截）
+        # fail-fast；旧版/手改 meta 在此拦截）。空 scaler 数组同样拒绝：
+        # 推理侧会静默跳过标准化，而训练侧永远导出非空 scaler（n_feat >= 1），
+        # 空数组 = 手改/损坏的 meta。无 meta 的引导路径（meta={}）不受影响。
         scaler_mean = list(meta.get("scaler_mean", []))
         scaler_std = list(meta.get("scaler_std", []))
         n_feat = len(features) + len(raw_features) + len(state_features)
+        if meta and (not scaler_mean or not scaler_std):
+            raise ValueError(
+                f"models.{name} meta 缺少 scaler_mean/scaler_std（空数组会静默"
+                f"跳过标准化）——请重新训练导出"
+            )
         if scaler_mean and len(scaler_mean) != n_feat:
             raise ValueError(
                 f"models.{name} scaler_mean 维度 {len(scaler_mean)} != 特征维度 "
