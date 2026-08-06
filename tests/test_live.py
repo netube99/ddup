@@ -34,6 +34,35 @@ def _fill(date, symbol, side, price=10.0, shares=100, commission=0.0,
             "transfer_fee": transfer_fee, "reason": reason}
 
 
+def _run_backtest(tmp_path):
+    """跑一次 rolling_ranker 回测（TestBacktestParity / TestOpSheet 共用）。"""
+    strategy = load_strategy(EXAMPLE_YAML)
+    provider = DataProvider(MockDataBackend())
+    engine = Engine(strategy, provider, initial_capital=1_000_000,
+                    db_path=str(tmp_path / "bt.db"))
+    engine.run(START, END)
+    return engine
+
+
+def _ledger_from_backtest(bt_engine, tmp_path):
+    """把回测 trade_log 灌进 LedgerStore（BUY/SELL 行按 id 顺序）。"""
+    store = LedgerStore(str(tmp_path / "ledger.db"))
+    store.init_account(START, 1_000_000.0, 1_000_000.0)
+    conn = sqlite3.connect(str(tmp_path / "bt.db"))
+    rows = conn.execute(
+        "SELECT date, symbol, side, trigger, price, shares, commission,"
+        " stamp_tax, transfer_fee FROM trade_log"
+        " WHERE side IN ('BUY','SELL') ORDER BY id"
+    ).fetchall()
+    conn.close()
+    for date, symbol, side, trig, price, shares, comm, tax, fee in rows:
+        store.append_fill(date, symbol, side, price=price, shares=shares,
+                          commission=comm, stamp_tax=tax, transfer_fee=fee,
+                          reason=trig, created_at=NOW)
+    store.conn.commit()
+    return store
+
+
 class TestApplyFill:
     def test_buy_new_creates_locked_holding(self):
         acc = make_account(cash=100_000)
@@ -184,33 +213,8 @@ class TestSyncIdempotency:
 class TestBacktestParity:
     """验收测试：回测 trade_log → 账本 → 回放 ≡ 回测。"""
 
-    def _run_backtest(self, tmp_path):
-        strategy = load_strategy(EXAMPLE_YAML)
-        provider = DataProvider(MockDataBackend())
-        engine = Engine(strategy, provider, initial_capital=1_000_000,
-                        db_path=str(tmp_path / "bt.db"))
-        engine.run(START, END)
-        return engine
-
-    def _ledger_from_backtest(self, bt_engine, tmp_path):
-        store = LedgerStore(str(tmp_path / "ledger.db"))
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        conn = sqlite3.connect(str(tmp_path / "bt.db"))
-        rows = conn.execute(
-            "SELECT date, symbol, side, trigger, price, shares, commission,"
-            " stamp_tax, transfer_fee FROM trade_log"
-            " WHERE side IN ('BUY','SELL') ORDER BY id"
-        ).fetchall()
-        conn.close()
-        for date, symbol, side, trig, price, shares, comm, tax, fee in rows:
-            store.append_fill(date, symbol, side, price=price, shares=shares,
-                              commission=comm, stamp_tax=tax, transfer_fee=fee,
-                              reason=trig, created_at=NOW)
-        store.conn.commit()
-        return store
-
     def test_round_trip_parity(self, tmp_path):
-        bt = self._run_backtest(tmp_path)
+        bt = _run_backtest(tmp_path)
         assert bt.run_id > 0
         n_trades = len(
             sqlite3.connect(str(tmp_path / "bt.db")).execute(
@@ -218,7 +222,7 @@ class TestBacktestParity:
         )
         assert n_trades > 0, "回测无成交，parity 测试失去意义"
 
-        store = self._ledger_from_backtest(bt, tmp_path)
+        store = _ledger_from_backtest(bt, tmp_path)
         strategy = load_strategy(EXAMPLE_YAML)
         provider = DataProvider(MockDataBackend())
         live_engine, calendar = run_signal(strategy, provider, store, END)
@@ -265,8 +269,8 @@ class TestBacktestParity:
 
 class TestOpSheet:
     def test_op_sheet_structure_and_reasons(self, tmp_path):
-        bt = TestBacktestParity()._run_backtest(tmp_path)
-        store = TestBacktestParity()._ledger_from_backtest(bt, tmp_path)
+        bt = _run_backtest(tmp_path)
+        store = _ledger_from_backtest(bt, tmp_path)
         strategy = load_strategy(EXAMPLE_YAML)
         provider = DataProvider(MockDataBackend())
         engine, calendar = run_signal(strategy, provider, store, END)

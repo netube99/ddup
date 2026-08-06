@@ -1,20 +1,31 @@
 """ML 子系统测试：spec 解析 / loader 整合 / runtime 推理 / 引擎双 scope / 训练同源。
 
-ONNX 相关用例需要 onnxruntime + xgboost + onnxmltools（开发依赖，
-未声明在 pyproject）——缺失时整组跳过。
+ONNX 相关用例需要 onnxruntime + xgboost + onnxmltools（dev extra 已声明，
+见 pyproject.toml）——缺失时仅相关用例跳过（_require_onnx），
+spec/dataset/labels 等纯逻辑用例照常运行。
 """
 
 import hashlib
 import json
 import logging
 import sqlite3
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from btcore.engine import Engine
+from btcore.ml import runtime as ml_runtime
 from btcore.ml.spec import ModelSpec
+from btcore.provider import DataProvider
+from btcore.strategy import Strategy
 from btcore.strategy_loader import build_strategy
+from btcore.strategy_tools import (
+    ConditionBuilder,
+    bars_to_df,
+    eval_factor_specs,
+)
 from tests.conftest import MockDataBackend
 
 # ── 纯解析/整合用例（无 ONNX 依赖）──
@@ -38,6 +49,31 @@ def _write_meta(path, **over):
     meta.setdefault("scaler_mean", [0.0] * n_feat)
     meta.setdefault("scaler_std", [1.0] * n_feat)
     path.write_text(json.dumps(meta))
+
+
+def _trainer_scaler():
+    """trainer 侧 scaler 实现（_fit_scaler/_scale，btcore 冻结中无公开 API）。
+
+    两处私有符号集中在本函数引用——trainer 改名时只需更新这里。
+    """
+    from btcore.ml.trainer import _fit_scaler, _scale
+
+    return _fit_scaler, _scale
+
+
+def _assert_scaler_matches_reference(x, fit_scaler):
+    """影子对照：_fit_scaler 输出 ≡ 文档契约参考实现（nanmean/nanstd、
+    ±inf→NaN、全缺失/零方差列→0/1），捕获行为漂移而非仅改名。"""
+    ref_x = np.where(np.isinf(x), np.nan, x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        ref_mean = np.nanmean(ref_x, axis=0)
+        ref_std = np.nanstd(ref_x, axis=0)
+    ref_mean = np.where(np.isnan(ref_mean), 0.0, ref_mean)
+    ref_std = np.where(np.isnan(ref_std) | (ref_std < 1e-10), 1.0, ref_std)
+    mean, std = fit_scaler(x)
+    np.testing.assert_allclose(mean, ref_mean, rtol=1e-12)
+    np.testing.assert_allclose(std, ref_std, rtol=1e-12)
 
 
 class TestModelSpec:
@@ -261,27 +297,28 @@ class TestGuardSamplesBasis:
 
     def test_fit_scaler_nan_aware(self):
         """scaler 只在非缺失值上拟合；缺失在 scaler 之后填 0（= 训练均值）。"""
-        from btcore.ml.trainer import _fit_scaler, _scale
-
+        fit_scaler, scale = _trainer_scaler()
         x = np.array([[1.0, np.nan], [3.0, 2.0], [5.0, 4.0]])
-        mean, std = _fit_scaler(x)
+        mean, std = fit_scaler(x)
         assert mean[0] == pytest.approx(3.0)
         assert mean[1] == pytest.approx(3.0)  # nanmean([2, 4])
-        scaled = _scale(x, mean, std)
+        scaled = scale(x, mean, std)
         assert scaled[0, 1] == 0.0  # 缺失 → 标准化空间 0 = 均值
         assert scaled[0, 0] == pytest.approx((1.0 - 3.0) / std[0])
         # 全缺失列回退 mean=0/std=1，不产生 NaN 参数
-        mean2, std2 = _fit_scaler(np.full((3, 1), np.nan))
+        mean2, std2 = fit_scaler(np.full((3, 1), np.nan))
         assert mean2[0] == 0.0 and std2[0] == 1.0
+        # 影子对照：与文档契约参考实现逐值一致（行为漂移即碎）
+        _assert_scaler_matches_reference(x, fit_scaler)
 
     def test_fit_scaler_inf_robust(self):
         """±inf 在 scaler 拟合前归一为 NaN，不污染 mean/std。"""
-        from btcore.ml.trainer import _fit_scaler
-
+        fit_scaler, _ = _trainer_scaler()
         x = np.array([[1.0, np.inf], [3.0, 2.0], [5.0, np.nan]])
-        mean, std = _fit_scaler(x)
+        mean, std = fit_scaler(x)
         assert np.isfinite(mean).all() and np.isfinite(std).all()
         assert mean[1] == pytest.approx(2.0)
+        _assert_scaler_matches_reference(x, fit_scaler)
 
     def test_pit_training_domain(self):
         """PIT 训练域：每行取 ≤ 当日最近成分快照；训练域 = 引擎逐日计算域。"""
@@ -553,27 +590,22 @@ class TestTradePairRounds:
 
 
 # ── ONNX 相关用例 ──
+#
+# 依赖（onnxruntime / xgboost / onnxmltools）在真正需要处做函数/类级
+# importorskip（_require_onnx），不再模块级整组跳过。
 
-onnxruntime = pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
-xgboost = pytest.importorskip("xgboost", reason="需要 xgboost")
-onnxmltools = pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
-
-from onnxmltools import convert_xgboost  # noqa: E402
-from onnxmltools.convert.common.data_types import FloatTensorType  # noqa: E402
-
-from btcore.engine import Engine  # noqa: E402
-from btcore.ml import runtime as ml_runtime  # noqa: E402
-from btcore.provider import DataProvider  # noqa: E402
-from btcore.strategy import Strategy  # noqa: E402
-from btcore.strategy_tools import (  # noqa: E402
-    ConditionBuilder,
-    bars_to_df,
-    eval_factor_specs,
-)
+def _require_onnx():
+    """ONNX 全链路依赖缺失时跳过当前用例（在 _make_model 内调用）。"""
+    pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
+    pytest.importorskip("xgboost", reason="需要 xgboost")
+    pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
 
 
 def _make_model(tmp_path, name="m", n_features=2, state=(), post="none"):
     """训练一个可复现的小模型并导出 ONNX + meta v3。"""
+    _require_onnx()
+    from onnxmltools import convert_xgboost
+    from onnxmltools.convert.common.data_types import FloatTensorType
     from xgboost import XGBClassifier, XGBRegressor
 
     rng = np.random.RandomState(7)

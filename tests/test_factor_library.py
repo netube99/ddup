@@ -142,6 +142,60 @@ class TestCompute:
         assert len(ic) > 0
 
 
+class TestWhereNaNUnified:
+    """F-EX-02：where 值为 NaN 时，算子路径与纯表达式路径同为掩码语义。"""
+
+    def _panel(self):
+        idx = pd.MultiIndex.from_product(
+            [["20240603", "20240604", "20240605", "20240606"], ["A", "B"]],
+            names=["trade_date", "symbol"],
+        )
+        # from_product 展平按行交替：A 序列 [10,12,10,12]，B 序列 [11,13,11,13]
+        df = pd.DataFrame(
+            {"close": [10.0, 11.0, 12.0, 13.0] * 2,
+             "w": [float("nan"), 1.0, 1.0, 1.0] * 2},
+            index=idx,
+        )
+        return df
+
+    def test_op_where_nan_masks(self):
+        """算子 where 值 NaN → 掩码（不再被 astype(bool) 转 True 保留）。
+
+        where "delay(close, 2)" 前两日 NaN：旧行为 NaN→True 保留
+        （第 2 日 roc 有值也被保留），新行为掩码。
+        """
+        lib = {"f": {"expr": "roc(close, 1)", "where": "delay(close, 2)"}}
+        out = compute_factors(["f"], self._panel(), lib)["f"]
+        # 首日 roc 无值 + 前两日 where=NaN 掩码 → (0603/0604) 全 NaN
+        assert out.loc[("20240603", "A")] != out.loc[("20240603", "A")]
+        assert out.loc[("20240604", "A")] != out.loc[("20240604", "A")]
+        # 第 3 日起 where = delay(close,2) 有值 → 保留 roc（A 序列 10→12→10→12）
+        assert out.loc[("20240605", "A")] == pytest.approx(10.0 / 12.0 - 1.0)
+        assert out.loc[("20240606", "A")] == pytest.approx(12.0 / 10.0 - 1.0)
+
+    def test_plain_where_nan_masks(self):
+        """纯表达式 where 值 NaN → 掩码（既有语义，对照锚点）。"""
+        lib = {"g": {"expr": "close / 10", "where": "w"}}
+        out = compute_factors(["g"], self._panel(), lib)["g"]
+        assert out.loc[("20240603", "A")] != out.loc[("20240603", "A")]  # w=NaN
+        assert out.loc[("20240603", "B")] == pytest.approx(1.1)  # w=1.0 保留
+        assert out.loc[("20240604", "A")] == pytest.approx(1.2)
+
+    def test_op_where_nan_equals_plain_semantics(self):
+        """两路径 NaN 语义一致：where 值 NaN 的行都被掩码。"""
+        df = self._panel()
+        lib_op = {"f": {"expr": "roc(close, 1)", "where": "delay(close, 2)"}}
+        lib_plain = {"g": {"expr": "close / 10", "where": "w"}}
+        f = compute_factors(["f"], df, lib_op)["f"]
+        g = compute_factors(["g"], df, lib_plain)["g"]
+        # f 前两日（A/B 两行）全掩码；g 仅 (0603,A)（w=NaN）掩码
+        for d in ("20240603", "20240604"):
+            for s in ("A", "B"):
+                assert f.loc[(d, s)] != f.loc[(d, s)]
+        assert g.loc[("20240603", "A")] != g.loc[("20240603", "A")]
+        assert g.loc[("20240603", "B")] == pytest.approx(1.1)
+
+
 class TestResolve:
     def test_resolve_spec(self):
         spec = resolve_spec({"factor": "mom20", "weight": 2.0, "ascending": True})
@@ -277,7 +331,11 @@ class TestComputeBreadth:
         assert result.dropna().shape[0] > 0  # 首日 pct_change 为 NaN 属正常
 
     def test_group_mean_values_match_hand_compute(self, tmp_path):
-        """行为不变回归：industry_mom 形态坍缩因子的值与手算一致。"""
+        """F-BRD-03 回归：group_mean 坍缩因子 = 各行业组值等权平均。
+
+        此前 first() 只取排序首行（A 股所在行业组 20.0，任意性）；
+        显式口径 = mean(IND1=20, IND2=30) = 25.0。
+        """
 
         class TinyBackend:
             """4 股 × 5 日 × 2 行业的最小合成 backend（收盘价逐日不变）。"""
@@ -319,8 +377,8 @@ class TestComputeBreadth:
         )
         assert list(result.index) == TinyBackend().get_calendar("20240603",
                                                                 "20240607")
-        # 日频标量 = 每日首行（symbol A，IND1）的分组均值 = (10+30)/2
-        assert (result == 20.0).all()
+        # 组值 [20.0, 30.0] 等权平均；此前 first() 返回 20.0（任意行业组）
+        assert (result == 25.0).all()
 
 
 class TestBoolSumSemantics:
@@ -426,9 +484,17 @@ class TestBreadthGroupMean:
         needs = {"industry_main": True}
         factor_plan.ensure_pseudo_columns(bars, needs, "main", backend=backend)
         full = compute_factors(["ind_mom1"], bars, lib)
-        daily = full.groupby(level="trade_date")["ind_mom1"].first()
-        common = daily.index.intersection(result.index)
+        # F-BRD-03 显式口径：breadth 标量 = 各行业组值等权平均
+        # （此前 first() 取排序首行所属行业组，任意性有损）
+        grouped = full["ind_mom1"].to_frame().assign(
+            industry=bars["industry"].to_numpy()
+        )
+        per_group = grouped.groupby(
+            [grouped.index.get_level_values("trade_date"), "industry"]
+        )["ind_mom1"].first()
+        group_mean = per_group.groupby(level="trade_date").mean()
+        common = group_mean.index.intersection(result.index)
         pd.testing.assert_series_equal(
-            daily.loc[common].astype(float), result.loc[common].astype(float),
+            group_mean.loc[common].astype(float), result.loc[common].astype(float),
             check_names=False, rtol=1e-6,
         )

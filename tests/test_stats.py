@@ -53,8 +53,8 @@ def test_trading_friction_values():
     # 磨损拖累为正，无摩擦收益高于实际收益
     assert fr["annualized_cost_drag"] > 0
     assert fr["no_cost_total_return"] > stats["total_return"]
-    # AAA 一笔盈利 round trip: 12000 - 10000 = 2000（不含费用口径）
-    assert fr["cost_pct_of_gross_profit"] == pytest.approx(total_cost / 2000.0)
+    # AAA 一笔盈利 round trip: 11978.9 - 10007.1 = 1971.8（含费用口径 CONS-01）
+    assert fr["cost_pct_of_gross_profit"] == pytest.approx(total_cost / 1971.8)
 
 
 def test_management_complexity_values():
@@ -79,10 +79,11 @@ def test_management_complexity_values():
 
 
 def test_round_trip_through_stk_div():
-    """送转后卖出：lot 缩放、成本每股下摊，盈亏与经济口径一致。
+    """送转后卖出：lot 缩放、成本下摊，盈亏与含费用口径一致（CONS-01）。
 
-    100 股 @10 → 10送10（STK_DIV shares=200）→ 卖 200 @5.1：
-    真实 pnl = 200×5.1 - 100×10 = +20；修复前按未缩放 lot 记为 -490。
+    100 股 @10（含费成本 1007.1）→ 10送10（STK_DIV shares=200）→ 卖 200 @5.1
+    （含费净额 1013.39）：pnl = 1013.39 - 1007.1 = +6.29；
+    不含费用口径为 200×5.1 - 100×10 = +20，两者差 = 买卖费用合计 13.71。
     """
     adf = make_account_daily(
         [1_000_000.0, 1_010_000.0, 1_010_020.0], n_holdings=[1, 1, 0]
@@ -97,9 +98,9 @@ def test_round_trip_through_stk_div():
     ])
     stats = calculate_statistics(adf, trades)
     rt = stats["round_trip"]
-    assert rt["summary"]["total_realized_pnl"] == pytest.approx(20.0, abs=0.01)
+    assert rt["summary"]["total_realized_pnl"] == pytest.approx(6.29, abs=0.01)
     assert rt["trip_detail"][0]["shares"] == 200
-    assert rt["trip_detail"][0]["pnl"] == pytest.approx(20.0, abs=0.01)
+    assert rt["trip_detail"][0]["pnl"] == pytest.approx(6.29, abs=0.01)
 
 
 def test_round_trip_same_day_div_before_sell():
@@ -125,8 +126,8 @@ def test_round_trip_same_day_div_before_sell():
     stats = calculate_statistics(adf, trades)
     rt = stats["round_trip"]
     assert rt["summary"]["total_dividend_received"] == pytest.approx(50.0, abs=0.01)
-    # 分红计入后总盈亏 = 价差 50 + 分红 50 = 100
-    assert rt["summary"]["total_realized_pnl"] == pytest.approx(100.0, abs=0.01)
+    # 分红计入后含费用总盈亏 = 卖出净额 1043.375 - 买入含费成本 1007.1 + 分红 50
+    assert rt["summary"]["total_realized_pnl"] == pytest.approx(86.275, abs=0.01)
 
 
 def test_empty_trades_zero_dicts():
@@ -172,13 +173,14 @@ def test_sell_source_attribution():
     src = stats["sell_source"]
 
     assert set(src) == {"MANUAL", "TRAILING_TP", "STOP_LOSS"}
-    # AAA: 12000-10000=+2000;CCC: 9000-10000=-1000;BBB: 22000-20000=+2000
+    # CONS-01 含费用口径：AAA: 11978.9-10007.1=+1971.8; CCC: 8983.9-10007.1=-1023.2;
+    # BBB: 21968.0-20014.2=+1953.8
     assert src["MANUAL"]["count"] == 1
-    assert src["MANUAL"]["total_pnl"] == pytest.approx(2000.0)
+    assert src["MANUAL"]["total_pnl"] == pytest.approx(1971.8)
     assert src["MANUAL"]["win_rate"] == 1.0
-    assert src["TRAILING_TP"]["total_pnl"] == pytest.approx(-1000.0)
+    assert src["TRAILING_TP"]["total_pnl"] == pytest.approx(-1023.2)
     assert src["TRAILING_TP"]["win_rate"] == 0.0
-    assert src["STOP_LOSS"]["total_pnl"] == pytest.approx(2000.0)
+    assert src["STOP_LOSS"]["total_pnl"] == pytest.approx(1953.8)
     assert src["MANUAL"]["avg_holding_days"] == pytest.approx(2.0)
 
 
@@ -186,3 +188,67 @@ def test_sell_source_empty():
     adf = make_account_daily([1_000_000.0, 1_010_000.0], n_holdings=[0, 1])
     stats = calculate_statistics(adf, make_trades([]))
     assert stats["sell_source"] == {}
+
+
+def test_round_trip_partial_sell_fee_allocation():
+    """CONS-01：部分卖出按比例分摊买卖费用，剩余 lot 成本同步扣减。
+
+    买入 1000 股含费成本 10007.1；分两次卖出 400/600：
+    每次 pnl = 卖出净额比例分摊 - 成本比例分摊，总账 = 净额合计 - 含费成本。
+    """
+    adf = make_account_daily(
+        [1_000_000.0, 1_005_000.0, 1_010_000.0], n_holdings=[1, 1, 0]
+    )
+    trades = make_trades([
+        ["20240603", "AAA", "BUY", "MANUAL", 10.0, 1000, 10000.0, 5.0, 0.0, 0.1, 2.0,
+         -10007.1, ""],
+        ["20240605", "AAA", "SELL", "MANUAL", 12.0, 400, 4800.0, 5.0, 4.8, 0.1, 1.0,
+         4789.1, ""],
+        ["20240608", "AAA", "SELL", "MANUAL", 13.0, 600, 7800.0, 5.0, 7.8, 0.1, 1.0,
+         7786.1, ""],
+    ])
+    stats = calculate_statistics(adf, trades)
+    trips = stats["round_trip"]["trip_detail"]
+    assert len(trips) == 2
+    assert trips[0]["shares"] == 400
+    assert trips[1]["shares"] == 600
+    # 第一笔卖出 400 股 = 该笔全部：卖出净额全取 4789.1，
+    # 成本按 400/1000 分摊 10007.1×0.4
+    assert trips[0]["pnl"] == pytest.approx(4789.1 - 10007.1 * 0.4, abs=0.01)
+    assert trips[1]["pnl"] == pytest.approx(7786.1 - 10007.1 * 0.6, abs=0.01)
+    # 总账恒等：全部净额 - 含费成本
+    total = sum(t["pnl"] for t in trips)
+    assert total == pytest.approx((4789.1 + 7786.1) - 10007.1, abs=0.01)
+
+
+def test_round_trip_missing_net_amount_falls_back(caplog):
+    """CONS-01 防御：缺 net_amount 的 trade_log 回退裸价口径并告警。"""
+    adf = make_account_daily(
+        [1_000_000.0, 1_010_000.0, 1_020_000.0], n_holdings=[1, 1, 0]
+    )
+    rows = [r[:] for r in SAMPLE_TRADES if r[1] == "AAA"]
+    for r in rows:
+        r[11] = None  # net_amount 缺失
+    stats = calculate_statistics(adf, make_trades(rows))
+    rt = stats["round_trip"]
+    # 裸价回退：12000 - 10000 = 2000
+    assert rt["summary"]["total_realized_pnl"] == pytest.approx(2000.0, abs=0.01)
+    assert "缺 net_amount" in caplog.text
+
+
+def test_open_position_cost_basis_includes_fees():
+    """CONS-01：未平仓持仓 cost_basis 含费用（期末估值口径一致）。"""
+    from types import SimpleNamespace
+
+    adf = make_account_daily([1_000_000.0, 1_010_000.0], n_holdings=[1, 1])
+    trades = make_trades([
+        ["20240603", "AAA", "BUY", "MANUAL", 10.0, 1000, 10000.0, 5.0, 0.0, 0.1, 2.0,
+         -10007.1, ""],
+    ])
+    stats = calculate_statistics(
+        adf, trades, holdings={"AAA": SimpleNamespace(last_price=11.0)}
+    )
+    op = stats["round_trip"]["open_positions"][0]
+    assert op["cost_basis"] == pytest.approx(10007.1, abs=0.01)
+    # 浮盈 = 1000×11 - 含费成本 10007.1
+    assert op["pnl"] == pytest.approx(11000.0 - 10007.1, abs=0.01)

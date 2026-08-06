@@ -164,6 +164,55 @@ class BareBackend:
     """不实现任何鸭子类型扩展方法的 backend。"""
 
 
+class TestUniverseQueryDedup:
+    """DUP-08b：loader universe hook 与 StockFilter 对同一区间只查一次 backend。"""
+
+    def test_same_window_queries_backend_once(self):
+        from btcore.filters import _INDEX_SNAPSHOT_CACHE, resolve_index_universe
+
+        calls = {"n": 0}
+
+        class CountingBackend(StubBackend):
+            def get_index_members(self, index_codes, start, end):
+                calls["n"] += 1
+                return dict(self._index_members)
+
+        backend = CountingBackend(index_members={
+            "20240531": {"000001.SZ", "600036.SH"},
+        })
+        _INDEX_SNAPSHOT_CACHE.clear()
+        codes = _index_rules()["index_universe"]
+        # loader 路径（universe hook）
+        result = resolve_index_universe(backend, codes, "20240601", "20240630")
+        assert result is not None
+        # StockFilter 路径（同区间，缓存命中）
+        f = StockFilter(backend, "20240601", {"index_universe": codes},
+                        "20240630")
+        assert set(f.filter(
+            {s: make_bar(s) for s in ("000001.SZ", "600036.SH")}, "20240603"
+        )) == {"000001.SZ", "600036.SH"}
+        assert calls["n"] == 1, "同一 (backend, codes, window) 区间应只查询一次"
+
+    def test_different_window_queries_again(self):
+        from btcore.filters import _INDEX_SNAPSHOT_CACHE, resolve_index_universe
+
+        calls = {"n": 0}
+
+        class CountingBackend(StubBackend):
+            def get_index_members(self, index_codes, start, end):
+                calls["n"] += 1
+                return dict(self._index_members)
+
+        backend = CountingBackend(index_members={
+            "20240531": {"000001.SZ"},
+        })
+        _INDEX_SNAPSHOT_CACHE.clear()
+        codes = _index_rules()["index_universe"]
+        resolve_index_universe(backend, codes, "20240601", "20240630")
+        resolve_index_universe(backend, codes, "20250101", "20250131")
+        assert calls["n"] == 2, "不同窗口应各自查询"
+
+
 class TestSoftFallback:
     """规则开启但 backend 缺方法：告警一次，该条规则不生效（软回退）。"""
 

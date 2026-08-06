@@ -13,6 +13,21 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 # 等辅助日线表的列与契约列一起 LEFT JOIN 进 bars
 _AUX_TABLES = ["moneyflow", "cyq_perf", "margin_detail"]
 
+# session 级缓存：parquet 读出后整套件复用（MockDataBackend 每测试新建一个实例，
+# 直接缓存 DataFrame 免去重复 IO）。共享帧只读——query_bars/get_st_map 等均
+# 在副本上操作，任何测试不得原地修改 backend 的 _* 属性（构造新帧后重绑实例
+# 属性是安全的，不会污染共享缓存）。
+_FIXTURE_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _load_fixture(name: str) -> pd.DataFrame:
+    """读取 fixtures/<name>.parquet，session 内只读一次。"""
+    frame = _FIXTURE_CACHE.get(name)
+    if frame is None:
+        frame = pd.read_parquet(os.path.join(FIXTURES_DIR, f"{name}.parquet"))
+        _FIXTURE_CACHE[name] = frame
+    return frame
+
 # make_bar 的 up_limit/down_limit 缺省按主板 ±10% 推算；显式传 None 表示缺失
 _AUTO = object()
 
@@ -69,16 +84,27 @@ class MockDataBackend(DataBackend):
 
     def __init__(self, fixtures_dir: str = FIXTURES_DIR):
         self._dir = fixtures_dir
-        self._bars = pd.read_parquet(os.path.join(fixtures_dir, "bars.parquet"))
-        self._limits = pd.read_parquet(os.path.join(fixtures_dir, "limits.parquet"))
-        self._dividends = pd.read_parquet(os.path.join(fixtures_dir, "dividends.parquet"))
-        self._st = pd.read_parquet(os.path.join(fixtures_dir, "st.parquet"))
-        self._benchmark = pd.read_parquet(os.path.join(fixtures_dir, "benchmark_bars.parquet"))
-        self._trade_cal = pd.read_parquet(os.path.join(fixtures_dir, "trade_cal.parquet"))
-        self._aux = {
-            t: pd.read_parquet(os.path.join(fixtures_dir, f"{t}.parquet"))
-            for t in _AUX_TABLES
-        }
+        # session 级缓存读取（见模块顶部 _load_fixture）；fixtures_dir 非默认时
+        # 走原路径直读（当前无调用方，保留参数兼容）
+        if fixtures_dir == FIXTURES_DIR:
+            self._bars = _load_fixture("bars")
+            self._limits = _load_fixture("limits")
+            self._dividends = _load_fixture("dividends")
+            self._st = _load_fixture("st")
+            self._benchmark = _load_fixture("benchmark_bars")
+            self._trade_cal = _load_fixture("trade_cal")
+            self._aux = {t: _load_fixture(t) for t in _AUX_TABLES}
+        else:
+            self._bars = pd.read_parquet(os.path.join(fixtures_dir, "bars.parquet"))
+            self._limits = pd.read_parquet(os.path.join(fixtures_dir, "limits.parquet"))
+            self._dividends = pd.read_parquet(os.path.join(fixtures_dir, "dividends.parquet"))
+            self._st = pd.read_parquet(os.path.join(fixtures_dir, "st.parquet"))
+            self._benchmark = pd.read_parquet(os.path.join(fixtures_dir, "benchmark_bars.parquet"))
+            self._trade_cal = pd.read_parquet(os.path.join(fixtures_dir, "trade_cal.parquet"))
+            self._aux = {
+                t: pd.read_parquet(os.path.join(fixtures_dir, f"{t}.parquet"))
+                for t in _AUX_TABLES
+            }
 
         # 预建股利索引（NaN 按 0 处理，or 短路挡不住 float("nan")）
         self._dividend_idx: dict[str, dict] = {}

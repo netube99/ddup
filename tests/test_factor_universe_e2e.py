@@ -25,8 +25,8 @@ def _wrap_backend_with_index_members(backend, members_map):
 def test_factor_computed_on_wide_traded_on_narrow():
     """factor_universe 配置为 fixtures 的全量符号（宽域），get_universe 只返回 1 只。"""
     backend = MockDataBackend()
-    bars = backend._bars.copy()
-    all_symbols = sorted(bars["symbol"].unique())
+    bars = backend.query_bars(None, "20240603", "20240701")
+    all_symbols = sorted(bars.index.get_level_values("symbol").unique())
     # 宽域 = 前 5 只，窄域 = 第 1 只
     wide_symbols = all_symbols[:5]
     narrow_symbols = [all_symbols[0]]

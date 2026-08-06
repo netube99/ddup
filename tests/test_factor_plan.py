@@ -367,3 +367,41 @@ class TestProjectWarnings:
 
         has_warning = any("坍缩因子" in r.message for r in caplog.records)
         assert has_warning, "日期不匹配应产生告警"
+
+
+class TestProjectGroupKey:
+    """F-OP-04：_project 组键参数化——不再硬编码 industry，缺列 fail-fast。"""
+
+    @staticmethod
+    def _mk_panels(group_col: str = "industry"):
+        dates = ["20240603", "20240604"]
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B"]], names=["trade_date", "symbol"]
+        )
+        main = pd.DataFrame(
+            {"close": [10.0, 20.0, 10.0, 20.0],
+             group_col: ["X", "Y", "X", "Y"]},
+            index=idx,
+        )
+        breadth = pd.DataFrame(
+            {"f": [1.0, 2.0, 1.0, 2.0],
+             group_col: ["X", "Y", "X", "Y"]},
+            index=idx,
+        )
+        return main, breadth
+
+    def test_default_group_col_projects(self):
+        main, breadth = self._mk_panels()
+        plan._project(main, breadth, "f", "group")
+        assert main["f"].tolist() == [1.0, 2.0, 1.0, 2.0]
+
+    def test_custom_group_col_projects(self):
+        main, breadth = self._mk_panels(group_col="sector")
+        plan._project(main, breadth, "f", "group", group_col="sector")
+        assert main["f"].tolist() == [1.0, 2.0, 1.0, 2.0]
+
+    def test_missing_group_col_fails_fast(self):
+        main, breadth = self._mk_panels()
+        breadth = breadth.drop(columns=["industry"])
+        with pytest.raises(ValueError, match="组键列"):
+            plan._project(main, breadth, "f", "group")

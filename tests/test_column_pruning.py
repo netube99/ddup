@@ -115,8 +115,23 @@ class TestBackendColumnsContract:
                                columns=["open", "nope"])
 
     def test_mock_query_bars_default_unchanged(self):
+        """缺省列 = bars 契约列 ∪ LEFT JOIN 的 aux 表列（精确集合，防止静默增删）。"""
+        import os
+
+        import pandas as pd
+
+        from tests.conftest import _AUX_TABLES, FIXTURES_DIR
+
         backend = MockDataBackend()
-        assert len(backend.query_bars(None, "20240603", "20240628").columns) > 10
+        df = backend.query_bars(None, "20240603", "20240628")
+        expected = set(pd.read_parquet(
+            os.path.join(FIXTURES_DIR, "bars.parquet")).columns)
+        for t in _AUX_TABLES + ["limits"]:
+            aux = pd.read_parquet(os.path.join(FIXTURES_DIR, f"{t}.parquet"))
+            expected |= set(aux.columns) - {"ts_code"}  # ts_code 重命名为 symbol
+        # 索引键（trade_date/symbol）不进列
+        expected -= {"trade_date", "symbol"}
+        assert set(df.columns) == expected
 
 
 def _run(strategy, monkeypatch=None, full_columns=False) -> dict:
