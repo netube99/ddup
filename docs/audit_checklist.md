@@ -202,7 +202,7 @@
   边界：**rolling 按组内行数非自然日**——停牌缺行不占窗口但 `sum` 遇 NaN 整窗污染；fixture 数据连续掩盖此行为，需构造含缺行面板验证。
 - [ ] **FA-OP-02** NaN 语义逐算子 — roc 基准=0→NaN；corr/beta 分母 0→NaN；zscore 当日 std=0→NaN；log x≤0→NaN（x=0 实际为 -inf，ops.py `_xs_log`）；**BoolOp `(v!=0)` 折叠使 NaN→True**（`ops.py:408-413`）——and/or 链中 NaN 按真处理，是静默错误高发点。
 - [ ] **FA-OP-03** 截面算子口径 — rank(pct=True) 并列取平均秩（0/1 布尔因子大量并列时分布反直觉）；winsorize 分位∈(0,0.5) 字面量校验（`ops.py:310-311`）；neutralize 当日有效样本≤变量数→全日 NaN（`ops.py:159-160`，新股/小截面触发）。
-- [ ] **FA-OP-04** 坍缩算子 — mean 全市场日频均值广播；group_mean 分组键**引擎侧硬编码 industry**（`plan.py:395-421`）——非 industry 分组键在引擎路径直接 NaN。
+- [ ] **FA-OP-04** 坍缩算子 — mean 全市场日频均值广播；group_mean 分组键参数化 `group_col="industry"` + 缺列 fail-fast（F-OP-04）——非 industry 分组键在引擎路径仍 NaN。
 - [ ] **FA-OP-05** ema 无限记忆 — warmup=窗口时前段有偏（3n−1 近似），首月 ema 类因子值与长 warmup 口径有差。
 - [ ] **FA-OP-06** beta/corr/resid_std 闭式矩为**总体口径**（ddof 在比值中抵消），与 sklearn 样本口径数值级差——第三方 golden 对账会误报，属已知口径。
 
@@ -210,8 +210,7 @@
 
 - [ ] **FA-EX-01** 非法表达式加载期报错 — `expr.py:22-43`（Call/Attribute→ValueError；单行试算失败→ValueError；lru_cache 不缓存错误）。
   边界：单行试算 `{n:[1.0]}` 可能掩盖伪列运行时缺列——`library.py:287-299` `_detect_missing_columns` 补救，两防线都要在。
-- [ ] **FA-EX-02** where 子句两路径 NaN 语义不一致（**已知待决**）— 算子路径 `astype(bool)` NaN→True 不掩码（`plan.py:384-392`）；纯表达式路径 `df.eval(where)` 的 NaN 被掩码为 False（`expr.py:71-76`，掩码行 :76；NaN 非 bool where 实为 TypeError 崩溃，见 2026-08-02 静态实证）。
-  静态：确认差异存在；两路径各造一个 where 含 NaN 的因子验证行为。P2。
+- [ ] **FA-EX-02** where 两路径 NaN 语义**已统一（2026-08 修 F-EX-02）**— `where_mask`（`expr.py`）：条件 NaN/0/False → 掩码该行；布尔列原样、数值列归一；算子路径不再 `astype(bool)`（NaN→True 不掩码的旧偏差已除）。
 - [ ] **FA-PL-01** 两路供给 — 主面板=候选池×长窗口；广度=全市场×短窗口窄列（`plan.py:161-257`；main_days=max(365,breadth_days)）。
   边界：两面板同节点各算一次，主=候选池口径、广度=全市场口径——坍缩因子值在引擎与 factor_eval 下应一致（`scripts/factor_eval.py:186-208` 已同源，回归项 R-HIS）。
 - [ ] **FA-PL-02** 缺列 fail-fast — `validate_required_columns`（`plan.py:74-84`）契约强制无兜底。
@@ -219,9 +218,9 @@
   边界：回测首日因子值必须与更长 warmup 口径一致（warmup 不足导致的首月偏差，动态对比法：同一因子两个 warmup 长度跑 factor_eval 比对首日值）。
 - [ ] **FA-CSE-01** CSE — 完全重复按 ast.dump 文本同构去重（`cse.py:39-49`）；含坍缩子树不提取（:72-74）；临时列物化后删。
   边界：`mom60`/`mom_60d` 别名去重后只剩一份列——测试/策略若断言两列独立存在会失败。
-- [ ] **FA-BRD-01** compute_breadth — 分块 60 天全市场流式（`library.py:302-405`）；**group_mean 坍缩 `groupby(trade_date).first()` 只取某一行业组值，日频标量有损（已知待决 P2）**；chunk 边界依赖日期字符串字典序，缺口日历下需真实验证。
+- [ ] **FA-BRD-01** compute_breadth — 分块 60 天全市场流式（`library.py:302-405`）；**group_mean 坍缩按 (date,industry) 组 first 后对组均值等权平均（2026-08 已修 F-BRD-03，此前任意取一组有损）**；chunk 边界依赖日期字符串字典序，缺口日历下需真实验证。
 - [ ] **FA-YAML-01** library.yaml 加载防线 — 重复键 fail-fast 带行号（`library.py:27-38`）；保留字 20 个（:41-47）；环检测 DFS（:209-229）；缺 expr→ValueError。
-  边界：`load_library:73-77` 允许 where 含算子调用，与 library.py docstring"where 只允许纯表达式"矛盾（**文档漂移 P3**），以代码为准并修正 docstring。
+  边界：where 含算子**仅当 expr 本身含算子**（expr 纯表达式 + where 算子 → 加载 ValueError，`library.py:77-85`；旧"允许/禁止"二分的 docstring 矛盾已由该条件规则消解）。
 
 ### 4.3 因子口径动态验证（引擎同源三件套）
 

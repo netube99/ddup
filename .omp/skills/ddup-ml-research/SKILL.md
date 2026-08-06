@@ -55,22 +55,23 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model exit_guard
 ```
 - 标签：panel = horizon 日前向收益 close_hfq 截面 pct rank；holding = trade_log 回合重构，正样本=TREND_BREAK 且净亏损、距卖出∈[1,lookahead]
 - holding 标签只消费单一 run：`--run-id` 显式指定，缺省取最新 completed run（无 completed 回退最新 run，多 run 时 warning）；同日公司行为（DIV/STK_DIV 盘前）先于买卖，红利计入在持回合 pnl，实盘账本 ADJUST 审计行跳过
-- 训练域 = filter_rules.index_universe 成分并集 + PIT 过滤（未配则全市场）；80/20 时间切分 + embargo（切点前 horizon/lookahead 日剔除）；scaler 仅训练段拟合
-- 产出：`<name>.onnx` + `<name>.meta.json`（v3：特征契约/scaler/指标/train_window/artifact_sha256）；导出强制 sklearn vs ONNX 一致性 ≤1e-4
+- 训练失败模式：holding 回合标的与训练域（index_universe）无交集 → 打印两侧规模 + 退出码 1（检查 --db 回测与 filter_rules.index_universe 是否一致）；单回合 <3 个交易日 → warning 跳过该回合（需 >= 3）
+- 训练域：panel = filter_rules.index_universe 成分并集 + PIT 过滤（未配则全市场）；holding = 回合标的 ∩ 该训练域（交集裁剪）；80/20 时间切分 + embargo（切点前 horizon/lookahead 日剔除）；scaler 仅训练段拟合
+- 产出：`<name>.onnx` + `<name>.meta.json`（v3：特征契约/scaler/指标/train_window/artifact_sha256）；导出强制 sklearn vs ONNX 一致性 ≤1e-4；meta 版本 ≠ 3 → 加载期 ValueError，强制重新导出（v2 模型不可用）
 - 样本下限：panel ≥500 行；holding ≥100 且正样本 ≥20（不足报错）
 - 指标：panel = 日截面 Spearman IC/ICIR/胜率 + 十分层多空单调性；holding = AUC/precision/recall
 
 ## 消费三通道
 
 1. **factor_specs 引用**（仅 panel）：`{factor: ml_alpha_xs, weight: 1.0, ascending: false}`——与普通因子同权参与评分
-2. **conditions.model_exit**：YAML `conditions: {model_exit: [{model: exit_guard, threshold: 0.5}]}`；持仓 bar 分数 ≥threshold → ML_EXIT 条件单，**T+1 开盘价成交**（跌停顺延/量 cap/T+1 护栏全套）；trade_log trigger="ML_EXIT"（model/score 只在日志与快照，不回写 trade_log）
+2. **conditions.model_exit**：YAML `conditions: {model_exit: [{model: exit_guard, threshold: 0.5}]}`；threshold 缺省 0.5、须 ∈(0,1)（越界 → 加载 ValueError）；持仓 bar 分数 ≥threshold → ML_EXIT 条件单，**T+1 开盘价成交**（跌停顺延/量 cap/T+1 护栏全套）；trade_log trigger="ML_EXIT"（model/score 只出现在条件单记录与引擎日志，trade_log 固定列不回写）
 3. **策略自读**：panel 读 bars 列；holding 读 bar["ml_<name>"] 自定义逻辑
 
 ## 样本外复测与观测（训练完必做）
 
 - `python scripts/factor_eval.py --model models/alpha_xs.onnx --start <样本外> --end ... [--universe CSI500]`：复用引擎同一物化链评 IC/分层（仅 panel）；训练段指标不算数
 - holding 模型：先查 `ml_predictions` 表分数分布再定 threshold，不要拍脑袋 0.5
-- `ml_predictions` 表：缺省只落持仓+当日买卖名单标的；config `ml_log: "full"` 落全截面
+- `ml_predictions` 表（run_id/date/symbol/model/score）：缺省只落持仓+当日买卖名单标的；config `ml_log: "full"` 落全截面
 - 版本追溯：runs.config_json.models_meta（含 artifact_sha256）；回测窗口与 meta.train_window 重叠 → 启动 warning（walk-forward 合法，不阻断）
 - 滚动重训：无在线学习；sweep 挂不同 artifact 版本对比
 

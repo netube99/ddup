@@ -96,9 +96,10 @@ class SelfManagedRank(Strategy):
         # DataProvider 提供前视保护的日线查——只返回 ≤ 当日的数据。
         # 可用于计算历史排名稳定性、多期动量确认等回溯逻辑。
         # 典型用法：
-        #   hist = provider.get_historical_bars(candidates=["000001.SZ"],
-        #                                        start=lookback_date, end=date_str)
-        #   hist_df = pd.DataFrame(hist).set_index("trade_date")
+        #   hist = provider.get_historical_bars(["000001.SZ"],
+        #                                        end_date=date_str,
+        #                                        lookback_days=60)
+        #   hist_df = hist  # DataFrame(index=trade_date, 列=行情字段)
         # 前视保护自动生效，不需要手动裁剪。
 
         return {"buy": buy_list, "sell": sell_list}

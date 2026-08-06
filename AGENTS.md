@@ -77,7 +77,7 @@ scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评�
               性能基准、fixtures 生成、反破坏检查）
 factors/    — 用户因子定义（library.yaml，可编辑）
 strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
-.omp/skills/ — agent 研究指导 skills（随仓库分发；接口变更须同步）
+.omp/skills/ — agent 研究/实盘操作指导 skills（随仓库分发；接口变更须同步）
 ```
 
 必须遵守：

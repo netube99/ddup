@@ -25,6 +25,7 @@ description: ddup 因子研究全流程：数据资产地图（契约/派生/伪
 - **派生列**（引擎自动）：`open_hfq` `high_hfq` `low_hfq` `close_hfq`（裸价×adj_factor）、`pct_chg`
 - **伪列**（引擎按需附着）：`industry`、`log_mktcap`（=log(total_mv)，自动补请求 total_mv）、`idx_ret`（需 benchmark）
 - **扩展字段**：以 `adapters/` 后端表单 `extra_fields` 登记为准（未登记列运行期拒绝）——日频基本面/资金流/筹码/两融/涨跌停等数据类皆走此通道；**先做因子前先看后端登记了什么**
+- **研究侧数据资产**（行情库原生表，非因子列）：`idx_factor_pro`（指数日频，大小盘相对强弱/基准点位）、`sw_daily`（申万行业日线，行业分化/动量）、`index_member_all`/`index_weight`（行业映射/基准成分权重，Brinson 归因）——市场状态刻画与行业归因直接消费，见 ddup-research-loop 第 0 步
 - 排名/因子一律用 hfq 口径（表达式里写 `close_hfq` 等），裸价排名会因除权跳空产生假信号
 
 ## 因子 YAML 格式（load_library 校验）
@@ -33,10 +34,10 @@ description: ddup 因子研究全流程：数据资产地图（契约/派生/伪
 factors:
   my_factor:
     expr: "ma(close_hfq, 20) / close_hfq - 1"   # 必填；纯表达式或算子表达式；可引用其他因子名（DAG，成环报错）
-    where: "pct_chg > -0.095"                   # 可选；后置掩码置 NaN 不删行；也支持算子表达式（与 expr 同规则）
+    where: "pct_chg > -0.095"                   # 可选；后置掩码置 NaN 不删行；条件值 NaN/0/False 也掩码该行；where 含算子仅当 expr 含算子（expr 纯表达式 + where 算子 → 加载报错）
     description: "..."                          # 可选，加载器忽略
 ```
-规则：算子参数必须位置传、尾部标量必须数字常量；禁 `&` `|` `not`（纯表达式路径支持 and/or）；因子名禁撞保留字（契约/派生/伪列名 + `abs` `log`）；YAML 重复键 fail-fast。
+规则：算子参数必须位置传、尾部标量必须数字常量；**算子路径禁 `&` `|` `not`（求值期报错，用 and/or；纯表达式路径 `&` `|` `not` 与 and/or 均可用）**；因子名禁撞保留字（契约 9 + `amount` + 派生 5 + 伪列 3 + `abs`/`log`，共 20 个）；YAML 重复键 fail-fast。
 
 ## 21 算子梯度（btcore/factors/ops.py 白名单）
 
@@ -44,7 +45,7 @@ factors:
 |---|---|
 | TS 时序（按 symbol 因果滚动） | `delay` `delta` `roc` `ma` `ema` `std` `sum` `max` `min` |
 | TS 双序列（独立因子类别，勿忽略） | `corr`(x,y,n) 价量相关 / `beta`(x,y,n) / `resid_std`(x,y,n) 特质波动 |
-| 截面保形（按日） | `abs` `log` `rank`(百分位∈(0,1]) `zscore` `winsorize`(x,p) |
+| 截面保形（按日） | `abs` `log` `rank`(百分位∈(0,1]) `zscore` `winsorize`(x,p∈(0,0.5)) |
 | 分组 | `group_rank`(x,g) 组内百分位 / `neutralize`(x,g,size) 行业+市值 OLS 残差 |
 | 坍缩（同日广播） | `mean`(x) 全市场标量 / `group_mean`(x,g) 组均值 map 回个股 |
 
@@ -77,6 +78,7 @@ ev = evaluate_composite(comp, fwd_ret)   # → {"ic":…, "rank_ic":…, "layere
 
 - 研究侧 `compute_factors` 的聚合口径 = 传入 df 的股票池（窄池 ≠ 引擎全市场口径）；评估坍缩因子**必须**用 `compute_breadth(name, backend, lib, start, end, benchmark=...)`（全市场流式分块，与引擎同源口径；`lib` 为 load_library() 结果，`benchmark` 在因子引用 `idx_ret` 时必传）
 - 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层，改时序维度（与基准收益比对 / 择时门控信号）
+- `group_mean` 坍缩的日频标量 = 当日各行业组值的等权平均（compute_breadth 按 date×industry 组取 first 后对组均值；依赖 industry 列，缺失即报错——2026-08 修复 F-BRD-03，此前任意取一组有损）。**等权口径仅限顶层裸 `group_mean(x, g)` 表达式**：被算术/算子包装（如 `group_mean(x,g) - zscore(y)`）时 compute_breadth 落入任意组 first() 分支——静默有损且与引擎投影口径不一致，避免在坍缩因子里包装 group_mean
 
 ## 四大陷阱（每轮因子工作前过一遍）
 

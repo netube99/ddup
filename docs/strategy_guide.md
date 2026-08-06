@@ -341,7 +341,7 @@ class MyStrategy(Strategy):
 | `transfer_fee_rate` | `float` | `0.00001` | 过户费费率 |
 | `benchmark` | `str \| None` | 自动推导 | 基准指数代码。未设置或 `None` 时：`index_universe` 恰为单指数 → 取该指数，否则沪深 300（`000300.SH`）。显式设为空字符串 `""` = 无基准 |
 | `quiet_skips` | `bool` | `False` | `True` 时跳过类告警（涨跌停、成交量、现金不足等）降级为 DEBUG |
-| `order_volume_ratio` | `float \| None` | `None` | 单笔订单股数 ≤ `int(成交量(手) × ratio) × 100`；`None` 不限制。必须是正数或 None，否则 `ValueError` |
+| `order_volume_ratio` | `float \| None` | `None` | 单笔订单股数 ≤ `int(成交量(手) × ratio) × 100`；`None` 不限制。必须是 (0,1] 内数值或 None，否则 `ValueError`（>1 可超当日成交量） |
 | `ml_log` | `str` | — | `"full"` 时落盘全截面 ML 分数（缺省只落盘决策相关标的），见 ml_guide |
 
 **自定义键**：任何不在此列表的键（`top_k`、`cooldown_days`、`rebalance_interval` 等）策略代码通过 `self.config.get("key")` 自由读取，引擎不干预。
