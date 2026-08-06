@@ -1,6 +1,6 @@
 """实盘 CLI 全流程核查（真实行情库）：init → 每日 sync → 每日 signal。
 
-以回测 result.db 为 ground truth 连续模拟 19 个交易日：
+以回测 result.db 为 ground truth，模拟窗口取回测 run 自身全部交易日：
   - signal(D) 的操作单 open_sells/open_buys 必须等于回测在 D 的次一交易日实际成交
   - sync 的 statement 来自回测账本（cash/持仓/当日成交全量），必须 ok
   - 中途插入一次错报持仓 → 必须回滚拒绝，随后正确 statement 必须通过
@@ -25,7 +25,6 @@ _p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.db")
 _p.add_argument("--ledger", default="live/e2e_check.db")
 _p.add_argument("--yaml", default="strategies/selected/trend_guard_bw_300/config.yaml")
 _p.add_argument("--start", default=None, help="建账日（缺省=回测首个交易日）")
-_p.add_argument("--days", default="20260105,20260204", help="模拟窗口 起,止")
 _args = _p.parse_args()
 
 BT = _args.bt_db
@@ -33,8 +32,6 @@ LEDGER = _args.ledger
 MARKET = None
 YAML = _args.yaml
 PY = ".venv/bin/python"
-BT_START = _args.start
-WINDOW = _args.days.split(",")
 
 conn = sqlite3.connect(BT)
 # 最新 run 解析口径统一走 runs 表（此前查 trade_log，空 trade_log 的 run 会错位）
@@ -127,25 +124,21 @@ def main():
     if os.path.exists("live/test_b.db"):
         os.remove("live/test_b.db")
 
+    # ── 模拟窗口 = 回测 run 自身的交易日（account_daily 逐日记录）──
+    # 旧版写死 20260105,20260204 已过期；从回测库动态取，不再依赖过期日期
+    days = [r[0] for r in conn.execute(
+        "SELECT date FROM account_daily WHERE run_id=? ORDER BY date", (rid,)
+    ).fetchall()]
+    assert len(days) >= 10, f"回测窗口过短（{len(days)} 日），换一个含成交的 --bt-db"
+
     # ── Day 0: init（空仓；起始日 = 回测首个交易日）──
-    if _args.start is None:
-        bt_start = conn.execute(
-            "SELECT MIN(date) FROM account_daily WHERE run_id=?", (rid,)
-        ).fetchone()[0]
+    bt_start = _args.start if _args.start is not None else days[0]
     cash0 = conn.execute(
         "SELECT initial_capital FROM runs WHERE run_id=?", (rid,)
     ).fetchone()[0]
     r = cli("init", LEDGER, "--date", bt_start, "--cash", str(round(cash0, 2)))
     assert r["ok"] and r["initial_capital"] > 0, r
     print(f"[init] ok: initial_capital={r['initial_capital']} start={bt_start}")
-
-    # 交易日历 0105 → 0204（连续 19 个交易日，每日 sync + signal）
-    c = sqlite3.connect(_market_path())
-    days = [r[0] for r in c.execute(
-        "SELECT cal_date FROM trade_cal WHERE is_open=1 AND cal_date BETWEEN"
-        " '20260105' AND '20260204' ORDER BY cal_date")]
-    c.close()
-    assert len(days) == 23, days
 
     for d in days:
         nxt = cal_next(d)
@@ -195,7 +188,7 @@ def main():
         tag = ""
         if day_trades:
             tag = f" fills={len(day_trades)}"
-        if nxt_trades or day_trades or d in ("20260105", "20260120"):
+        if nxt_trades or day_trades or d in (days[0], days[-1]):
             print(f"[{d}] ok{tag}: sells={sorted(sheet_sells)}"
                   f" buys={sorted(sheet_buys)}"
                   f" cond_orders={sum(len(x['orders']) for x in r['broker_conditions'])}"

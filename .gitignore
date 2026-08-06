@@ -17,6 +17,9 @@ strategies/exploring/
 strategies/selected/
 strategies/archive/
 
+# 归档区（研究性保留数据/结果）
+archive/
+
 # 回测报告（隐私信息，不入 git）
 strategies/**/reports/
 

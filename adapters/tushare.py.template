@@ -1,24 +1,41 @@
+# ⚠️ 本文件仅初始化骨架（新机器复制为 adapters/tushare.py 后按需修改）。
+# adapters/tushare.py 是被 .gitignore 排除的真实实现，也是表单的**唯一事实源**：
+# 表引用、extra_fields、tables 特殊说明的增删改一律以 adapters/tushare.py 为准，
+# 修改后需回写本模板（scripts/check_skill_sync.py 会校验关键事实）。
+import os
+
 from btcore.generic_sql import GenericSQLBackend
 
-_DEFAULT_DB_PATH = "<YOUR_TUSHARE_DB_PATH>"  # 如 "/data/tushare/market.db"
+# 默认行情库路径；可用环境变量 DDUP_MARKET_DB 覆盖（与真实实现同口径）
+_DEFAULT_DB_PATH = os.environ.get(
+    "DDUP_MARKET_DB", "<YOUR_TUSHARE_DB_PATH>"  # 如 "/data/tushare/market.db"
+)
+
+
+def get_default_db_path() -> str:
+    """默认行情库路径（research/CLI 消费，替代正则解析本文件源码）。
+
+    环境变量 DDUP_MARKET_DB 可覆盖默认值。"""
+    return _DEFAULT_DB_PATH
 
 TUSHARE_FORM = {
     # ══ 索引键名：只填列名，不带表名 ══
     "symbol": "ts_code",                    # 证券代码列名
     "date": "trade_date",                   # 交易日列名（YYYYMMDD 字符串）
 
-    # ══ 数据契约字段（9 项，全部必填）══
-    "open": "daily.open",                   # 开盘价（元），裸价
-    "high": "daily.high",                   # 最高价（元），裸价
-    "low": "daily.low",                     # 最低价（元），裸价
-    "close": "daily.close",                 # 收盘价（元），裸价
-    "vol": "daily.vol",                     # 成交量，单位：手
-    "adj_factor": "adj_factor.adj_factor",  # 后复权因子（hfq = 裸价 × adj_factor）
-    "pre_close": "daily.pre_close",         # 昨收价，交易所除权口径
+    # ══ 数据契约字段（全部必填）══
+    # 行情统一走 stk_factor_pro 表（已切离 tushare daily 低积分表，见真实实现）
+    "open": "stk_factor_pro.open",                   # 开盘价（元），裸价
+    "high": "stk_factor_pro.high",                   # 最高价（元），裸价
+    "low": "stk_factor_pro.low",                     # 最低价（元），裸价
+    "close": "stk_factor_pro.close",                 # 收盘价（元），裸价
+    "vol": "stk_factor_pro.vol",                     # 成交量（手）
+    "adj_factor": "stk_factor_pro.adj_factor",       # 后复权因子（hfq = 裸价 × adj_factor）
+    "pre_close": "stk_factor_pro.pre_close",         # 昨收价，交易所除权口径
     "up_limit": "stk_limit.up_limit",       # 精确涨停价（元）
     "down_limit": "stk_limit.down_limit",   # 精确跌停价（元）
 
-    # ══ 交易日历与分红（4 项，全部必填）══
+    # ══ 交易日历与分红（全部必填）══
     "calendar_date": "trade_cal.cal_date",         # 交易日历日期列
     "dividend_ex_date": "dividend.ex_date",        # 除权除息日
     "dividend_stk_div": "dividend.stk_div",        # 每股送转比例（10送3 → 0.3）
@@ -30,16 +47,17 @@ TUSHARE_FORM = {
     "listing_date": "stock_basic.list_date",      # 上市日期，启用新股过滤
     "index_code": "index_weight.index_code",      # 指数代码（与 index_member 成对填写）
     "index_member": "index_weight.con_code",      # 指数成分股，启用成分池限定
-    "benchmark_close": "index_daily.close",         # 基准收盘价，启用基准对比
+    "benchmark_close": "idx_factor_pro.close",  # 基准收盘价（指数点位，无复权概念）
     "benchmark_code": "000300.SH",                # 默认基准代码（沪深300）
 
-    # ══ 扩展字段（按需取消注释/添加，格式："字段名": "表名.列名"）══
+    # ══ 扩展字段（按需取消注释/添加，格式："字段名": "表名.列名"；
+    #   真实实现已登记大量 stk_factor_pro 技术指标/基本面字段，见 adapters/tushare.py）══
     "extra_fields": {
-        # -- 日频基本面（daily_basic 表）--
-        # "turnover_rate": "daily_basic.turnover_rate",  # 换手率
-        # "pe_ttm": "daily_basic.pe_ttm",                # 市盈率（TTM）
-        # "pb": "daily_basic.pb",                        # 市净率
-        # "total_mv": "daily_basic.total_mv",            # 总市值
+        # -- 基本面/估值（stk_factor_pro 同表，零成本）--
+        # "turnover_rate": "stk_factor_pro.turnover_rate",  # 换手率
+        # "pe_ttm": "stk_factor_pro.pe_ttm",                # 市盈率（TTM）
+        # "pb": "stk_factor_pro.pb",                        # 市净率
+        # "total_mv": "stk_factor_pro.total_mv",            # 总市值
 
         # -- 资金流向（moneyflow 表）--
         # "net_mf_amount": "moneyflow.net_mf_amount",    # 净流向额
