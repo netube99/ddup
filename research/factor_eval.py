@@ -61,8 +61,14 @@ def run_eval(
     decay: str | None = None,
     n_quantiles: int = 5,
     benchmark: str | None = None,
+    exec_price: str = "close",
 ) -> int:
-    """因子评估主流程（backend 可注入，便于用 MockDataBackend 测试）。"""
+    """因子评估主流程（backend 可注入，便于用 MockDataBackend 测试）。
+
+    exec_price: "close"=研究口径（T 收盘买，close_t→close_{t+h}）；
+        "next-open"=可交易口径（T+1 开盘买，open_{t+1}→close_{t+h}，
+        与引擎 T 信号 T+1 撮合一致）。动量族因子在 next-open 下显著衰减。
+    """
     # ML 模型：spec 解析（fail-fast），特征并入因子计算与请求列
     model_spec = None
     if model_path:
@@ -94,16 +100,17 @@ def run_eval(
             return 1
 
     print(f"因子: {', '.join(factor_names)}")
+    exec_label = "研究口径 T收盘买" if exec_price == "close" else "可交易口径 T+1开盘买"
     if decay:
         horizons = [int(h.strip()) for h in decay.split(",") if h.strip()]
         if not horizons:
             print("错误：--decay 需要至少一个天数", file=sys.stderr)
             return 1
         print(f"区间: {start} ~ {end}  |  前瞻: {horizons} (衰减模式)  |  "
-              f"分档: {n_quantiles}")
+              f"分档: {n_quantiles}  |  {exec_label}")
     else:
         print(f"区间: {start} ~ {end}  |  前瞻: {forward}d  |  "
-              f"分档: {n_quantiles}")
+              f"分档: {n_quantiles}  |  {exec_label}")
 
     # 确定股票池
     pit_members = None
@@ -224,9 +231,18 @@ def run_eval(
 
     # 计算前瞻收益（单期，供分层回测使用）
     close_hfq = bars_df["close_hfq"]
-    fwd_ret_layered = close_hfq.groupby("symbol").pct_change(
-        periods=forward
-    ).shift(-forward)
+    if exec_price == "next-open":
+        # 可交易口径：T+1 开盘买入，持有至 T+h 收盘（引擎同款执行时序）
+        fwd_ret_layered = (
+            close_hfq.groupby("symbol").shift(-forward)
+            / bars_df["open_hfq"].groupby("symbol").shift(-1)
+            - 1
+        )
+    else:
+        # 显式 groupby shift（pct_change().shift() 链的扁平 shift 依赖索引序）
+        fwd_ret_layered = (
+            close_hfq.groupby("symbol").shift(-forward) / close_hfq - 1
+        )
     fwd_ret_layered.name = "fwd_ret"
 
     # 坍缩因子截面恒值 → corr 标准差为 0 的 RuntimeWarning，抑制噪音
@@ -237,7 +253,10 @@ def run_eval(
         _print_section(f"IC 衰减曲线（前瞻: {horizons}）")
         for name in eval_names:
             factor_vals = factor_df[name]
-            decay_df = calc_ic_decay(factor_vals, close_hfq, horizons)
+            decay_df = calc_ic_decay(
+                factor_vals, close_hfq, horizons,
+                open_hfq=bars_df["open_hfq"] if exec_price == "next-open" else None,
+            )
             print(f"\n  {name}:")
 
             # 表头
@@ -470,6 +489,7 @@ def calc_ic_decay(
     close_hfq: pd.Series,
     horizons: list[int],
     date_col: str = "trade_date",
+    open_hfq: pd.Series | None = None,
 ) -> pd.DataFrame:
     """多前瞻期 IC 衰减汇总表。
 
@@ -481,6 +501,9 @@ def calc_ic_decay(
         close_hfq: 同结构的后复权收盘价。
         horizons: 前瞻天数列表，如 [1, 3, 5, 10, 20]。
         date_col: 日期索引名。
+        open_hfq: 同结构的后复权开盘价。传入时前瞻收益改为可交易口径
+            open_{t+1} → close_{t+h}（T+1 开盘买入，与引擎撮合一致）；
+            不传则为研究口径 close_t → close_{t+h}。
 
     Returns:
         DataFrame，索引为 horizon，列为：
@@ -488,7 +511,17 @@ def calc_ic_decay(
     """
     rows = []
     for h in horizons:
-        fwd_ret = close_hfq.groupby("symbol").pct_change(h).shift(-h)
+        if open_hfq is not None:
+            # 可交易口径：T+1 开盘买入，持有至 T+h 收盘
+            fwd_ret = (
+                close_hfq.groupby("symbol").shift(-h)
+                / open_hfq.groupby("symbol").shift(-1)
+                - 1
+            )
+        else:
+            # 研究口径：T 收盘买入。显式 groupby shift（不用 pct_change().shift()
+            # 链——扁平 shift 依赖 (symbol, date) 索引序，date-major 面板会跨 symbol 污染）
+            fwd_ret = close_hfq.groupby("symbol").shift(-h) / close_hfq - 1
         ic, ric = calc_ic(factor_values, fwd_ret, date_col=date_col)
         pearson = summarize_ic(ic)
         spearman = summarize_ic(ric)

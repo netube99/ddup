@@ -55,6 +55,13 @@ def main() -> int:
         help="分层回测档数（默认 5）",
     )
     parser.add_argument(
+        "--exec-price", choices=["close", "next-open"], default="close",
+        help="前瞻收益口径：close=T 收盘买（默认，研究口径）；"
+             "next-open=T+1 开盘买（可交易口径，与引擎 T 信号 T+1 撮合一致）。"
+             "动量族因子在 next-open 口径下显著衰减/反号（隔夜跳空承载 alpha），"
+             "策略化前必须复核",
+    )
+    parser.add_argument(
         "--benchmark", default=None,
         help="基准指数代码（因子引用 idx_ret 时必需，口径同引擎）",
     )
@@ -79,6 +86,7 @@ def main() -> int:
             decay=args.decay,
             n_quantiles=args.n_quantiles,
             benchmark=args.benchmark,
+            exec_price=args.exec_price,
         )
     except ValueError as e:
         print(f"错误：{e}", file=sys.stderr)

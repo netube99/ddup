@@ -56,13 +56,16 @@ factors:
 ```bash
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20250630 \
     [--universe CSI500] [--forward 5 | --decay 1,3,5,10] [--n-quantiles 5] \
-    [--model path.onnx] [--benchmark 000300.SH]
+    [--exec-price close|next-open] [--model path.onnx] [--benchmark 000300.SH]
 ```
 - 输出三段：IC 汇总（Pearson/RankIC + IR + 胜率 + n_days）、分层回测（**Q1=最低档**，含多空 Qmax−Qmin）、≥2 因子加相关性矩阵
 - `--universe`：指数别名 → 成分快照回溯并集 + PIT 逐日过滤；**研究股票池必须与策略候选池一致**
+- `--exec-price next-open`：前瞻从 T+1 开盘计（引擎同款执行时序）——**策略化前必须复核**；动量族因子在可交易口径下显著衰减
 - `--decay` 与显式 `--forward`≠5 互斥；`--model` 仅 panel scope（ddup-ml-research）；坍缩因子自动走全市场 compute_breadth
 - 失败均 stderr+退出码 1（未知因子/无成分/窗口无数据/嵌套坍缩…）
 - warmup 自动前伸：start − max(365, int(最大窗口×1.5)+10) 日历天（引擎同源）
+- ⚠ 2026-08-07 修复：前瞻收益改用显式 groupby shift（此前 pct_change().shift() 链
+  在 date-major 面板跨 symbol 污染，此前的 IC 数字全部作废需重测）
 
 程序化 API（research/factor_eval.py，纯函数）：`calc_ic` / `summarize_ic` / `calc_layered_returns` / `calc_factor_corr` / `calc_ic_decay`。输入均为 (trade_date, symbol) MultiIndex 面板。
 
@@ -88,3 +91,13 @@ ev = evaluate_composite(comp, fwd_ret)   # → {"ic":…, "rank_ic":…, "layere
 | 2 | 口径自负 | 全市场 IC 高，回测 IC 低 | 研究池=策略候选池（`--universe` 限定），不外推 |
 | 3 | ascending 语义 | 排序方向反 | IC 正 → `ascending: false`（值大排前，默认）；IC 负 → true |
 | 4 | 坍缩截面评估 | calc_ic 全 NaN | 改 `compute_breadth` + 时序评估 |
+| 5 | 前瞻收益口径 | 研究 RankIR 高、回测亏损 | ①策略化前必用 `--exec-price next-open` 复核（T+1 开盘买 vs T 收盘买，动量族差异巨大）；②**勿用 `pct_change().shift()` 链构造前瞻**——扁平 shift 在 (trade_date, symbol) 面板跨 symbol 污染（2026-08-07 事故：全部 IC 虚高，重测后动量/筹码族 IC≈0，仅低拥挤簇真实）；用显式 groupby shift；③因子 IC 必须与引擎回测/真实价格交叉验证（回测是唯一无偏测量） |
+
+---
+
+## 已验证的真实信号结构（2026-08-07 修复工具后，CSI500 5d）
+
+- **低拥挤簇**（三窗口×三池×可交易口径全存活，均升序排名）：`margin_change`（融资活跃度反转）、`vol10`（低波）、`turnover_z`（低换手）、`sealed_days5`（涨停后回落）、`dist_to_low60`
+- **质量簇**（仅动量市有效，熊市反转）：`rev_yoy_z`、`npr_z`
+- **动量/筹码/尾盘/资金流/技术族**：修正后 IC≈0 或负（弱反转），此前标注作废
+- 择时信号：`pct_sealed`（+0.139）/`limit_down_pct`（+0.120，恐慌反弹）

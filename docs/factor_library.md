@@ -512,6 +512,9 @@ python scripts/factor_eval.py mom20 --start 20240101 --end 20240630 --forward 10
 # IC 衰减模式：多前瞻期一张表（与 --forward 互斥）
 python scripts/factor_eval.py cci_z,turnover_z --start 20240101 --end 20240630 --decay 1,3,5,10,20
 
+# 可交易口径：前瞻从 T+1 开盘计（引擎 T 信号 T+1 撮合同款执行时序）
+python scripts/factor_eval.py mom20 --start 20240101 --end 20240630 --exec-price next-open
+
 # ML 模型分数与因子同口径评估（仅 panel scope；分数物化为 ml_<name> 列）
 python scripts/factor_eval.py mom20 --start 20240101 --end 20240630 --model path/to/model.onnx
 ```
@@ -524,7 +527,14 @@ python scripts/factor_eval.py mom20 --start 20240101 --end 20240630 --model path
 | `--forward` | 5 | 前瞻收益天数 |
 | `--decay` | 关 | 逗号分隔多前瞻期，输出 IC 衰减表；与 `--forward` 互斥 |
 | `--n-quantiles` | 5 | 分层档数 |
+| `--exec-price` | close | 前瞻收益口径：`close`=T 收盘买（研究口径）；`next-open`=T+1 开盘买（可交易口径，与引擎撮合一致）。**策略化前必须用 next-open 复核**——动量族因子两口径差异显著 |
 | `--model` | 无 | ML 模型 ONNX 路径，与因子同口径评估 |
+
+> **前瞻收益构造（2026-08-07 修复）**：此前用 `pct_change().shift()` 链，
+> 扁平 shift 在 (trade_date, symbol) 面板上跨 symbol 污染（把其他股票同期的
+> 过去收益当前瞻收益），动量市中截面收益正相关 → 虚假高 IC。现改为显式
+> groupby shift（顺序无关，回归测试守住）。2026-08-07 之前的评估数字全部作废，
+> 需重测。
 
 输出三部分：IC 汇总（Pearson IC / IR / 胜率 + RankIC / RankIR）、分层回测（各档累计收益 + 多空差）、因子相关性矩阵（≥2 个因子时）。
 
