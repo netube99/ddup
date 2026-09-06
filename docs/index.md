@@ -46,6 +46,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 | 参数扫描批量回测 | `scripts/sweep.py` | [CLI 与研究工具](./cli_and_research.md) |
 | HTML 报告 / 多 run 对比 | `scripts/report.py`、`scripts/compare.py` | [CLI 与研究工具](./cli_and_research.md) |
 | 交易合理性交叉验证 | `scripts/cross_validate.py` | [CLI 与研究工具](./cli_and_research.md) |
+| 审查循环收敛门禁（分级/验收/backlog） | `scripts/review_gate.py` | [开发收敛协议](./review_protocol.md) |
 | 交易决策回放调试 | debug 模式 + `scripts/replay.py` | [策略设计指南](./strategy_guide.md) |
 | Brinson 行业归因 | `research.attribution` | [CLI 与研究工具](./cli_and_research.md) |
 | 程序化 API（Python 驱动回测） | `Engine(strategy, provider).run()` | [策略设计指南](./strategy_guide.md) |
@@ -68,7 +69,8 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 - **[ML 子系统指南](./ml_guide.md)** — panel/holding 双 scope、models 配置、训练命令、meta 契约、model_exit、可观测性
 - **[CLI 与研究工具](./cli_and_research.md)** — 全部 CLI 参数表、研究库 API（因子评估/报告/合成/Brinson）、典型工作流、速查表
 - **[全功能核查列表](./audit_checklist.md)** — 三层核查（静态/动态/边界扫描）逐项验证功能与设计意图一致；真实数据探针速查
+- **[开发收敛协议](./review_protocol.md)** — 审查发现分级（P0-P3）、门禁流程、backlog 管理、done-bar 可用性定义
 
-Agent 自主研究指导在 `.omp/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill 与实盘操作 skill（`ddup-live-ops`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
+Agent 自主研究指导在 `.omp/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill、实盘操作 skill（`ddup-live-ops`）与审查收敛门禁（`ddup-review-gate`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
 
 开发相关规范（架构分层、依赖规则、测试）见项目根目录 `AGENTS.md` 与 `ARCHITECTURE.md`。

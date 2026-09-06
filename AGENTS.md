@@ -1,6 +1,7 @@
 # AGENTS.md — ddup
 
-A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理。
+A 股日频量化策略回测引擎。Python 3.12+，uv + hatchling 管理，核心依赖
+pandas/numpy/numexpr/pyyaml。完整架构见 `ARCHITECTURE.md`，设计文档入口见下。
 
 > 用户可编辑的目录：`adapters/`（后端实现）、`factors/`（因子定义）、
 > `strategies/`（策略实现）。所有机制/基础设施在 `btcore/`。
@@ -43,6 +44,12 @@ python scripts/cross_validate.py result.db --strategy name --run-id 1
 # skill 与代码事实同步校验（改 CLI/算子/YAML 键/协议后必跑）
 python scripts/check_skill_sync.py
 
+# 审查门禁：收敛审查循环（P0/P1 清零或 waive；P2/P3 入 backlog）
+python scripts/review_gate.py check findings.yaml --scope full
+python scripts/review_gate.py backlog
+python scripts/review_gate.py close F-EMA-01 --waive "用户决策：暂不修"
+python scripts/review_gate.py done
+
 # 参数扫描批量回测（YAML 路径语法展开参数空间）
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out sweep.db
 
@@ -52,7 +59,7 @@ python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
 # 实盘账本：建账 / 每日对账同步 / 明日操作单 / 状态（账本与策略解耦，可换任意策略 YAML）
 python scripts/live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]
 python scripts/live.py sync live/main.db sync.yaml
-python scripts/live.py signal live/main.db strategies/selected/trend_guard_bw_300/config.yaml --date 20260731
+python scripts/live.py signal live/main.db strategies/selected/dv_lowvol_300/config.yaml --date 20260731
 python scripts/live.py status live/main.db
 
 # Brinson 归因数据导出（一次性导出 parquet，后续离线归因）
@@ -67,16 +74,19 @@ python scripts/dump_fixtures.py
 ## 架构分层与依赖规则（反破坏 linter 强制检查）
 
 ```
-btcore/     — 全部机制/基础设施（引擎、ABC、因子库机制、策略加载器/工具、
-              ML 子系统 btcore/ml）
-              不要随意修改
-adapters/   — 用户数据后端实现（可编辑；通常是对 GenericSQLBackend 的填表）
-research/   — 研究工具库（纯 importable 模块，不含 CLI；因子评估、归因、
-              HTML 报告生成、多因子合成、实盘账本回放 research/live.py）
-scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、
-              性能基准、fixtures 生成、反破坏检查）
-factors/    — 用户因子定义（library.yaml，可编辑）
-strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
+btcore/     — 全部机制/基础设施（勿随意修改）：engine.py 主循环、provider.py 前视门面、
+              backend.py DataBackend ABC、strategy.py Strategy ABC、strategy_loader.py YAML 加载、
+              factors/ 因子机制（ops 算子表 / plan 物化规划 / cse / library）、
+              match/ 撮合（core 原语 / conditions 条件单 / manual 普通单，子模块互不 import）、
+              ml/ ML 子系统（spec/dataset/runtime/trainer/conditions/export）、
+              database.py 结果库、stats.py 统计纯函数、generic_sql.py 填表法后端
+adapters/   — 用户数据后端实现（可编辑）：tushare.py = GenericSQLBackend 填表
+research/   — 研究工具库（纯 importable 模块，不含 CLI）：factor_eval/composite/attribution/report、
+              HTML 报告生成、实盘账本回放 research/live.py
+scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、参数扫描、
+              ML 训练、性能基准、fixtures 生成、反破坏检查）
+factors/    — 用户因子定义（library.yaml，纯 YAML 数据，可编辑）
+strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/ selected/ exploring/ archive/
 .omp/skills/ — agent 研究/实盘操作指导 skills（随仓库分发；接口变更须同步）
 ```
 
@@ -93,15 +103,44 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 
 ---
 
+## 关键入口
+
+- `Engine.run(start, end)`（btcore/engine.py:404）：preload → 因子/ML 物化 → 逐日 step → 统计落库
+- `Engine.step`（engine.py:624）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
+- `Engine.compute_pending`（engine.py:732）：on_fills → on_tick → select → 校验 → calc_conditions
+- `Strategy` ABC（btcore/strategy.py:11）：声明式属性 REQUIRED_FIELDS/FACTOR_SPECS/FILTER_RULES +
+  钩子 get_universe/on_start/on_fills/on_tick/select/calc_conditions
+- `strategy_loader.load_strategy(path)`（strategy_loader.py:170）：YAML → Strategy；
+  策略模型 features 以 materialize_only 并入因子闭包（build_strategy :40）
+- 因子：`ops.eval_op_expr`（factors/ops.py:385，_OPS 固定算子表）；
+  `plan.build_factor_plan`（factors/plan.py:176）/ `materialize`（:305 两路供给：广度面板→主面板）
+- 撮合：`match.conditions.exit_conditions`(:79)/`entry_conditions`(:199)；
+  自定义条件单 `register_condition_handler`（match/conditions.py:25）
+- ML：`ml/runtime.materialize_predictions`(:100) → `ml_<name>` 列；`ml/dataset.build_panel`(:23)
+  训练与引擎同一物化函数链；meta v3 契约（ml/spec.py:33 META_VERSION）
+- 结果库：`database.init_backtest_db`（database.py:90），6 表多 run 累积 SQLite
+- 统计：`stats.calculate_statistics`（stats.py:13，纯函数）
+
+## 数据流（一天）
+
+- T-1 日 `compute_pending`：provider 前视锚点钳制（set_as_of/get_as_of）→ select(bars, snapshot, provider)
+  返回 {buy/sell/target_value/sell_shares/buy_weights/buy_conditions} → 逐持仓 calc_conditions
+- T 日 `step`：corporate.adjust → 执行昨日 pending（涨跌停/量 cap 护栏）→ _settle 写库 → 再算次日
+- 首日信号在 prev_day 预计算，保证 T 信号 T+1 撮合
+
+---
+
 ## 设计契约（跨模块不变式）
 
 以下规则是引擎设计的基石，任何模块的修改都不能违反。它们不是实现细节，而是架构级约定。
 
 | 契约 | 规则 |
 |------|------|
+| **日期与面板格式** | 日期全仓 `YYYYMMDD` str；面板 `MultiIndex(trade_date, symbol)` |
 | **价格体系** | 撮合、成本、估值使用裸价（`open` / `close` / `high` / `low`）。因子计算、排名使用后复权（`open_hfq` / `close_hfq` 等，公式 `x × adj_factor`）。**不可混用**——裸价做排名会导致除权除息日股价跳空被误判为涨跌信号 |
 | **T+1 锁定** | 买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单跳过该持仓——不会出现当天买入当天止损卖出 |
 | **软回退 vs Fail-Fast** | 可选能力缺失（ST 表、行业表、指数成分表）→ 引擎告警后继续运行，对应规则不生效。明确声明的依赖缺失（因子伪列无后端、必需列缺失、因子名不存在、表单引用不存在）→ 加载或 preload 阶段直接报错，不产生静默错误结果 |
+| **鸭子类型探测** | backend 能力与策略钩子均 `getattr` 探测，缺则降级 |
 | **前视屏蔽** | 三重保护：①因子 preload 一次性物化为因果列（滚动窗口与截面聚合仅用 ≤ 当日数据）；②`DataProvider` 所有查询按当前模拟日钳制；③T 日信号 T+1 撮合，条件单 T 日声明 T+1 盘中触发 |
 | **财报数据对齐** | 引擎只消费 `(交易日, 代码)` 日频网格上的列，**不做季度频率推断**。财报类数据须由后端在数据层按公告日（而非报告期）对齐成日频列。跨季度运算（如 YoY）须预先物化为列 |
 
@@ -131,6 +170,24 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
   分数的解释权在策略（factor_specs / conditions.model_exit / 自读），
   引擎不得硬编码模型意图（如已删除的 exit_guard role/threshold）；
   策略不得自行加载 ONNX 做逐日推理（绕开前视保护与物化体系）
+
+---
+
+## 开发收敛协议（审查门禁）
+
+审查发现必须分级、必须引用证据，禁止以"零发现"作为审查目标——该状态不存在，
+用它做门禁只会让审查循环发散。审查产出经 `scripts/review_gate.py` 验收
+（详见 `docs/review_protocol.md`）：
+
+| 级别 | 含义 | 处置 |
+|---|---|---|
+| P0/P1 | 数据损坏 / 契约违背（静默错误行为） | 阻塞：本轮修复后 `close <ID>`，或用户显式 `close <ID> --waive <原因>`；未决 P0/P1 使门禁 FAIL |
+| P2/P3 | 已知局限 / 文档漂移 / 观察项 | 非阻塞：自动登记 `docs/review_backlog.yaml`，不要求本轮修复 |
+
+- 每条发现必须带 `rule`（被违反的已写规则）、`file:line`、现象证据；缺任一 → 门禁拒绝（exit 2）
+- 收敛判据：一轮 `check` 无未决 P0/P1 且无新增发现（CONVERGED）→ 该范围审查终止，之后只做 diff-scoped 审查
+- 全量审查冷却：同范围 full 间隔 ≥14 天，间隔内只允许 `--scope diff`
+- "可用" = done-bar（`review_gate.py done`：反破坏 linter + skill 同步 + 全量测试 + 交叉验证/对账干净），不是"审查零发现"
 
 ---
 
@@ -228,14 +285,15 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 539 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+- 576 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
   GenericSQLBackend 表单校验、
   ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、
   训练面板与引擎物化一致性、时间切分 embargo、评估指标）、
   统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、
   debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证、
-  实盘账本（成交应用/对账/操作单/回测往返一致性 parity）、select 协议 sell_reasons 键
+  实盘账本（成交应用/对账/操作单/回测往返一致性 parity）、select 协议 sell_reasons 键、
+  审查门禁（findings 验收/backlog 归并/收敛判据）
 
 ---
 
