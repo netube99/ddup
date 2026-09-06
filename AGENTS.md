@@ -87,7 +87,7 @@ scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评�
               ML 训练、性能基准、fixtures 生成、反破坏检查）
 factors/    — 用户因子定义（library.yaml，纯 YAML 数据，可编辑）
 strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/ selected/ exploring/ archive/
-.omp/skills/ — agent 研究/实盘操作指导 skills（随仓库分发；接口变更须同步）
+.agents/skills/ — agent 研究/实盘操作指导 skills（随仓库分发；接口变更须同步）
 ```
 
 必须遵守：
@@ -305,5 +305,5 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 - 代码与注释中不使用 emoji
 - 编辑任何文件后检查是否影响同目录下的 `AGENTS.md`
 - 接口变更（CLI 参数、算子、YAML 键、select 协议、config 默认值、ML meta 契约）
-  必须同批更新 `.omp/skills/` 与 `docs/`；`scripts/check_skill_sync.py` 机械对账，
+  必须同批更新 `.agents/skills/` 与 `docs/`；`scripts/check_skill_sync.py` 机械对账，
   漂移即失败

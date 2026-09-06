@@ -51,7 +51,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 | Brinson 行业归因 | `research.attribution` | [CLI 与研究工具](./cli_and_research.md) |
 | 程序化 API（Python 驱动回测） | `Engine(strategy, provider).run()` | [策略设计指南](./strategy_guide.md) |
 | 实盘账本 / 每日信号操作单 | `scripts/live.py`、`research.live` | [CLI 与研究工具](./cli_and_research.md) |
-| 让 Agent 自主做策略研究 | `.omp/skills/` 研究 skills（随仓库分发） | `ddup-research-loop` 入口共 7 个（研究 6 + 实盘操作 1），agent 按任务触发加载 |
+| 让 Agent 自主做策略研究 | `.agents/skills/` 研究 skills（随仓库分发） | `ddup-research-loop` 入口共 7 个（研究 6 + 实盘操作 1），agent 按任务触发加载 |
 
 ## 标准工作流
 
@@ -71,6 +71,6 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 - **[全功能核查列表](./audit_checklist.md)** — 三层核查（静态/动态/边界扫描）逐项验证功能与设计意图一致；真实数据探针速查
 - **[开发收敛协议](./review_protocol.md)** — 审查发现分级（P0-P3）、门禁流程、backlog 管理、done-bar 可用性定义
 
-Agent 自主研究指导在 `.omp/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill、实盘操作 skill（`ddup-live-ops`）与审查收敛门禁（`ddup-review-gate`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
+Agent 自主研究指导在 `.agents/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill、实盘操作 skill（`ddup-live-ops`）与审查收敛门禁（`ddup-review-gate`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
 
 开发相关规范（架构分层、依赖规则、测试）见项目根目录 `AGENTS.md` 与 `ARCHITECTURE.md`。

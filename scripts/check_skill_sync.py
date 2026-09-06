@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""校验 .omp/skills/ 中可被代码验证的事实与当前代码一致。
+"""校验 .agents/skills/ 中可被代码验证的事实与当前代码一致。
 
 接口变更（CLI flag、算子、YAML 键、协议键、config 默认值）后必须同步 skill；
 本脚本发现漂移即非零退出。只对账"skill 提到的事实"，不保证 skill 覆盖完整
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILLS_DIR = ROOT / ".omp" / "skills"
+SKILLS_DIR = ROOT / ".agents" / "skills"
 SCRIPTS_DIR = ROOT / "scripts"
 
 
