@@ -24,9 +24,11 @@ def _cache_key(backend, codes, start: str, end: str):
 
 
 def resolve_index_snapshots(backend, codes, start: str, end: str) -> dict[str, set[str]]:
-    """指数成分快照 map：{快照日: {成分股}}，前溯 INDEX_LOOKBACK_DAYS。
+    """指数成分快照 map：{快照日: {成分股}}，优先取 [start-45d, end] 窗口。
 
     前溯保证窗口首日也有 ≤ 当日的快照（快照是月频的）。
+    成分公布可能滞后一两个月：窗口内查不到任何快照时回退查全历史，
+    由 _index_members_at 取"≤ 当日的最近一期"——即最新一次已同步的数据。
     codes 为空或 backend 无 get_index_members 能力时返回 {}。
     同 (backend, codes, start, end) 区间结果进程内缓存（DUP-08b）。
     """
@@ -49,6 +51,8 @@ def resolve_index_snapshots(backend, codes, start: str, end: str) -> dict[str, s
         date.fromisoformat(start) - timedelta(days=INDEX_LOOKBACK_DAYS)
     ).strftime("%Y%m%d")
     raw = backend.get_index_members(list(codes), lookback, end) or {}
+    if not raw:
+        raw = backend.get_index_members(list(codes), "19900101", end) or {}
     result = {str(d): set(v) for d, v in raw.items()}
     if cacheable:
         _INDEX_SNAPSHOT_CACHE[key] = result

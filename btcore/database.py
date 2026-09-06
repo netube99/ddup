@@ -1,5 +1,6 @@
 import datetime
 import json
+import math
 import sqlite3
 
 import pandas as pd
@@ -235,11 +236,22 @@ def read_run_data(conn: sqlite3.Connection, run_id: int):
 def write_ml_predictions(
     conn: sqlite3.Connection, run_id: int, date: str, rows: list[tuple]
 ) -> None:
-    """批量写入 ML 分数：rows = [(model, symbol, score), ...]。"""
+    """批量写入 ML 分数：rows = [(model, symbol, score), ...]。
+
+    score 为 None/NaN（特征缺失过半 → 无分数）的行跳过——schema 的 score 列
+    NOT NULL，None 会让整批写入 IntegrityError 崩溃。
+    """
+    valid = [
+        (run_id, date, sym, model, score)
+        for model, sym, score in rows
+        if score is not None and not (isinstance(score, float) and math.isnan(score))
+    ]
+    if not valid:
+        return
     conn.executemany(
         "INSERT OR REPLACE INTO ml_predictions (run_id, date, symbol, model, score) "
         "VALUES (?, ?, ?, ?, ?)",
-        [(run_id, date, sym, model, score) for model, sym, score in rows],
+        valid,
     )
 
 

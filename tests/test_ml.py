@@ -1093,3 +1093,26 @@ class TestTrainingPipeline:
         assert lab.loc[("d4", "A"), "label"] != lab.loc[("d4", "A"), "label"]
         # d2→d3: A +10%, B +20% → B 排名高
         assert lab.loc[("d2", "B"), "label"] > lab.loc[("d2", "A"), "label"]
+
+
+def test_write_ml_predictions_skips_none_scores(tmp_path):
+    """回归：特征缺失过半 → 分数 None，写入 ml_predictions 不得崩溃
+    （schema score NOT NULL，None 会让整批 IntegrityError）。"""
+    from btcore import database
+
+    db = str(tmp_path / "ml.db")
+    conn = database.init_backtest_db(db)
+    run_id = database.write_run(
+        conn, created_at="2024-01-01", strategy="t", start_date="20240101",
+        end_date="20240201", initial_capital=1e6, config_json="{}", status="completed",
+    )
+    database.write_ml_predictions(
+        conn, run_id, "20240102",
+        [("m", "A", None), ("m", "B", float("nan")), ("m", "C", 0.5)],
+    )
+    rows = conn.execute(
+        "SELECT symbol, score FROM ml_predictions WHERE run_id=?",
+        (run_id,),
+    ).fetchall()
+    conn.close()
+    assert rows == [("C", 0.5)]

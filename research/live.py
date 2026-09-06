@@ -387,9 +387,12 @@ def replay_ledger(engine: Engine, provider, store: LedgerStore,
             reason=f["reason"] or "cash_adjust",
         ))
 
-    # 与 run() 首日行为对齐：首日前一交易日先算一次 pending（策略状态播种）
+    # 与 run() 首日行为对齐：首日前一交易日先算一次 pending（策略状态播种）。
+    # 仅在有持仓时播种——回测里 prev_day 的信号由首日撮合执行，而空仓新账本
+    # 首日没有任何 fill 可承接，播种只会白白消耗首次调仓触发（_last_rebalance
+    # 被置为 prev_day），导致建仓单为空且账户空转一个调仓周期。
     prev_day = provider.prev_trading_day(calendar[0])
-    if prev_day and run_decisions:
+    if prev_day and run_decisions and engine.account.holdings:
         engine.compute_pending(prev_day)
 
     for today in calendar:
