@@ -23,7 +23,7 @@ from research.cli_common import latest_run_id
 _p = argparse.ArgumentParser()
 _p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.db")
 _p.add_argument("--ledger", default="live/e2e_check.db")
-_p.add_argument("--yaml", default="strategies/selected/trend_guard_bw_300/config.yaml")
+_p.add_argument("--yaml", default="strategies/selected/dv_lowvol_300/config.yaml")
 _p.add_argument("--start", default=None, help="建账日（缺省=回测首个交易日）")
 _args = _p.parse_args()
 

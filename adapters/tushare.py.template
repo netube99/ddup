@@ -67,6 +67,10 @@ TUSHARE_FORM = {
 
         # -- 融资融券（margin_detail 表）--
         # "rzye": "margin_detail.rzye",                  # 融资余额
+
+        # -- 现金分红事件（dividend_grid VIEW：ex_date 作 trade_date，仅除息日有值；
+        #    sum 计数 = 滚动窗口分红次数，股息稳定性因子；与契约 dividend_cash_div 同源）--
+        # "div_cash": "dividend_grid.cash_div",
     },
 
     # ══ 表的特殊说明 ══
