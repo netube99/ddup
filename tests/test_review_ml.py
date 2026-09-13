@@ -14,40 +14,8 @@ import pandas as pd
 import pytest
 
 from btcore.ml.labels import build_guard_samples, extract_trade_pairs
-from btcore.ml.spec import ModelSpec
-
-
-def _spec(**over) -> ModelSpec:
-    return ModelSpec(
-        name="g", artifact="x.onnx", features=["mom20"], raw_features=[],
-        state_features=["hold_days", "ret_from_entry"], **over,
-    )
-
-
-def _insert_trade(conn, run_id, date, sym, side, trig, price, shares, net):
-    conn.execute(
-        "INSERT INTO trade_log (run_id, date, symbol, side, trigger,"
-        " price, shares, turnover, commission, net_amount)"
-        " VALUES (?,?,?,?,?,?,?,0,0,?)",
-        (run_id, date, sym, side, trig, price, shares, net),
-    )
-
-
-def _db(tmp_path, rows):
-    from btcore import database
-
-    p = tmp_path / "t.db"
-    conn = database.init_backtest_db(str(p))
-    run_id = database.write_run(
-        conn, created_at="2024-01-01", strategy="t", start_date="20240101",
-        end_date="20240201", initial_capital=1e6, config_json="{}",
-        status="completed",
-    )
-    for row in rows:
-        _insert_trade(conn, run_id, *row)
-    conn.commit()
-    conn.close()
-    return str(p)
+from tests.conftest import make_spec
+from tests.test_ml import _db
 
 
 class TestRetFromEntryPath:
@@ -77,7 +45,7 @@ class TestRetFromEntryPath:
              "pre_close": 10.0},
             index=idx,
         )
-        samples = build_guard_samples(panel, pairs, _spec(), lookahead=0)
+        samples = build_guard_samples(panel, pairs, make_spec(), lookahead=0)
 
         by_date = dict(zip(samples["trade_date"], samples["ret_from_entry"]))
         # 引擎口径逐日重放：d1 entry=10 → 11/10-1；d2 起 entry=11
@@ -114,7 +82,7 @@ class TestRetFromEntryPath:
              "pre_close": 10.0},
             index=idx,
         )
-        samples = build_guard_samples(panel, pairs, _spec(), lookahead=0)
+        samples = build_guard_samples(panel, pairs, make_spec(), lookahead=0)
 
         by_date = dict(zip(samples["trade_date"], samples["ret_from_entry"]))
         ep_pre = 10.0
@@ -170,7 +138,7 @@ class TestEngineReplayParity:
         pairs = extract_trade_pairs(db)
         assert len(pairs) == 1
 
-        spec = _spec()
+        spec = make_spec()
         panel = dataset.build_panel(
             MockDataBackend(), [sym], "20240603", "20240624",
             spec, load_library(), benchmark="000300.SH",
@@ -219,7 +187,7 @@ class TestReplayEdgeParity:
              "pre_close": [10.0, 10.0, 9.5, 9.5, 9.5]},
             index=idx,
         )
-        samples = build_guard_samples(panel, pairs, _spec(), lookahead=0)
+        samples = build_guard_samples(panel, pairs, make_spec(), lookahead=0)
         by_date = dict(zip(samples["trade_date"], samples["ret_from_entry"]))
         # 卖出日 dts=0 被 lookahead 规则跳过（预期），其余 4 日必须产出样本：
         # 含恢复日 0108/0109——错误路径在这里用恢复日 pre_close 补缩放

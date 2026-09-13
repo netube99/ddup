@@ -16,7 +16,6 @@ Locks three behaviors:
 """
 
 import hashlib
-import json
 import sqlite3
 
 import numpy as np
@@ -31,98 +30,60 @@ from btcore.ml.dataset import build_panel
 from btcore.provider import DataProvider
 from btcore.strategy import Strategy
 from btcore.strategy_loader import build_strategy
-from btcore.strategy_tools import bars_to_df, eval_factor_specs
-from tests.conftest import MockDataBackend
+from tests.conftest import MlTopKStrategy, MockDataBackend, write_meta
 
 RAW_FEATURES = ["turnover_rate", "volume_ratio"]
 
 
-class _MlTopK(Strategy):
-    """每日读 ml_<name> 物化列评分，买 top1，卖出不在名单的持仓。"""
+def _make_model(tmp_path, name, factors, raw, state_features=(), classifier=False):
+    """训练小 XGBoost 模型并导出 ONNX + meta v3（raw/holding 两种 scope 共用）。"""
+    from onnxmltools import convert_xgboost
+    from onnxmltools.convert.common.data_types import FloatTensorType
+    from xgboost import XGBClassifier, XGBRegressor
 
-    def on_start(self, provider, first_date, end_date=None):
-        pass
-
-    def select(self, bars, snapshot, provider):
-        df = bars_to_df(bars)
-        _, score = eval_factor_specs(df, self.FACTOR_SPECS)
-        top = score.nlargest(1).index.tolist()
-        buys = [s for s in top if s not in snapshot.holdings]
-        sells = [s for s in snapshot.holdings if s not in top]
-        return {"buy": buys, "sell": sells}
-
-    def calc_conditions(self, symbol, entry_price, bar, holding_days):
-        return []
+    n = len(factors) + len(raw) + len(state_features)
+    rng = np.random.RandomState(7)
+    x = rng.randn(400, n).astype(np.float32)
+    if classifier:
+        model = XGBClassifier(n_estimators=8, max_depth=3).fit(
+            x, (x[:, -1] > 0).astype(np.int32),
+        )
+    else:
+        model = XGBRegressor(n_estimators=8, max_depth=3).fit(
+            x, x[:, 0] * 0.8 - x[:, 1] * 0.2,
+        )
+    onx = convert_xgboost(
+        model,
+        initial_types=[("float_input", FloatTensorType([None, n]))],
+        target_opset=15,
+    )
+    art = tmp_path / f"{name}.onnx"
+    blob = onx.SerializeToString()
+    art.write_bytes(blob)
+    write_meta(
+        tmp_path / f"{name}.meta.json",
+        name=name,
+        features={"factors": list(factors), "raw": list(raw)},
+        state_features=list(state_features),
+        post_transform="none",
+        scaler_mean=[0.0] * n,
+        scaler_std=[1.0] * n,
+        artifact_sha256=hashlib.sha256(blob).hexdigest(),
+    )
+    return art
 
 
 def _make_raw_only_model(tmp_path, name="raw_only"):
     """训练一个仅用 raw 列特征的小回归模型，导出 ONNX + meta v3。"""
-    from onnxmltools import convert_xgboost
-    from onnxmltools.convert.common.data_types import FloatTensorType
-    from xgboost import XGBRegressor
-
-    rng = np.random.RandomState(7)
-    x = rng.randn(400, len(RAW_FEATURES)).astype(np.float32)
-    model = XGBRegressor(n_estimators=8, max_depth=3).fit(
-        x, x[:, 0] * 0.8 - x[:, 1] * 0.2,
-    )
-    onx = convert_xgboost(
-        model,
-        initial_types=[("float_input", FloatTensorType([None, len(RAW_FEATURES)]))],
-        target_opset=15,
-    )
-    art = tmp_path / f"{name}.onnx"
-    blob = onx.SerializeToString()
-    art.write_bytes(blob)
-    meta = {
-        "version": 3,
-        "name": name,
-        "features": {"factors": [], "raw": list(RAW_FEATURES)},
-        "state_features": [],
-        "post_transform": "none",
-        "label": {"type": "xs_fwdret", "horizon": 5},
-        "train_window": ["20240101", "20240630"],
-        "scaler_mean": [0.0] * len(RAW_FEATURES),
-        "scaler_std": [1.0] * len(RAW_FEATURES),
-        "artifact_sha256": hashlib.sha256(blob).hexdigest(),
-    }
-    (tmp_path / f"{name}.meta.json").write_text(json.dumps(meta))
-    return art
+    return _make_model(tmp_path, name, factors=[], raw=list(RAW_FEATURES))
 
 
 def _make_holding_scope_model(tmp_path, name="hold_m"):
     """含 state_features 的 holding scope 模型（factors + state，共 2 特征）。"""
-    from onnxmltools import convert_xgboost
-    from onnxmltools.convert.common.data_types import FloatTensorType
-    from xgboost import XGBClassifier
-
-    rng = np.random.RandomState(7)
-    x = rng.randn(400, 2).astype(np.float32)
-    model = XGBClassifier(n_estimators=8, max_depth=3).fit(
-        x, (x[:, -1] > 0).astype(np.int32),
+    return _make_model(
+        tmp_path, name, factors=["mom20"], raw=[], state_features=["hold_days"],
+        classifier=True,
     )
-    onx = convert_xgboost(
-        model,
-        initial_types=[("float_input", FloatTensorType([None, 2]))],
-        target_opset=15,
-    )
-    art = tmp_path / f"{name}.onnx"
-    blob = onx.SerializeToString()
-    art.write_bytes(blob)
-    meta = {
-        "version": 3,
-        "name": name,
-        "features": {"factors": ["mom20"], "raw": []},
-        "state_features": ["hold_days"],
-        "post_transform": "none",
-        "label": {"type": "xs_fwdret", "horizon": 5},
-        "train_window": ["20240101", "20240630"],
-        "scaler_mean": [0.0] * 2,
-        "scaler_std": [1.0] * 2,
-        "artifact_sha256": hashlib.sha256(blob).hexdigest(),
-    }
-    (tmp_path / f"{name}.meta.json").write_text(json.dumps(meta))
-    return art
 
 
 def test_raw_only_panel_model_full_engine_run(tmp_path):
@@ -130,7 +91,7 @@ def test_raw_only_panel_model_full_engine_run(tmp_path):
     → select 消费 → 完整 run；ml 列非全 NaN（空闭包不产生静默全 NaN 分数）。"""
     art = _make_raw_only_model(tmp_path)
     strategy = build_strategy(
-        _MlTopK,
+        MlTopKStrategy,
         {"initial_capital": 1_000_000, "max_positions": 3},
         factor_specs=[{"name": "ml_raw_only", "weight": 1.0}],
         models={"raw_only": {"artifact": str(art)}},
@@ -204,7 +165,7 @@ def test_holding_scope_ml_column_still_rejected(tmp_path):
     art = _make_holding_scope_model(tmp_path)
     with pytest.raises(ValueError, match="holding scope"):
         build_strategy(
-            _MlTopK,
+            MlTopKStrategy,
             {"initial_capital": 1_000_000},
             factor_specs=[{"name": "ml_hold_m", "weight": 1.0}],
             models={"hold_m": {"artifact": str(art)}},

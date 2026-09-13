@@ -10,7 +10,6 @@ import sqlite3
 import subprocess
 import sys
 
-import pandas as pd
 import pytest
 
 from research.cross_validate import (
@@ -18,14 +17,7 @@ from research.cross_validate import (
     _min_commission_overhead,
     validate_trades,
 )
-
-TRADE_COLS = ["date", "symbol", "side", "trigger", "price", "shares", "turnover",
-              "commission", "stamp_tax", "transfer_fee", "slippage_amount",
-              "net_amount", "reason"]
-
-
-def make_trades(rows):
-    return pd.DataFrame(rows, columns=TRADE_COLS)
+from tests.test_stats import make_trades
 
 
 def make_db(tmp_path, stats_json=None, config_json=None, extra_trades=()):

@@ -10,16 +10,12 @@ from btcore.limits import get_limit_prices
 from btcore.match.manual import rebalance_to_targets
 from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
-from tests.conftest import MockDataBackend, make_account, make_bar, make_holding
-
-
-def _account(cash=100_000.0, holdings=None):
-    return make_account(cash=cash, holdings=holdings, slippage_ticks=0)
+from tests.conftest import MockDataBackend, make_bar, make_holding, make_test_account
 
 
 def test_partial_sell_shares_and_cash():
     holding = make_holding()
-    account = _account(cash=0.0, holdings={"000001.SZ": holding})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": holding})
     bars = {"000001.SZ": make_bar(open=10.0)}
 
     trades = rebalance_to_targets(account, bars, {"000001.SZ": 5000.0}, 10,
@@ -39,7 +35,7 @@ def test_partial_sell_shares_and_cash():
 
 def test_full_clear_on_zero_target():
     holding = make_holding()
-    account = _account(cash=0.0, holdings={"000001.SZ": holding})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": holding})
     bars = {"000001.SZ": make_bar(open=10.0)}
 
     trades = rebalance_to_targets(account, bars, {"000001.SZ": 0.0}, 10,
@@ -53,7 +49,7 @@ def test_full_clear_on_zero_target():
 
 def test_add_to_existing_weighted_entry_price():
     holding = make_holding(shares=100, entry_price=9.0, last_price=10.0)
-    account = _account(holdings={"000001.SZ": holding})
+    account = make_test_account(cash=100_000.0, holdings={"000001.SZ": holding})
     bars = {"000001.SZ": make_bar(open=10.0)}
 
     trades = rebalance_to_targets(account, bars, {"000001.SZ": 3000.0}, 10,
@@ -73,7 +69,7 @@ def test_add_to_existing_weighted_entry_price():
 
 def test_unlisted_holding_untouched():
     holding = make_holding(symbol="000002.SZ", shares=100)
-    account = _account(holdings={"000002.SZ": holding})
+    account = make_test_account(cash=100_000.0, holdings={"000002.SZ": holding})
     bars = {"000001.SZ": make_bar(), "000002.SZ": make_bar()}
 
     rebalance_to_targets(account, bars, {"000001.SZ": 5000.0}, 10,
@@ -84,7 +80,7 @@ def test_unlisted_holding_untouched():
 
 
 def test_rebalance_no_longer_blocked_by_max_positions():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {s: make_bar() for s in ("000001.SZ", "000002.SZ", "000003.SZ")}
     targets = {s: 5000.0 for s in bars}
 
@@ -97,7 +93,7 @@ def test_rebalance_no_longer_blocked_by_max_positions():
 
 
 def test_rebalance_skips_when_cash_insufficient():
-    account = _account(cash=1500.0)
+    account = make_test_account(cash=1500.0)
     bars = {"000001.SZ": make_bar(open=10.0)}
 
     trades = rebalance_to_targets(account, bars, {"000001.SZ": 5000.0}, 10,

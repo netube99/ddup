@@ -1,21 +1,10 @@
 """btcore.factors.cse 测试：重写正确性 + 物化结果与无 CSE 逐值相等。"""
 
-import numpy as np
 import pandas as pd
 import pytest
 
 from btcore.factors import cse, ops, plan
-
-
-def _mk_panel(dates, syms, seed=1):
-    idx = pd.MultiIndex.from_product(
-        [dates, syms], names=["trade_date", "symbol"]
-    )
-    rng = np.random.default_rng(seed)
-    close = pd.Series(
-        rng.uniform(0.9, 1.1, len(idx)).cumsum() / len(dates) + 10, index=idx
-    )
-    return pd.DataFrame({"close_hfq": close})
+from tests.conftest import make_factor_panel as _mk_panel
 
 
 class TestRewrite:

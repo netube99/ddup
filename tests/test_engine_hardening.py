@@ -15,13 +15,9 @@ from btcore.match import conditions
 from btcore.match.manual import manual_buy, manual_sell, rebalance_to_targets
 from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
-from tests.conftest import MockDataBackend, make_account, make_bar, make_holding
+from tests.conftest import MockDataBackend, make_bar, make_holding, make_test_account
 
 NAN = float("nan")
-
-
-def _account(cash=1_000_000.0, holdings=None):
-    return make_account(cash=cash, holdings=holdings, slippage_ticks=0)
 
 
 def _holding(symbol="000001.SZ", shares=1000, price=10.0):
@@ -32,7 +28,7 @@ def _holding(symbol="000001.SZ", shares=1000, price=10.0):
 
 
 def test_manual_buy_warns_on_max_positions():
-    account = _account()
+    account = make_test_account(cash=1_000_000.0)
     bars = {s: make_bar() for s in ("000001.SZ", "000002.SZ", "000003.SZ")}
     trades = manual_buy(account, bars, list(bars), 2,
                         get_limit_prices, calc_trade_costs, apply_slippage)
@@ -41,7 +37,7 @@ def test_manual_buy_warns_on_max_positions():
 
 
 def test_manual_buy_no_longer_blocked_by_max_positions():
-    account = _account(holdings={"000001.SZ": _holding()})
+    account = make_test_account(cash=1_000_000.0, holdings={"000001.SZ": _holding()})
     trades = manual_buy(account, {"000002.SZ": make_bar()}, ["000002.SZ"], 2,
                         get_limit_prices, calc_trade_costs, apply_slippage)
     assert len(trades) == 1  # max_positions 不阻止新买
@@ -53,7 +49,7 @@ def test_manual_buy_no_longer_blocked_by_max_positions():
 
 def test_sell_skips_nan_open():
     holding = _holding()
-    account = _account(cash=0.0, holdings={"000001.SZ": holding})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": holding})
     bar = make_bar()
     bar["open"] = NAN
     trades = manual_sell(account, {"000001.SZ": bar}, ["000001.SZ"],
@@ -64,7 +60,7 @@ def test_sell_skips_nan_open():
 
 
 def test_buy_skips_nan_open():
-    account = _account()
+    account = make_test_account(cash=1_000_000.0)
     bar = make_bar()
     bar["open"] = NAN
     trades = manual_buy(account, {"000001.SZ": bar}, ["000001.SZ"], 10,
@@ -74,7 +70,7 @@ def test_buy_skips_nan_open():
 
 
 def test_rebalance_skips_nan_open():
-    account = _account(holdings={"000001.SZ": _holding()})
+    account = make_test_account(cash=1_000_000.0, holdings={"000001.SZ": _holding()})
     bar = make_bar()
     bar["open"] = NAN
     trades = rebalance_to_targets(account, {"000001.SZ": bar},
@@ -116,7 +112,7 @@ def test_limit_rounding_half_up():
 
 
 def test_rebalance_full_exit_sells_odd_lot():
-    account = _account(cash=0.0,
+    account = make_test_account(cash=0.0,
                        holdings={"000001.SZ": _holding(shares=150)})
     trades = rebalance_to_targets(account, {"000001.SZ": make_bar()},
                                   {"000001.SZ": 0}, 10,
@@ -128,7 +124,7 @@ def test_rebalance_full_exit_sells_odd_lot():
 
 def test_rebalance_partial_reduction_keeps_lot_truncation():
     # 目标市值 500 (50 股): 减仓按整手截断, 卖 100 股留 50
-    account = _account(cash=0.0,
+    account = make_test_account(cash=0.0,
                        holdings={"000001.SZ": _holding(shares=150)})
     trades = rebalance_to_targets(account, {"000001.SZ": make_bar()},
                                   {"000001.SZ": 500.0}, 10,
@@ -445,7 +441,7 @@ def test_on_tick_buy_conditions_merged():
 
 
 def test_manual_sell_warns_missing_bar(caplog):
-    account = _account(cash=0.0, holdings={"000001.SZ": _holding()})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": _holding()})
     with caplog.at_level(logging.WARNING):
         trades = manual_sell(account, {}, ["000001.SZ"],
                              get_limit_prices, calc_trade_costs, apply_slippage)
@@ -454,7 +450,7 @@ def test_manual_sell_warns_missing_bar(caplog):
 
 
 def test_manual_buy_warns_missing_bar(caplog):
-    account = _account()
+    account = make_test_account(cash=1_000_000.0)
     with caplog.at_level(logging.WARNING):
         trades = manual_buy(account, {}, ["000001.SZ"], 10,
                             get_limit_prices, calc_trade_costs, apply_slippage)
@@ -463,7 +459,7 @@ def test_manual_buy_warns_missing_bar(caplog):
 
 
 def test_rebalance_warns_missing_bar(caplog):
-    account = _account(cash=0.0, holdings={"000001.SZ": _holding()})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": _holding()})
     with caplog.at_level(logging.WARNING):
         trades = rebalance_to_targets(account, {}, {"000001.SZ": 0}, 10,
                                       get_limit_prices, calc_trade_costs,
@@ -475,7 +471,7 @@ def test_rebalance_warns_missing_bar(caplog):
 def test_exit_conditions_warns_missing_bar(caplog):
     holding = _holding()
     holding.conditions = [{"type": "STOP_LOSS", "price": 9.0}]
-    account = _account(cash=0.0, holdings={"000001.SZ": holding})
+    account = make_test_account(cash=0.0, holdings={"000001.SZ": holding})
     with caplog.at_level(logging.WARNING):
         trades = conditions.exit_conditions(
             account, {}, get_limit_prices, calc_trade_costs, apply_slippage)
@@ -484,7 +480,7 @@ def test_exit_conditions_warns_missing_bar(caplog):
 
 
 def test_entry_conditions_warns_missing_bar(caplog):
-    account = _account()
+    account = make_test_account(cash=1_000_000.0)
     order = {"symbol": "000001.SZ", "type": "LIMIT_BUY", "price": 9.0,
              "value": 10000}
     with caplog.at_level(logging.WARNING):

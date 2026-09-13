@@ -14,10 +14,7 @@ import pandas as pd
 from btcore.strategy_loader import load_strategy
 from research.cross_validate import validate_trades
 from research.replay import run_replay
-
-TRADE_COLS = ["date", "symbol", "side", "trigger", "price", "shares", "turnover",
-              "commission", "stamp_tax", "transfer_fee", "slippage_amount",
-              "net_amount", "reason"]
+from tests.test_stats import _TRADE_COLS as TRADE_COLS
 
 
 def _buy(turnover: float) -> list:

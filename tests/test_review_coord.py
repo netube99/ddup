@@ -5,28 +5,21 @@ factor_specs 引用 ml_<name> 时引擎应正常加载——策略闭包为空�
 仍需挂空 FACTOR_NODES，Engine._build_factor_plan 只对 nodes is None 报错。
 """
 
-import json
-
 from btcore.engine import Engine
 from btcore.strategy import Strategy
 from btcore.strategy_loader import build_strategy
+from tests.conftest import write_meta
 
 
 def _raw_only_model(tmp_path, name="a"):
     art = tmp_path / f"{name}.onnx"
     art.write_bytes(b"x")
-    meta = {
-        "version": 3,
-        "name": name,
-        "features": {"factors": [], "raw": ["close"]},
-        "state_features": [],
-        "post_transform": "none",
-        "label": {"type": "xs_fwdret", "horizon": 5},
-        "train_window": ["20240101", "20240630"],
-        "scaler_mean": [0.0],
-        "scaler_std": [1.0],
-    }
-    (tmp_path / f"{name}.meta.json").write_text(json.dumps(meta))
+    write_meta(
+        tmp_path / f"{name}.meta.json",
+        name=name,
+        features={"factors": [], "raw": ["close"]},
+        post_transform="none",
+    )
     return art
 
 

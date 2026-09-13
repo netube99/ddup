@@ -6,16 +6,16 @@ from btcore.limits import get_limit_prices
 from btcore.match.core import cap_by_volume
 from btcore.match.manual import manual_buy, manual_sell
 from btcore.slippage import apply_slippage
-from tests.conftest import make_account, make_bar, make_holding
+from tests.conftest import make_bar, make_holding, make_test_account
 
 
 def _account(cash=100_000.0, ratio=0.1, holdings=None):
-    return make_account(cash=cash, holdings=holdings, slippage_ticks=0,
-                        order_volume_ratio=ratio)
+    return make_test_account(cash=cash, holdings=holdings,
+                             order_volume_ratio=ratio)
 
 
 def test_buy_capped_by_volume():
-    account = _account(ratio=0.1)
+    account = _account(cash=100_000.0, ratio=0.1)
     # vol 单位为手（契约口径），50 手 = 5000 股
     bars = {"000001.SZ": make_bar(vol=50.0)}
     # 无约束可买 1000 股；vol*ratio=5 手 = 500 股 → 截断为 500
@@ -57,7 +57,7 @@ def test_ratio_none_no_cap():
 
 
 def test_cap_by_volume_missing_vol():
-    account = _account(ratio=0.1)
+    account = _account(cash=100_000.0, ratio=0.1)
     bar = make_bar()
     del bar["vol"]
     assert cap_by_volume(bar, 1000, account) == 1000

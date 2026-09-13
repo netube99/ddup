@@ -10,14 +10,10 @@ from btcore.match.conditions import entry_conditions
 from btcore.match.manual import manual_buy
 from btcore.provider import DataProvider
 from btcore.slippage import apply_slippage
-from tests.conftest import MockDataBackend, make_account, make_bar, make_holding
+from tests.conftest import MockDataBackend, make_account, make_bar, make_holding, make_test_account
 
 START, END = "20240603", "20240607"
 SYM = "000001.SZ"
-
-
-def _account(cash=100_000.0, holdings=None):
-    return make_account(cash=cash, holdings=holdings, slippage_ticks=0)
 
 
 class _BaseStrategy:
@@ -94,7 +90,7 @@ def _limit_order(price=10.0, **kw):
 
 
 def test_limit_buy_fills_at_open_when_open_below_limit():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=9.5, low=9.0, high=10.0)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -108,7 +104,7 @@ def test_limit_buy_fills_at_open_when_open_below_limit():
 
 
 def test_limit_buy_fills_at_limit_price_intraday():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=10.5, low=9.8, high=10.6)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -121,7 +117,7 @@ def test_limit_buy_fills_at_limit_price_intraday():
 
 
 def test_limit_buy_not_triggered():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=10.5, low=10.2, high=10.6)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -133,7 +129,7 @@ def test_limit_buy_not_triggered():
 
 
 def test_breakout_buy_fills_at_trigger_price():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=9.8, low=9.5, high=10.5)}
 
     trades = entry_conditions(
@@ -148,7 +144,7 @@ def test_breakout_buy_fills_at_trigger_price():
 
 
 def test_breakout_buy_fills_at_open_when_gapped():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=10.4, low=10.1, high=10.6)}
 
     trades = entry_conditions(
@@ -162,7 +158,7 @@ def test_breakout_buy_fills_at_open_when_gapped():
 
 
 def test_buy_condition_limit_up_skip():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     # open 即涨停价: 触发但 fill >= up_limit → 不买
     bars = {SYM: make_bar(open=11.0, low=11.0, high=11.0,
                           up_limit=11.0, down_limit=9.0)}
@@ -178,7 +174,7 @@ def test_buy_condition_limit_up_skip():
 
 def test_buy_condition_no_longer_blocked_by_max_positions():
     existing = make_holding(symbol="000002.SZ", shares=100)
-    account = _account(holdings={"000002.SZ": existing})
+    account = make_test_account(cash=100_000.0, holdings={"000002.SZ": existing})
     bars = {SYM: make_bar(open=9.5, low=9.0)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -190,7 +186,7 @@ def test_buy_condition_no_longer_blocked_by_max_positions():
 
 
 def test_buy_condition_skips_when_cash_insufficient():
-    account = _account(cash=1500.0)
+    account = make_test_account(cash=1500.0)
     bars = {SYM: make_bar(open=9.5, low=9.0)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -201,7 +197,7 @@ def test_buy_condition_skips_when_cash_insufficient():
 
 
 def test_buy_condition_shares_sizing_normalized():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=9.5, low=9.0)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, shares=250)],
@@ -214,7 +210,7 @@ def test_buy_condition_shares_sizing_normalized():
 
 def test_buy_condition_skips_existing_holding():
     existing = make_holding(symbol=SYM, shares=100)
-    account = _account(holdings={SYM: existing})
+    account = make_test_account(cash=100_000.0, holdings={SYM: existing})
     bars = {SYM: make_bar(open=9.5, low=9.0)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],
@@ -354,7 +350,7 @@ def test_snapshot_total_value_and_mutation_isolation():
 
 
 def test_manual_buy_close_execution():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     account.execution_price = "close"
     bars = {SYM: make_bar(open=10.0, close=10.5)}
 
@@ -402,7 +398,7 @@ SYM2 = "000002.SZ"
 
 
 def test_manual_buy_with_weights():
-    account = _account()
+    account = make_test_account(cash=100_000.0)
     bars = {SYM: make_bar(open=10.0), SYM2: make_bar(open=20.0)}
 
     trades = manual_buy(account, bars, [SYM, SYM2], 10,
@@ -474,7 +470,7 @@ def test_buy_weights_key_mismatch_fails():
 
 
 def test_entry_condition_slip_ticks_override():
-    account = _account()  # slippage_ticks=0
+    account = make_test_account(cash=100_000.0)  # slippage_ticks=0
     bars = {SYM: make_bar(open=10.5, low=9.8, high=10.6)}
 
     trades = entry_conditions(account, bars, [_limit_order(10.0, value=5000.0)],

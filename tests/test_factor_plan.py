@@ -8,9 +8,10 @@ import pytest
 
 from btcore.engine import Engine
 from btcore.factors import plan
+from btcore.factors.library import eval_spec
 from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
-from tests.conftest import MockDataBackend
+from tests.conftest import MockDataBackend, make_factor_panel
 
 _NODES = {
     "mom20": {"expr": "roc(close_hfq, 20)"},
@@ -87,17 +88,7 @@ class TestWindows:
 
 
 def _mk_panel(dates, syms, seed=1):
-    idx = pd.MultiIndex.from_product(
-        [dates, syms], names=["trade_date", "symbol"]
-    )
-    rng = np.random.default_rng(seed)
-    close = pd.Series(
-        rng.uniform(0.9, 1.1, len(idx)).cumsum() / len(dates) + 10, index=idx
-    )
-    df = pd.DataFrame({"close_hfq": close})
-    ind = {s: ("I1" if i % 2 == 0 else "I2") for i, s in enumerate(syms)}
-    df["industry"] = df.index.get_level_values("symbol").map(ind)
-    return df
+    return make_factor_panel(dates, syms, seed=seed, industry=True)
 
 
 class TestMaterialize:
@@ -360,7 +351,7 @@ class TestProjectWarnings:
             breadth_set = p["breadth"]
             for name in p["topo"]:
                 if name in breadth_set:
-                    breadth[name] = plan._eval_spec_on(breadth, _NODES[name])
+                    breadth[name] = eval_spec(breadth, _NODES[name])
             # 投影：market 坍缩因子，广度面板日期少 → NaN
             for name, kind in p["collapse"].items():
                 plan._project(main, breadth, name, kind)

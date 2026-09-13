@@ -1,10 +1,15 @@
 """Pytest fixtures: MockDataBackend reads parquet fixtures, implements DataBackend."""
 
+import json
 import os
 
+import numpy as np
 import pandas as pd
 
 from btcore.backend import DataBackend
+from btcore.ml.spec import ModelSpec
+from btcore.strategy import Strategy
+from btcore.strategy_tools import bars_to_df, eval_factor_specs
 from btcore.types import Account, Holding
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -58,6 +63,39 @@ def make_account(cash=100_000.0, initial_capital=None, holdings=None,
                    holdings=holdings or {}, **kw)
 
 
+def make_test_account(cash, holdings=None, order_volume_ratio=None) -> Account:
+    """撮合单测账户快捷构造：slippage_ticks 固定为 0，其余显式传参。"""
+    return make_account(cash=cash, holdings=holdings, slippage_ticks=0,
+                        order_volume_ratio=order_volume_ratio)
+
+
+def make_spec(**over) -> ModelSpec:
+    kw = {
+        "name": "g",
+        "artifact": "x.onnx",
+        "features": ["mom20"],
+        "raw_features": [],
+        "state_features": ["hold_days", "ret_from_entry"],
+    }
+    kw.update(over)
+    return ModelSpec(**kw)
+
+
+def make_factor_panel(dates, syms, seed=1, industry=False) -> pd.DataFrame:
+    idx = pd.MultiIndex.from_product(
+        [dates, syms], names=["trade_date", "symbol"]
+    )
+    rng = np.random.default_rng(seed)
+    close = pd.Series(
+        rng.uniform(0.9, 1.1, len(idx)).cumsum() / len(dates) + 10, index=idx
+    )
+    df = pd.DataFrame({"close_hfq": close})
+    if industry:
+        ind = {s: ("I1" if i % 2 == 0 else "I2") for i, s in enumerate(syms)}
+        df["industry"] = df.index.get_level_values("symbol").map(ind)
+    return df
+
+
 def make_bar(open=10.0, high=None, low=None, close=None, pre_close=None,
              up_limit=_AUTO, down_limit=_AUTO, vol=1_000_000.0,
              date="20240603", **extra) -> dict:
@@ -77,6 +115,44 @@ def make_bar(open=10.0, high=None, low=None, close=None, pre_close=None,
         "trade_date": date,
         **extra,
     }
+
+
+class MlTopKStrategy(Strategy):
+    """每日读 ml_<name> 物化列评分，买 top1，卖出不在名单的持仓。"""
+
+    def on_start(self, provider, first_date, end_date=None):
+        pass
+
+    def select(self, bars, snapshot, provider):
+        df = bars_to_df(bars)
+        _, score = eval_factor_specs(df, self.FACTOR_SPECS)
+        top = score.nlargest(1).index.tolist()
+        buys = [s for s in top if s not in snapshot.holdings]
+        sells = [s for s in snapshot.holdings if s not in top]
+        return {"buy": buys, "sell": sells}
+
+    def calc_conditions(self, symbol, entry_price, bar, holding_days):
+        return []
+
+
+def write_meta(path, **over):
+    meta = {
+        "version": 3,
+        "name": path.stem,
+        "features": {"factors": ["mom20"], "raw": ["turnover_rate"]},
+        "state_features": [],
+        "post_transform": "xs_rank",
+        "label": {"type": "xs_fwdret", "horizon": 5},
+        "train_window": ["20240101", "20240630"],
+    }
+    meta.update(over)
+    n_feat = (
+        len(meta["features"]["factors"]) + len(meta["features"]["raw"])
+        + len(meta["state_features"])
+    )
+    meta.setdefault("scaler_mean", [0.0] * n_feat)
+    meta.setdefault("scaler_std", [1.0] * n_feat)
+    path.write_text(json.dumps(meta))
 
 
 class MockDataBackend(DataBackend):

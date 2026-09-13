@@ -24,31 +24,10 @@ from btcore.strategy_loader import build_strategy
 from btcore.strategy_tools import (
     ConditionBuilder,
     bars_to_df,
-    eval_factor_specs,
 )
-from tests.conftest import MockDataBackend
+from tests.conftest import MlTopKStrategy, MockDataBackend, make_spec, write_meta
 
 # ── 纯解析/整合用例（无 ONNX 依赖）──
-
-
-def _write_meta(path, **over):
-    meta = {
-        "version": 3,
-        "name": path.stem,
-        "features": {"factors": ["mom20"], "raw": ["turnover_rate"]},
-        "state_features": [],
-        "post_transform": "xs_rank",
-        "label": {"type": "xs_fwdret", "horizon": 5},
-        "train_window": ["20240101", "20240630"],
-    }
-    meta.update(over)
-    n_feat = (
-        len(meta["features"]["factors"]) + len(meta["features"]["raw"])
-        + len(meta["state_features"])
-    )
-    meta.setdefault("scaler_mean", [0.0] * n_feat)
-    meta.setdefault("scaler_std", [1.0] * n_feat)
-    path.write_text(json.dumps(meta))
 
 
 def _trainer_scaler():
@@ -80,7 +59,7 @@ class TestModelSpec:
     def test_ok_panel_scope(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json")
+        write_meta(tmp_path / "a.meta.json")
         spec = ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
         assert spec.scope == "panel"
         assert spec.column == "ml_a"
@@ -90,7 +69,7 @@ class TestModelSpec:
     def test_holding_scope_derived_from_state_features(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", state_features=["hold_days"],
+        write_meta(tmp_path / "a.meta.json", state_features=["hold_days"],
                     post_transform="none")
         spec = ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
         assert spec.scope == "holding"
@@ -121,7 +100,7 @@ class TestModelSpec:
     def test_bad_meta_version(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", version=1)
+        write_meta(tmp_path / "a.meta.json", version=1)
         with pytest.raises(ValueError, match="meta 版本"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
@@ -129,7 +108,7 @@ class TestModelSpec:
         """v2 meta（ret_from_entry 旧口径）一律拒绝——必须重新训练。"""
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", version=2)
+        write_meta(tmp_path / "a.meta.json", version=2)
         with pytest.raises(ValueError, match="需要 version=3"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
@@ -137,14 +116,14 @@ class TestModelSpec:
         """scaler 维度与特征契约不一致 = 静默错分，加载期 fail-fast。"""
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", scaler_mean=[0.0, 0.0, 0.0])
+        write_meta(tmp_path / "a.meta.json", scaler_mean=[0.0, 0.0, 0.0])
         with pytest.raises(ValueError, match="scaler_mean 维度"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
     def test_yaml_meta_feature_mismatch(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json")
+        write_meta(tmp_path / "a.meta.json")
         with pytest.raises(ValueError, match="不一致"):
             ModelSpec.from_dict(
                 "a",
@@ -155,14 +134,14 @@ class TestModelSpec:
     def test_bad_state_feature(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", state_features=["magic"])
+        write_meta(tmp_path / "a.meta.json", state_features=["magic"])
         with pytest.raises(ValueError, match="不支持的 state_features"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
     def test_bad_post_transform(self, tmp_path):
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json", post_transform="magic")
+        write_meta(tmp_path / "a.meta.json", post_transform="magic")
         with pytest.raises(ValueError, match="post_transform"):
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
@@ -170,7 +149,7 @@ class TestModelSpec:
         """旧 YAML 的 role 键仅告警忽略，scope 仍由特征推导。"""
         art = tmp_path / "a.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "a.meta.json")
+        write_meta(tmp_path / "a.meta.json")
         spec = ModelSpec.from_dict(
             "a", {"artifact": "a.onnx", "role": "exit_guard"}, str(tmp_path),
         )
@@ -181,7 +160,7 @@ class TestLoaderIntegration:
     def _models(self, tmp_path, state=(), post="xs_rank"):
         art = tmp_path / "m.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "m.meta.json",
+        write_meta(tmp_path / "m.meta.json",
                     state_features=list(state), post_transform=post)
         return {"m": {"artifact": str(art)}}
 
@@ -247,7 +226,7 @@ class TestLoaderIntegration:
         """model_exit 引用 post_transform != none 的模型时告警（阈值语义错位）。"""
         art = tmp_path / "m.onnx"
         art.write_bytes(b"x")
-        _write_meta(tmp_path / "m.meta.json", state_features=["hold_days"],
+        write_meta(tmp_path / "m.meta.json", state_features=["hold_days"],
                     post_transform="xs_rank")
         with caplog.at_level(logging.WARNING, logger="btcore.strategy_loader"):
             build_strategy(
@@ -263,8 +242,7 @@ class TestLoaderIntegration:
 
 class TestGuardSamplesBasis:
     def _spec(self):
-        return ModelSpec(
-            name="g", artifact="x.onnx",
+        return make_spec(
             features=["mom20"], raw_features=["turnover_rate"],
             state_features=["hold_days"],
         )
@@ -340,38 +318,38 @@ class TestGuardSamplesBasis:
         assert len(apply_pit_membership(panel, None)) == len(panel)
 
 
+def _insert_trade(conn, run_id, row):
+    date, sym, side, trig, price, shares = row[:6]
+    # 显式 net（红利/审计行）优先；缺省按无费用买卖净额
+    net = row[6] if len(row) > 6 else price * shares * (1 if side == "SELL" else -1)
+    conn.execute(
+        "INSERT INTO trade_log (run_id, date, symbol, side, trigger,"
+        " price, shares, turnover, commission, net_amount)"
+        " VALUES (?,?,?,?,?,?,?,0,0,?)",
+        (run_id, date, sym, side, trig, price, shares, net),
+    )
+
+
+def _db(tmp_path, rows):
+    """单 completed run 结果库；rows = (date, symbol, side, trigger, price, shares[, net])。"""
+    from btcore import database
+
+    p = tmp_path / "trades.db"
+    conn = database.init_backtest_db(str(p))
+    run_id = database.write_run(
+        conn, created_at="2024-01-01", strategy="t", start_date="20240101",
+        end_date="20240201", initial_capital=1e6, config_json="{}",
+        status="completed",
+    )
+    for row in rows:
+        _insert_trade(conn, run_id, row)
+    conn.commit()
+    conn.close()
+    return str(p)
+
+
 class TestTradePairRounds:
     """extract_trade_pairs 回合语义：不限买入 trigger、多买多卖、残缺跳过。"""
-
-    @staticmethod
-    def _insert_trade(conn, run_id, row):
-        date, sym, side, trig, price, shares = row[:6]
-        # 显式 net（红利/审计行）优先；缺省按无费用买卖净额
-        net = row[6] if len(row) > 6 else price * shares * (1 if side == "SELL" else -1)
-        conn.execute(
-            "INSERT INTO trade_log (run_id, date, symbol, side, trigger,"
-            " price, shares, turnover, commission, net_amount)"
-            " VALUES (?,?,?,?,?,?,?,0,0,?)",
-            (run_id, date, sym, side, trig, price, shares, net),
-        )
-
-    @classmethod
-    def _db(cls, tmp_path, rows):
-        """单 completed run 结果库；rows = (date, symbol, side, trigger, price, shares[, net])。"""
-        from btcore import database
-
-        p = tmp_path / "trades.db"
-        conn = database.init_backtest_db(str(p))
-        run_id = database.write_run(
-            conn, created_at="2024-01-01", strategy="t", start_date="20240101",
-            end_date="20240201", initial_capital=1e6, config_json="{}",
-            status="completed",
-        )
-        for row in rows:
-            cls._insert_trade(conn, run_id, row)
-        conn.commit()
-        conn.close()
-        return str(p)
 
     @classmethod
     def _multi_db(cls, tmp_path, run_statuses, trades):
@@ -390,7 +368,7 @@ class TestTradePairRounds:
             for status in run_statuses
         ]
         for row in trades:
-            cls._insert_trade(conn, run_ids[row[0]], row[1:])
+            _insert_trade(conn, run_ids[row[0]], row[1:])
         conn.commit()
         conn.close()
         return str(p), run_ids
@@ -399,7 +377,7 @@ class TestTradePairRounds:
         """TARGET 买入回合不再静默蒸发。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "TARGET", 10.0, 100),
             ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
         ])
@@ -412,7 +390,7 @@ class TestTradePairRounds:
         """条件买入回合（AGENTS.md 推荐触发范式）同样计入。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "BREAKOUT_BUY", 10.0, 100),
             ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
         ])
@@ -422,7 +400,7 @@ class TestTradePairRounds:
         """送转增股回合不再因"超卖"被丢弃，buy_price 为除权后每股成本。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             ("20240105", "X", "STK_DIV", "CORPORATE", 0.0, 140),
             ("20240108", "X", "SELL", "MANUAL", 5.1, 140),
@@ -437,7 +415,7 @@ class TestTradePairRounds:
         """买 1000 两次部分卖 500/500 → 1 回合，pnl 为两笔合计，trigger 取末笔。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 1000),
             ("20240105", "X", "SELL", "MANUAL", 9.0, 500),
             ("20240110", "X", "SELL", "TREND_BREAK", 8.0, 500),
@@ -453,7 +431,7 @@ class TestTradePairRounds:
         """回合内多次买入：buy_price 为股数加权均价。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             ("20240103", "X", "BUY", "MANUAL", 12.0, 100),
             ("20240110", "X", "SELL", "MANUAL", 11.0, 200),
@@ -467,7 +445,7 @@ class TestTradePairRounds:
         """卖无买：跳过并告警（静默丢弃会产出错误标签）。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "SELL", "MANUAL", 9.0, 100),
         ])
         with caplog.at_level(logging.WARNING, logger="btcore.ml.labels"):
@@ -480,7 +458,7 @@ class TestTradePairRounds:
         # 该场景在送转落库后仅剩真正的"超卖"（无送转支撑）才触发
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             ("20240110", "X", "SELL", "MANUAL", 9.0, 150),
         ])
@@ -544,7 +522,7 @@ class TestTradePairRounds:
         红利计入回合 pnl 且无残缺告警。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             # 引擎落库序：SELL（结算）先于 DIV（公司行为），id 更小
             ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
@@ -560,7 +538,7 @@ class TestTradePairRounds:
         """同日 STK_DIV+SELL：送转落库晚于卖出也不误判超卖丢弃。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             ("20240110", "X", "SELL", "TREND_BREAK", 7.0, 140),
             ("20240110", "X", "STK_DIV", "CORPORATE", 0.0, 140),
@@ -577,7 +555,7 @@ class TestTradePairRounds:
         """实盘账本 ADJUST 现金审计行：不进回合、不进 pnl、无告警。"""
         from btcore.ml.labels import extract_trade_pairs
 
-        db = self._db(tmp_path, [
+        db = _db(tmp_path, [
             ("20240102", "X", "BUY", "MANUAL", 10.0, 100),
             ("20240105", "", "ADJUST", "MANUAL", 0.0, 0, -500.0),
             ("20240110", "X", "SELL", "TREND_BREAK", 9.0, 100),
@@ -628,7 +606,7 @@ def _make_model(tmp_path, name="m", n_features=2, state=(), post="none"):
     art.write_bytes(blob)
     factors = ["mom20"] if n_features >= 1 else []
     raw = ["turnover_rate"] if n_features >= 2 else []
-    _write_meta(
+    write_meta(
         tmp_path / f"{name}.meta.json",
         name=name,
         features={"factors": factors, "raw": raw},
@@ -637,23 +615,6 @@ def _make_model(tmp_path, name="m", n_features=2, state=(), post="none"):
         artifact_sha256=hashlib.sha256(blob).hexdigest(),
     )
     return art
-
-
-class _TopK(Strategy):
-    """每日买评分 top 1，卖出不在名单的持仓。"""
-
-    def on_start(self, provider, first_date, end_date=None): pass
-
-    def select(self, bars, snapshot, provider):
-        df = bars_to_df(bars)
-        _, score = eval_factor_specs(df, self.FACTOR_SPECS)
-        top = score.nlargest(1).index.tolist()
-        buys = [s for s in top if s not in snapshot.holdings]
-        sells = [s for s in snapshot.holdings if s not in top]
-        return {"buy": buys, "sell": sells}
-
-    def calc_conditions(self, symbol, entry_price, bar, holding_days):
-        return []
 
 
 class TestRuntime:
@@ -703,7 +664,7 @@ class TestRuntime:
         # 特征缺失 > 50% → None。构造 3 市场特征 + 1 账户态的模型：3/4 缺失越界
         art2 = tmp_path / "g2.onnx"
         art2.write_bytes(art.read_bytes())
-        _write_meta(
+        write_meta(
             tmp_path / "g2.meta.json", name="g2",
             features={"factors": ["mom20"], "raw": ["turnover_rate", "pe_ttm"]},
             state_features=["hold_days"], post_transform="none",
@@ -781,7 +742,7 @@ class TestRuntime:
         # 缺失过半的行在批量路径同样返回 None（3/4 缺失，模型输入 4 维）
         art2 = tmp_path / "g2.onnx"
         art2.write_bytes(art.read_bytes())
-        _write_meta(
+        write_meta(
             tmp_path / "g2.meta.json", name="g2",
             features={"factors": ["mom20"],
                       "raw": ["turnover_rate", "pe_ttm"]},
@@ -808,7 +769,7 @@ class TestRuntime:
     def test_missing_neutral_after_scaler(self, tmp_path):
         """缺失值在 scaler 之后填 0：NaN 行与"恰为训练均值"行得分相同。"""
         art = _make_model(tmp_path)
-        _write_meta(  # 非平凡 scaler：原始空间的 0 不再是均值
+        write_meta(  # 非平凡 scaler：原始空间的 0 不再是均值
             tmp_path / "m.meta.json",
             scaler_mean=[3.0, 1.0], scaler_std=[2.0, 1.0],
         )
@@ -859,7 +820,7 @@ class TestEngineIntegration:
     def test_panel_model_scoring_and_logging(self, tmp_path):
         art = _make_model(tmp_path, post="xs_rank")
         strat = build_strategy(
-            _TopK,
+            MlTopKStrategy,
             {"initial_capital": 1_000_000, "max_positions": 3},
             factor_specs=[{"factor": "ml_m", "weight": 1.0}],
             models={"m": {"artifact": str(art)}},
@@ -953,7 +914,7 @@ class TestEngineIntegration:
 
         def _engine(db_name):
             strat = build_strategy(
-                _TopK,
+                MlTopKStrategy,
                 {"initial_capital": 1_000_000, "max_positions": 3},
                 factor_specs=[{"factor": "ml_m", "weight": 1.0}],
                 models={"m": {"artifact": str(art)}},
@@ -966,7 +927,7 @@ class TestEngineIntegration:
         assert any("样本内乐观偏差" in r.message for r in caplog.records)
 
         caplog.clear()
-        _write_meta(
+        write_meta(
             tmp_path / "m.meta.json", train_window=["20230101", "20231231"],
             artifact_sha256=hashlib.sha256(art.read_bytes()).hexdigest(),
         )
@@ -983,7 +944,7 @@ class TestTrainingPipeline:
 
         art = _make_model(tmp_path, post="none")
         strat = build_strategy(
-            _TopK,
+            MlTopKStrategy,
             {"initial_capital": 1_000_000},
             factor_specs=[{"factor": "ml_m"}],
             models={"m": {"artifact": str(art)}},

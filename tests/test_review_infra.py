@@ -5,30 +5,10 @@
 
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 
 from btcore.stats import calculate_statistics
-
-_TRADE_COLS = ["date", "symbol", "side", "trigger", "price", "shares", "turnover",
-               "commission", "stamp_tax", "transfer_fee", "slippage_amount",
-               "net_amount", "reason"]
-
-
-def make_account_daily(values, n_holdings=None, initial=1_000_000.0):
-    dates = [f"202406{3 + i:02d}" for i in range(len(values))]
-    data = {
-        "date": dates,
-        "total_value": values,
-        "initial_capital": [initial] * len(values),
-    }
-    if n_holdings is not None:
-        data["n_holdings"] = n_holdings
-    return pd.DataFrame(data)
-
-
-def make_trades(rows):
-    return pd.DataFrame(rows, columns=_TRADE_COLS)
+from tests.test_stats import make_account_daily, make_trades
 
 
 def test_symbol_contribution_open_position_matches_round_trip():
