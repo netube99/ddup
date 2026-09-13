@@ -135,7 +135,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 以下规则是引擎设计的基石，任何模块的修改都不能违反。它们不是实现细节，而是架构级约定。
 
 | 契约 | 规则 |
-|------|------|
+| ------ | ------ |
 | **日期与面板格式** | 日期全仓 `YYYYMMDD` str；面板 `MultiIndex(trade_date, symbol)` |
 | **价格体系** | 撮合、成本、估值使用裸价（`open` / `close` / `high` / `low`）。因子计算、排名使用后复权（`open_hfq` / `close_hfq` 等，公式 `x × adj_factor`）。**不可混用**——裸价做排名会导致除权除息日股价跳空被误判为涨跌信号 |
 | **T+1 锁定** | 买入当日 `Holding.locked = True`，次日解锁。锁定期间条件单跳过该持仓——不会出现当天买入当天止损卖出 |
@@ -180,7 +180,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 （详见 `docs/review_protocol.md`）：
 
 | 级别 | 含义 | 处置 |
-|---|---|---|
+| --- | --- | --- |
 | P0/P1 | 数据损坏 / 契约违背（静默错误行为） | 阻塞：本轮修复后 `close <ID>`，或用户显式 `close <ID> --waive <原因>`；未决 P0/P1 使门禁 FAIL |
 | P2/P3 | 已知局限 / 文档漂移 / 观察项 | 非阻塞：自动登记 `docs/review_backlog.yaml`，不要求本轮修复 |
 
@@ -210,7 +210,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 **过滤回答「做多/做空/双向」，触发回答「什么价格动作下单」。** 混成一句「看起来该买了」，回测很难核对。
 
 | 层 | 职责 | ddup 映射 |
-|---|---|---|
+| --- | --- | --- |
 | 方向过滤 | 只做多/只做空/双向 | `filter_rules`（ST/板块/亏损/价格）+ `factor_specs.ascending` |
 | 触发 | 具体下单时点与价格 | `select()` 返回 buy_list + 条件买入（`BREAKOUT_BUY` / `LIMIT_BUY`） |
 
@@ -240,7 +240,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 每一处「到时候看」都必须在说明书里有明确答案：
 
 | 边界情况 | ddup 处理 | 策略层需确认的点 |
-|---|---|---|
+| --- | --- | --- |
 | 方向不明 / 条件未触发 | `select()` 返回 `{"buy": [], "sell": []}` | 空名单是预期行为，不是异常 |
 | 已有持仓又见同向信号 | 引擎不自动加仓 | 策略必须显式决定：忽略 / 加仓 / 禁止 |
 | 已有持仓又见反向信号 | 引擎不自动对锁 | 如需「反向信号平仓」，写进 `calc_conditions` |
@@ -253,7 +253,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 详细设计见对应文档，这里仅提供一句话定位：
 
 | 机制 | 位置 | 文档 |
-|---|---|---|
+| --- | --- | --- |
 | 因子 DAG 模型与算子 | `btcore/factors/ops.py` | `docs/factor_library.md` |
 | 因子物化规划与两路供给 | `btcore/factors/plan.py` | `docs/factor_library.md` |
 | 物化公共子表达式消除（CSE） | `btcore/factors/cse.py` | `docs/factor_library.md` |

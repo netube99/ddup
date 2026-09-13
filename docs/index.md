@@ -18,7 +18,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 以下契约决定回测结果如何产生，编写数据后端、因子或策略前应先理解。
 
 | 契约 | 规则 |
-|---|---|
+| --- | --- |
 | 价格体系 | 撮合、成本、估值用裸价（open/close/high/low）；因子计算、排名用后复权（`*_hfq`，由裸价 × adj_factor 派生）。两套价格不可混用 |
 | T+1 锁定 | 买入当日持仓锁定，次日解锁；锁定期间条件单跳过该持仓 |
 | T 日信号 T+1 执行 | select() 当日产出名单，次日按 execution_price（open/close）撮合；条件单 T 日声明，T+1 盘中触发 |
@@ -29,7 +29,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 ## 能力全景
 
 | 我要做什么 | 位置 | 文档 |
-|---|---|---|
+| --- | --- | --- |
 | 对接行情数据库 | `adapters/` 填表（或实现 DataBackend） | [后端对接指南](./backend_guide.md) |
 | 接入财报/资金流等扩展字段 | 表单 `extra_fields` | [后端对接指南](./backend_guide.md) |
 | 定义因子 | `factors/library.yaml` | [因子库指南](./factor_library.md) |

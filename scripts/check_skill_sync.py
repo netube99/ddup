@@ -146,9 +146,7 @@ def check_docs_facts(skills: dict[str, str], errors: list[str]) -> None:
             f"（spec.py META_VERSION={META_VERSION}）"
         )
     for v in set(re.findall(r"meta 版本不是 (\d+)", ml_guide)) - {str(META_VERSION)}:
-        errors.append(
-            f"docs/ml_guide.md: 'meta 版本不是 {v}' 与 META_VERSION={META_VERSION} 冲突"
-        )
+        errors.append(f"docs/ml_guide.md: 'meta 版本不是 {v}' 与 META_VERSION={META_VERSION} 冲突")
 
     factor_lib = (ROOT / "docs" / "factor_library.md").read_text(encoding="utf-8")
     section = _section(factor_lib, "### 6.4")
@@ -162,6 +160,7 @@ def check_docs_facts(skills: dict[str, str], errors: list[str]) -> None:
             "docs/factor_library.md §6.4: 仍宣称布尔值可直接相加"
             "（numexpr bool 加法 = OR，与 library.yaml ema_bullish 矛盾）"
         )
+
 
 def main() -> int:
     if not SKILLS_DIR.is_dir():
