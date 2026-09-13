@@ -96,13 +96,22 @@ def run_replay(db_path: str, run_id: int | None = None, *, symbol: str | None = 
         if not snaps:
             print("无匹配快照", file=sys.stderr)
             return 1
+        matched = 0
         for d, snap in snaps:
             if list_symbols:
                 print(f"[{d}] {', '.join(day_symbols(snap))}")
+                matched += 1
                 continue
-            for line in format_day(snap, symbol=symbol):
+            lines = format_day(snap, symbol=symbol)
+            if not lines:
+                continue
+            matched += 1
+            for line in lines:
                 print(line)
             print()
+        if matched == 0:
+            print("无匹配快照", file=sys.stderr)
+            return 1
     finally:
         conn.close()
     return 0

@@ -92,8 +92,8 @@ def test_custom_trigger_no_false_positive():
 def test_stk_div_side_ignored_in_counts():
     """STK_DIV 行不进入买卖计数，也不产生问题。"""
     trades = make_trades([
-        ["20240603", "000001.SZ", "BUY", "MANUAL", 10.0, 3000, 30000.0,
-         5.0, 0.0, 0.0, 0.0, -30005.0, ""],
+        ["20240603", "000001.SZ", "BUY", "MANUAL", 13.4, 3000, 40200.0,
+         6.03, 0.0, 0.0, 0.0, -40206.03, ""],
         ["20240604", "000001.SZ", "STK_DIV", "CORPORATE", 0.0, 4200, 0.0,
          0.0, 0.0, 0.0, 0.0, 0.0, "stk_div"],
         ["20240605", "000001.SZ", "SELL", "MANUAL", 7.1, 4200, 29820.0,

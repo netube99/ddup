@@ -14,7 +14,7 @@ import sqlite3
 from collections import Counter
 
 from btcore import database
-from btcore.constants import MIN_COMMISSION, STAMP_TAX_RATE
+from btcore.constants import COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE
 from btcore.match import conditions as condition_registry
 from btcore.ml import conditions as ml_conditions
 from research.cli_common import latest_run_id
@@ -166,11 +166,17 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
         avg_buy = buy_trades["turnover"].mean()
         min_buy = buy_trades["turnover"].min()
         notes.append(f"买入均值: {avg_buy:,.0f} 元, 最小: {min_buy:,.0f} 元")
-        small_buys = buy_trades[buy_trades["turnover"] < 25000]
+        # 小单判定与引擎成本模型同口径：commission = max(turnover × rate,
+        # min_commission)，触发最低佣金的边界 = min_commission / commission_rate
+        commission_rate = float(config.get("commission_rate", COMMISSION_RATE))
+        small_threshold = (
+            min_commission / commission_rate if commission_rate > 0 else float("inf")
+        )
+        small_buys = buy_trades[buy_trades["turnover"] < small_threshold]
         if len(small_buys) > 0:
             pct = len(small_buys) / len(buy_trades)
             notes.append(f"小单买入: {len(small_buys)}/{len(buy_trades)} ({pct:.1%}) "
-                         f"触发最低佣金 5 元")
+                         f"触发最低佣金 {min_commission:g} 元")
             # 小资金（<10万）必然触发，不报警
             if capital >= 100000 and pct > 0.5:
                 issues.append(f"TOO_MANY_SMALL_TRADES: {pct:.1%} 的买入触发最低佣金")

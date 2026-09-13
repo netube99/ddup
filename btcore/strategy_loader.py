@@ -56,6 +56,7 @@ def build_strategy(
         factor_specs: [{name, weight?, ascending?}]，名称引用 factor_library 里的因子，
             或 models 节 panel 模型的物化列名（ml_<模型名>）。不传时用类默认值。
         filter_rules: {exclude_st?, min_price?, index_universe?, ...}。
+            不传时用类默认值。
         factor_library: 因子库文件路径或预加载的 dict；缺省用 factors/library.yaml。
         models: YAML models 节原始 mapping（{模型名: {artifact, role?, ...}}）。
         strategy_dir: 策略 YAML 所在目录（models artifact 相对路径解析用）。
@@ -104,6 +105,13 @@ def build_strategy(
                 m.name, m.post_transform,
             )
 
+    # 不传（None）时回退类级别默认值（docs/strategy_guide.md §3.1：
+    # 类变量是声明式默认值，YAML/显式传参可覆盖）；显式空 list/dict 仍为覆盖
+    if factor_specs is None:
+        factor_specs = list(getattr(cls, "FACTOR_SPECS", None) or [])
+    if filter_rules is None:
+        filter_rules = dict(getattr(cls, "FILTER_RULES", None) or {})
+
     specs = _resolve_factor_specs(factor_specs or [], library, all_columns)
     used_ml = {s["name"] for s in specs if s["name"].startswith("ml_")}
     if used_ml & holding_columns:
@@ -124,11 +132,14 @@ def build_strategy(
                 )
                 existing.add(fname)
 
+    # 闭包为空但 specs 仍引用 ml_ 模型列（raw-only panel 模型）时挂空
+    # FACTOR_NODES——引擎对 nodes is None 报错，对 {} 按无因子计划处理
+    strategy_nodes = None
     if specs:
         closure_names = [s["name"] for s in specs if not s["name"].startswith("ml_")]
-        strategy_nodes = resolve_closure(closure_names, library) if closure_names else None
-    else:
-        strategy_nodes = None
+        strategy_nodes = (
+            resolve_closure(closure_names, library) if closure_names else {}
+        )
 
     _check_factor_conflicts(specs, cls)
 
@@ -141,7 +152,7 @@ def build_strategy(
         config["models_meta"] = [m.run_summary() for m in model_specs]
 
     strategy = cls(config=config, factor_specs=specs, filter_rules=rules)
-    if strategy_nodes:
+    if strategy_nodes is not None:
         strategy.FACTOR_NODES = strategy_nodes
     if model_specs:
         strategy.MODEL_SPECS = model_specs

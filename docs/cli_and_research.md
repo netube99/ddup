@@ -175,7 +175,7 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 | 买卖比例平衡 | 卖出/买入比 > 3 或 < 0.3 |
 | 同日买卖冲突 | 同日同票既有 BUY 又有 SELL |
 | 交易磨损/资金比 | 超动态阈值（最低佣金开销×2 + 印花税底 + 按资金规模的可变上限）；资金 ≤5 万时降级为 INFO |
-| 小单买入 | 资金 ≥10 万且 >50% 买入触发最低佣金 5 元 |
+| 小单买入 | 资金 ≥10 万且 >50% 买入触发最低佣金——边界 = min_commission / commission_rate（引擎成本模型 commission=max(turnover×rate, min_commission)），默认费率 ≈33333 元 |
 | 交易频率 | 日均成交 > 10 笔 |
 | 持仓上限 | 最大持仓数超 `config.max_positions` |
 | 现金非负 | 存在负现金日 |

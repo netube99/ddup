@@ -621,6 +621,7 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
   - `mean` → 按 trade_date 广播（同日所有个股同值）
   - `group_mean(x, industry)` → 按 (trade_date, industry) map 回个股所在行业
 - 因此**候选池大小不影响坍缩因子的值**——50 只候选池的策略拿到的仍是全市场口径。
+- 投影按 (trade_date, symbol) 逐行对齐广度面板值，保留 `where` 后置掩码的 NaN（§8）——先掩码后坍缩的因子投影后掩码行仍为 NaN，不会被同日其他股票的值填充。
 - 被两侧同时引用的节点在两个面板各自计算：时序节点结果相同；截面保形节点按所在面板各自聚合（主面板=候选池口径，广度面板=全市场口径），互不干扰。
 - 物化后引擎自动检查坍缩因子完整性：列缺失或存在 NaN 时输出告警日志；`validate_materialization(main_df, plan)` 返回 issues 列表（NaN 占比 > 5% 产生 warning 级条目）。
 - 广度面板为瞬时加载（短窗口 + 窄列），物化投影后即释放，常驻内存只有主面板。

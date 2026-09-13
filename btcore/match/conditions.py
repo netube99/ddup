@@ -61,9 +61,10 @@ def validate_condition_types(conditions: list[dict]) -> None:
                 f"条件单 {ctype} 缺必填键: {sorted(missing)} "
                 f"(完整条件单: {cond!r})"
             )
-        price = cond.get("price")
-        if ctype in _REQUIRED_KEYS and not is_valid_price(price):
-            raise ValueError(f"条件单 {ctype}.price 必须是正数: {price!r}")
+        if "price" in _REQUIRED_KEYS.get(ctype, frozenset()) and not is_valid_price(
+            cond.get("price")
+        ):
+            raise ValueError(f"条件单 {ctype}.price 必须是正数: {cond.get('price')!r}")
 
 
 def validate_buy_condition_types(orders: list[dict]) -> None:

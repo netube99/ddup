@@ -39,7 +39,7 @@ trigger 全集：MANUAL（select 名单）、TARGET（target_value 调仓）、C
 ```bash
 python scripts/cross_validate.py results/r3.db [--run-id N]   # 退出码=问题数，0=通过
 ```
-九项检查：trigger 分布（集外仅 INFO）、买卖比>3 或 <0.3、同日同票买卖冲突、**交易磨损/资金比超分档阈值**（≤5万 3%、≤50万 1%、>50万 0.5%，另加最低佣金×2+印花税底；≤5万降级 INFO）、小单过多（≥10万资金且>50% 成交 <25000）、日均成交>10 笔、持仓超 max_positions、负现金、卖出按 trigger 分类统计（INFO）。
+九项检查：trigger 分布（集外仅 INFO）、买卖比>3 或 <0.3、同日同票买卖冲突、**交易磨损/资金比超分档阈值**（≤5万 3%、≤50万 1%、>50万 0.5%，另加最低佣金×2+印花税底；≤5万降级 INFO）、小单过多（≥10万资金且>50% 买入触发最低佣金，边界 = min_commission/commission_rate，默认费率 ≈33333）、日均成交>10 笔、持仓超 max_positions、负现金、卖出按 trigger 分类统计（INFO）。
 
 ## 2. trade_log SQL 六维
 

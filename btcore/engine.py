@@ -586,7 +586,7 @@ class Engine:
         if not specs:
             return None
         nodes = getattr(self.strategy, "FACTOR_NODES", None)
-        if not nodes:
+        if nodes is None:
             raise ValueError(
                 "FACTOR_SPECS 需要 FACTOR_NODES（因子闭包）——"
                 "请经 btcore.strategy_loader 加载策略，或自行设置该属性"

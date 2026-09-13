@@ -165,7 +165,11 @@ def calculate_statistics(
     result.update(trip_result)
     result.update(_compute_sell_source(result["round_trip"]["trip_detail"]))
 
-    result.update(_compute_symbol_contribution(trades, div_log, holdings))
+    result.update(_compute_symbol_contribution(
+        trades, div_log,
+        result["round_trip"]["trip_detail"],
+        result["round_trip"]["open_positions"],
+    ))
     result.update(_compute_cost_breakdown(trades))
     result.update(
         _compute_trading_friction(
@@ -463,38 +467,53 @@ def _build_final_price_map(holdings: dict | None) -> dict[str, float]:
 
 
 def _compute_symbol_contribution(trades: pd.DataFrame, div_log: pd.DataFrame,
-                                 holdings: dict | None = None) -> dict:
+                                 trip_detail: list, open_positions: list) -> dict:
+    """per-symbol 盈亏贡献，与 round_trip 同口径（CONS-01 净额 + FIFO）。
+
+    realized/unrealized 是扣分红前的价格盈亏（分红经 dividend_received
+    单独计入一次，total = realized + unrealized + dividend）；
+    成本用 trip/open 的含费 cost_basis——holding.cost 已被现金分红扣减
+    （corporate._apply_cash_div）且不含买入费用，直接用它做
+    "现金流已扣全额买入成本" 之外的二次扣减会重复计成本/分红。
+    """
     if trades.empty:
         return {"symbol_contribution": {}}
 
-    # PERF-02：一次性 groupby 查表替代循环内全表布尔过滤（O(S×D) → O(S)）
+    # 现金流口径仅作兜底：有 trip/open 数据的 symbol 以 FIFO 结果为准
+    flow_realized: dict[str, float] = {}
+    for sym, grp in trades.groupby("symbol"):
+        flow_realized[sym] = (
+            grp[grp["side"] == "SELL"]["net_amount"].sum()
+            + grp[grp["side"] == "BUY"]["net_amount"].sum()
+        )
+
     div_by_symbol = (
         div_log.groupby("symbol")["net_amount"].sum() if not div_log.empty else None
     )
 
+    realized: dict[str, float] = defaultdict(float)
+    unrealized: dict[str, float] = defaultdict(float)
+    for t in trip_detail:
+        realized[t["symbol"]] += t["pnl"] - t["dividend_received"]
+    for p in open_positions:
+        unrealized[p["symbol"]] += p["pnl"] - p["dividend_received"]
+
     contribution = {}
-    for sym, grp in trades.groupby("symbol"):
-        buy_rows = grp[grp["side"] == "BUY"]
-        sell_rows = grp[grp["side"] == "SELL"]
-        realized_pnl = sell_rows["net_amount"].sum() + buy_rows["net_amount"].sum()
-        div_amount = (
-            div_by_symbol.get(sym, 0.0) if div_by_symbol is not None else 0.0
-        )
-
-        unrealized_pnl = 0.0
-        if holdings and sym in holdings:
-            h = holdings[sym]
-            shares = getattr(h, "shares", 0)
-            last_price = getattr(h, "last_price", 0.0)
-            cost = getattr(h, "cost", 0.0)
-            if shares > 0:
-                unrealized_pnl = shares * last_price - cost
-
+    for sym in set(flow_realized) | set(realized) | set(unrealized):
+        if sym in realized:
+            realized_pnl = realized[sym]
+        elif sym in unrealized:
+            # 未平仓且无 trip：买入成本归属 open pnl，realized 为 0
+            realized_pnl = 0.0
+        else:
+            # 脏数据兜底（SELL 无 lot 匹配，CONS-04 已告警）：现金流口径
+            realized_pnl = flow_realized.get(sym, 0.0)
+        div_amount = div_by_symbol.get(sym, 0.0) if div_by_symbol is not None else 0.0
         contribution[sym] = {
             "realized_pnl": realized_pnl,
-            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pnl": unrealized[sym],
             "dividend_received": abs(div_amount),
-            "total_contribution": realized_pnl + unrealized_pnl + abs(div_amount),
+            "total_contribution": realized_pnl + unrealized[sym] + abs(div_amount),
         }
 
     return {"symbol_contribution": contribution}

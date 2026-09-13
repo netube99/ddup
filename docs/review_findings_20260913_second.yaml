@@ -1,0 +1,63 @@
+meta:
+  date: 2026-09-13
+findings:
+  - id: V-FAC-01
+    severity: P3
+    rule: "docs/factor_library.md §12: 'mean → 按 trade_date 广播（同日所有个股同值）'"
+    file: btcore/factors/plan.py
+    line: 435
+    note: "投影对主面板存在但广度面板缺失的 (date,symbol) 行产出 NaN（旧代码广播同日值）。可达路径：GenericSQLBackend 行网格=被请求列表格键外并集（generic_sql.py:189-192），主/广度面板请求列集不同时停牌股可在估值表有行而日线表无行。NaN 口径可辩护（数据确实缺失）但属超出 where 掩码理由的静默行为变化，与 §12 字面广播表述冲突；MockDataBackend 行集恒为日线表行，测试体系无法覆盖此形态。"
+  - id: V-FAC-02
+    severity: P3
+    rule: "AGENTS.md 设计契约『软回退 vs Fail-Fast』：告警不得产生误导性信号"
+    file: btcore/factors/plan.py
+    line: 436
+    note: "missing 告警语义由『整日缺失』漂移为『任意行 NaN』：where 掩码坍缩因子每次运行对每个含掩码行的交易日告警『坍缩因子在 N 个交易日无值』（探针复现），该日其他 symbol 实际有值，消息文本语义为假；且 validate_materialization 对掩码占比>5% 的合法因子持续产出 warning issue。掩码坍缩因子在旧代码下因泄漏不触发告警——属修复引入的告警噪声回归。建议消息文本区分『掩码 NaN』与『广度面板缺数据』。"
+  - id: V-ENG-01
+    severity: P2
+    rule: "AGENTS.md 设计契约『软回退 vs Fail-Fast』：明确声明的依赖缺失→加载或 preload 阶段直接报错，不产生静默错误结果"
+    file: btcore/engine.py
+    line: 589
+    note: "守卫放宽 if not nodes → if nodes is None 后，绕过 loader 手搓的策略显式设 FACTOR_NODES={} 且 FACTOR_SPECS 含非 ml 条目时静默放行：run 完整跑完，calc_conditions 逐日读到声明因子列 None（条件单静默不触发，全程无报错）。loader 路径不受影响（resolve_closure 对未知名 fail-fast），但可在 _build_factor_plan 内收紧为『非 ml 入口名 ∉ nodes → 报错』。需三重刻意绕路才触发，放行面已收窄故记 P2。"
+  - id: V-ENG-02
+    severity: P3
+    rule: "docs/strategy_guide.md §3.1『类变量——声明式默认值，YAML 可覆盖』"
+    file: tests/test_review_engine.py
+    line: 41
+    note: "显式空值覆盖语义（factor_specs: [] / filter_rules: {} 覆盖类默认值）已实现（strategy_loader.py:110-113，probe 实证）但无任何测试钉住——该行为目前仅由 probe 证据支撑，未来重构可静默回退而不破测试。"
+  - id: V-MLS-01
+    severity: P1
+    rule: "docs/ml_guide.md:19-20——『账户态特征的计算公式训练侧重放与引擎推理共用同一定义』"
+    file: btcore/ml/labels.py
+    line: 113
+    note: "extract_trade_pairs 同日排序 BUY(1)<SELL(2) 与引擎盘中执行序（先卖后买，engine.py 手动卖 660→手动买 670）相反：同日同票『条件卖出+再买入』可达，违反时 re-buy 被并入未平仓回合当加仓——buy_date/entry 路径/税档锚点/回合数全静默错误（探针实证：合并 1 回合 buy_price=9.75 vs 引擎真值 2 回合 10.0/9.5）。修复：重放序改为公司行为(0)→卖出(1)→买入(2)（stats 的 FIFO 撮合对同日序不敏感，TRADE_EVENT_PRIORITY 不动）；回归测试 tests/test_review_ml.py::TestReplayEdgeParity RED→GREEN。"
+  - id: V-MLS-02
+    severity: P2
+    rule: "docs/ml_guide.md:19-20 同一定义契约；labels.py docstring 自述『除息日缺面板行（停牌，引擎 scale=None 分支）与引擎行为一致』"
+    file: btcore/ml/labels.py
+    line: 237
+    note: "停牌除息日回归（第一轮 F-ML-02 修复引入）：pre = pre_close_map.get(d) 用排空日的循环日期而非 DIV 事件日期——事件被 events[k][0] <= d 延迟到恢复日，用恢复日 pre_close 补缩放；引擎取 scale=None 分支不缩放（corporate.py:104-117）。探针实证：引擎 entry 恒 10.0，重放恢复日后 9.4949。第一轮修复前静态 buy_price 反而巧合一致。修复：pre 与税档天数均改用事件日期；回归测试 RED→GREEN。"
+  - id: V-MLS-03
+    severity: P3
+    rule: "docs/ml_guide.md:19-20 同一定义契约"
+    file: btcore/ml/labels.py
+    line: 231
+    note: "STK_DIV：引擎 rescale 1/(1+stk) 且股数 int 截断（corporate.py:79），重放按 trade_log 送转后总股数 old/new 缩放——仅在部分卖出后送转产生非整手股数时分歧，误差 <0.1%。ev_shares 定义（送转后总股数）其余场景一致，含部分在持。"
+  - id: V-INFS-01
+    severity: P3
+    rule: "docs/audit_checklist.md:316 CONS-04『超卖…realized pnl 静默少算…但必须告警』"
+    file: btcore/stats.py
+    line: 503
+    note: "脏数据路径：有 ≥1 个已配对 trip 的 symbol，if sym in realized 分支抢在现金流兜底之前——兜底对该类 symbol 是死代码。手工构造（BUY 100+100、超卖 SELL 300、再 BUY 100）：真值 PnL=970，新实现 total=-25（未配对净额 995 静默丢弃，超出 CONS-04 容忍的少算幅度），旧现金流实现恰好返回 970。非重复计（open pnl 已含），系 CONS-04 容忍路径上的静默少算回归；干净数据不变量（fuzz 0/300）不受影响。建议：symbol 存在 CONS-04 告警时强制走现金流兜底。"
+  - id: V-MRD-01
+    severity: P3
+    rule: "docs/cli_and_research.md §2.5：小单买入 = 买入触发最低佣金（边界 = min_commission / commission_rate）"
+    file: research/cross_validate.py
+    line: 172
+    note: "commission_rate=0 是引擎合法配置（costs.py:22 仅拒负数/NaN），此时每笔买入 commission=max(0, min_commission)=min_commission 全部触发最低佣金；修复把 threshold 置 float('inf') 永不标记，TOO_MANY_SMALL_TRADES 对该配置恒 false-pass（旧硬编码 25000 反而会标记部分）。建议 rate<=0 时回退为标记全部买入。"
+  - id: V-MRD-02
+    severity: P3
+    rule: "AGENTS.md：接口变更必须同批更新 .agents/skills/ 与 docs/（文档须与代码事实一致）"
+    file: .agents/skills/ddup-backtest-analysis/SKILL.md
+    line: 42
+    note: "『默认费率 ≈33333』字面可读作默认佣金费率≈33333，实际 COMMISSION_RATE=0.00015（constants.py:1），≈33333 是默认费率下的边界金额（元）。SKILL.md 缺『元』单位易误读；cli_and_research.md:178 带单位稍可辨析。建议改为『默认费率下边界 ≈33333 元』。"

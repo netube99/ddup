@@ -420,27 +420,19 @@ def _project(
 
     group_col: 分组坍缩（group_mean 等）的组键列名（F-OP-04：不再硬编码
     industry；组键缺列时 fail-fast，防静默错投影）。
+    投影按 (trade_date, symbol) 逐行对齐广度面板值（坍缩算子同日同组同值），
+    逐行 reindex 保留 where 后置掩码的 NaN——groupby.first() 会跳过 NaN
+    把未掩码值泄漏给已掩码 symbol（docs/factor_library.md §8）。
     """
     import logging
 
     main_dates = main_df.index.get_level_values("trade_date")
-    if kind == "market":
-        per_date = breadth_df[name].groupby(level="trade_date").first()
-        main_df[name] = main_dates.map(per_date)
-    else:
-        if group_col not in breadth_df.columns:
-            raise ValueError(
-                f"坍缩因子 {name!r} 分组投影需要组键列 {group_col!r}，"
-                "但广度面板无此列——请检查伪列附着需求"
-            )
-        per_group = breadth_df.groupby(
-            [breadth_df.index.get_level_values("trade_date"),
-             breadth_df[group_col]]
-        )[name].first()
-        key = pd.MultiIndex.from_arrays(
-            [main_dates, main_df[group_col].to_numpy()]
+    if kind != "market" and group_col not in breadth_df.columns:
+        raise ValueError(
+            f"坍缩因子 {name!r} 分组投影需要组键列 {group_col!r}，"
+            "但广度面板无此列——请检查伪列附着需求"
         )
-        main_df[name] = per_group.reindex(key).to_numpy()
+    main_df[name] = breadth_df[name].reindex(main_df.index).to_numpy()
     missing = main_dates[main_df[name].isna()].unique()
     if len(missing):
         logger = logging.getLogger(__name__)

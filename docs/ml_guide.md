@@ -191,7 +191,10 @@ trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
 （成交当日 decision 时点为 1，逐交易日 +1；训练侧重放按市场交易日位置
 计算，与引擎逐日一致）；`ret_from_entry` = 当日裸收盘 / 买入均价 − 1
 （裸价口径 = 账户市值盈亏，现金分红另行入账不计入；买入均价是裸成交价，
-hfq 收盘与之混用会被复权因子污染）。
+hfq 收盘与之混用会被复权因子污染）。重放按引擎 `Holding.entry_price`
+逐日路径：加仓日重算 cost/shares，现金分红除息日 rescale
+entry ×= pre_close/(pre_close+每股税前红利)、cost 扣税后净额——
+静态聚合买入均价无法表达这两类状态变化（meta v3 行为）。
 
 ### 3.2 `conditions.model_exit`（策略 YAML）
 

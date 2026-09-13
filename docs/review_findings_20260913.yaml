@@ -1,0 +1,201 @@
+meta:
+  date: 2026-09-13
+findings:
+  - id: F-FAC-01
+    severity: P1
+    rule: "docs/factor_library.md §8:『where 是对因子值的后置掩码：表达式先完整求值，where 为 False 的位置置 NaN』（结合 §12 坍缩因子投影回候选池面板）"
+    file: btcore/factors/plan.py
+    line: 435
+    note: "坍缩因子投影用 groupby.first()（跳过 NaN），把未掩码值泄漏给 where=False 的 symbol：带 where 的坍缩因子经引擎 materialize 后，被掩码持仓行拿到广播值而非 NaN，与研究侧 compute_factors（逐 symbol 掩码）静默分叉。已修：投影改为按 (trade_date, symbol) 逐行 reindex 广度面板值；回归测试 tests/test_review_factors.py 两例 RED→GREEN。"
+  - id: F-FAC-02
+    severity: P2
+    rule: "F-BRD-03 口径（btcore/factors/library.py 注释与 tests/test_factor_library.py::test_group_mean_values_match_hand_compute：『group_mean 坍缩因子 = 各行业组值等权平均』）"
+    file: btcore/factors/library.py
+    line: 401
+    note: "compute_breadth 用字符串前缀 expr.startswith('group_mean(') 判定分组坍缩；group_mean 不在表达式首位时漏判，退化为 first() 取任意行业组的有损口径。本轮回前已改用 collapse_kind 结构判定（kind == 'group'），probe 复验两形态均得等权均值；现有 library.yaml 无此形态，属潜在缺陷已顺手修复。"
+  - id: F-FAC-03
+    severity: P3
+    rule: "docs/factor_library.md §8:『where 的表达式规则与 expr 完全一致：纯表达式或算子表达式均可』"
+    file: btcore/factors/library.py
+    line: 82
+    note: "代码在 expr 无算子调用时对含算子的 where 加载期 fail-fast（『expr 无算子调用，where 不允许算子』）——docs §8 无此限制，文档与代码漂移，需择一收敛。"
+  - id: F-FAC-04
+    severity: P3
+    rule: "btcore/factors/expr.py where_mask docstring（F-EX-02）：『条件值 NaN / 0 / False → 掩码』的两路径统一语义"
+    file: btcore/factors/ops.py
+    line: 420
+    note: "算子路径 BoolOp 以 (v != 0) 归一操作数，NaN != 0 为 True；纯表达式路径 numexpr 直接拒绝浮点 BoolOp——两路径接受域与 NaN 语义不对称。现库所有 BoolOp 操作数均为比较式，无实际触发面，仅登记观察。"
+  - id: F-MAT-01
+    severity: P1
+    rule: "docs/strategy_guide.md §5.2.3: 自定义条件单示例 {type: MY_CONDITION, price: None, custom_param: value}；§8: '条件单 price 填 None 但自定义 handler 未计算价格 → handler 收到 None'——price=None 是文档化的合法输入"
+    file: btcore/match/conditions.py
+    line: 65
+    note: "validate_condition_types 对任何注册了 required_keys 的类型都执行 price 正数校验，自定义 handler 自算价格模式在决策时点抛 ValueError 崩溃。已修：price 校验收窄为 'price' in _REQUIRED_KEYS[ctype]；回归测试 tests/test_review_match.py RED→GREEN。"
+  - id: F-MAT-02
+    severity: P2
+    rule: "docs/strategy_guide.md §5.4: '涨停不买：fill_price >= up_limit → 买单跳过'，且 §3.5 Trade 表定义 fill price 为'成交价（已含滑点）'"
+    file: btcore/match/core.py
+    line: 72
+    note: "check_tradable 校验滑点前 exec_px，落库 trade.price 是滑点后价格：exec_px=10.99（up_limit=11.0）+2 tick → trade.price=11.01 越过涨停价落库。仅当 exec 价距涨跌停 ≤ slippage_ticks 时触发；改用滑点后价校验属产品决策。"
+  - id: F-MAT-03
+    severity: P2
+    rule: "docs/strategy_guide.md §5.4: '涨跌停无法判定（缺失且无法推导）→ 买卖双双跳过'"
+    file: btcore/match/core.py
+    line: 68
+    note: "check_tradable 对 NaN 涨跌停放行；当前引擎路径不可达（get_limit_prices 经 _missing(NaN) 回退只返回有限值或 (None, None)），仅当未来调用方绕过 limits_fn 传原始 NaN 列时静默穿透。"
+  - id: F-MAT-04
+    severity: P3
+    rule: "btcore/match/core.py:50 apply_partial_sell docstring '按剩余比例缩减持仓股数与成本'"
+    file: btcore/match/core.py
+    line: 52
+    note: "holding.shares=0 或 sold=0 时 ZeroDivisionError；当前所有调用点保证 shares ≥ 100 且 ≤ holding.shares，不可达，防御性观察项。"
+  - id: F-ENG-01
+    severity: P1
+    rule: "build_strategy docstring: factor_specs '不传时用类默认值'; docs/strategy_guide.md §3.1 '类变量——声明式默认值，YAML 可覆盖'"
+    file: btcore/strategy_loader.py
+    line: 115
+    note: "build_strategy 把 None 参数经 factor_specs or [] / filter_rules or {} 变成显式空值，类级别默认值被清空：StockFilter 永不构建（过滤静默失效）、FACTOR_NODES=None 致引擎无因子静默运行。已修：None 时回退类默认值，显式传参仍覆盖；3 个 RED 测试转 GREEN。"
+  - id: F-ENG-02
+    severity: P2
+    rule: "docs/strategy_guide.md §5.4 '卖出单不会顺延到次日重试——pending 每日由 select() 重算'；§5.2.2 条件买单 '单日有效，未触发自动失效'"
+    file: btcore/engine.py
+    line: 442
+    note: "run() 主循环对无行情日 continue——不调 compute_pending，前一日 pending_actions（sell 与 buy_conditions）原样滞留并在下一有行情日按隔日价格执行（陈旧信号隔日成交，违背'不重试/单日有效'）；且被跳过日 corporate.adjust 不运行，当日除息分红不入账。仅全市场缺数据日触发；建议：跳过日清空 pending_actions 并补跑公司行为，属设计决策。"
+  - id: F-ENG-03
+    severity: P3
+    rule: "docs/strategy_guide.md §3.3 冲突校验表 '条件买单缺 symbol/type/price … → ValueError'"
+    file: btcore/engine.py
+    line: 121
+    note: "_validate_buy_conditions 只查 symbol 键存在性，不校验非空字符串：{'symbol': 123/''} 通过校验流入 entry_conditions 后被'无当日行情'告警跳过，与 buy/sell 名单 fail-fast 不一致。仅观察。"
+  - id: F-ENG-04
+    severity: P3
+    rule: "docs/strategy_guide.md §4.4 '后端无 get_index_members 能力或对应指数无数据时，告警一次、规则不生效（软回退）'"
+    file: btcore/strategy_loader.py
+    line: 249
+    note: "universe hook 仅在 backend 缺 get_index_members 方法时告警；有方法但指数无成分数据时静默回退全市场，无文档承诺的'告警一次'。文档漂移。"
+  - id: F-ML-01
+    severity: P1
+    rule: "docs/ml_guide.md §1 训练与回测同源：'账户态特征的计算公式训练侧重放与引擎推理共用同一定义'"
+    file: btcore/ml/labels.py
+    line: 268
+    note: "加仓回合 ret_from_entry 用静态聚合 buy_price 充当全部持仓日 entry_price，而引擎在加仓日重算 entry=cost/shares：buy 100@10 + buy 100@12 回合，引擎 d1 entry=10 → ret=+0.10，重放恒 11 → ret=0.0。已修：_entry_price_path 按引擎 Holding 状态机逐日重放；3 个 RED 测试转 GREEN（含真实引擎 run 端到端 parity）。"
+  - id: F-ML-02
+    severity: P1
+    rule: "docs/ml_guide.md §3.1 ret_from_entry='当日裸收盘/买入均价−1' + §1 同一定义契约"
+    file: btcore/ml/labels.py
+    line: 268
+    note: "期内现金分红回合：引擎除息日 rescale entry_price ×= pre_close/(pre_close+每股税前红利) 且 cost 扣税后净额，重放不处理 → 除息季逐日 ret 漂移约 2.7pp（实证 920826.BJ：重放 -5.99% vs 引擎 -3.33%）。已修（并入 _entry_price_path，含税档反解）。"
+  - id: F-ML-03
+    severity: P1
+    rule: "AGENTS.md ML 节：models 节意图中性、引擎在加载期完成校验（fail-fast，无静默降级）；docs/ml_guide.md §2.2 加载期校验列表"
+    file: btcore/strategy_loader.py
+    line: 128
+    note: "raw-only panel 模型（features 仅 raw 列）可经 build_panel 训练，但 factor_specs 引用其 ml_* 列时引擎加载即崩：闭包为空不挂 FACTOR_NODES，engine 对空 FACTOR_NODES raise。训练/服务能力不对称。已修：闭包为空但有 specs 时挂 FACTOR_NODES={}，engine._build_factor_plan 改 nodes is None 才报错；tests/test_review_coord.py 两例 RED→GREEN。"
+  - id: F-ML-04
+    severity: P2
+    rule: "engine.py EDGE-08 同类防御（'未知 level 按 warning 处理并告警，杜绝 getattr(logger, level) 崩 run'）"
+    file: btcore/ml/dataset.py
+    line: 92
+    note: "dataset.build_panel 对 validate_materialization 的 issue 用裸 getattr(logger, issue['level'])，无白名单；validate_materialization 未来新增未知 level 字符串时训练 AttributeError 崩溃（engine 侧已加固，训练侧漏改）。"
+  - id: F-ML-05
+    severity: P2
+    rule: "docs/ml_guide.md §2.2 'YAML 内联 features 与 meta 不一致 → 直接报错'（meta 为特征契约唯一事实源）"
+    file: btcore/ml/spec.py
+    line: 145
+    note: "meta/YAML 一致性校验只比对 factors/raw，不比对 state：YAML 内联 state 与 meta 不一致时静默按 meta 走（scope=panel），无报错。行为仍 meta 正确，但违反书面 fail-fast 字面口径。"
+  - id: F-ML-06
+    severity: P3
+    rule: "docs/ml_guide.md §2.3 '标签 = horizon 日前向收益'（t → t+horizon 交易日对齐）"
+    file: btcore/ml/labels.py
+    line: 46
+    note: "xs_forward_return 的 shift(-horizon) 按 symbol 组内行位移：个股期内停牌缺行时实际跨多于 horizon 个市场交易日。稀疏面板特有口径局限，观察项。"
+  - id: F-ML-07
+    severity: P3
+    rule: "docs/ml_guide.md §5 'replay.py 决策快照的 bars_subset 含 ml_* 列——决策现场可见当日模型分数'"
+    file: btcore/engine.py
+    line: 906
+    note: "debug 快照 bars_subset 取自 day_bars；holding 模型分数只注入 bars_dict 不回写 day_bars → holding 模型的 ml_* 列不在快照中（panel 模型在）。文档与引擎行为漂移。"
+  - id: F-ML-08
+    severity: P3
+    rule: "btcore/ml/trainer.py:206 指标键 'pos_rate_train'"
+    file: btcore/ml/trainer.py
+    line: 170
+    note: "pos_rate 在时间切分前对全量 samples 计算，键名 pos_rate_train 名不副实（应为切分后训练段正类率）；仅 meta metrics 语义准确性。"
+  - id: F-INF-01
+    severity: P1
+    rule: "skill ddup-backtest-analysis『pnl = 卖出净额 − 买入含费成本 + 分红（与 symbol_contribution/ML 标签一致，2026-08 统一 CONS-01）』；audit_checklist.md R-STATS-01"
+    file: btcore/stats.py
+    line: 469
+    note: "symbol_contribution 重复扣未平仓持仓含费成本并重复计现金分红：真实库上 Σ total_contribution=-640,982.8 vs 账户实际盈利 +300,712.8（误差≈未平仓账面成本 941,696）；fuzz 中 103/118 symbol 偏离真值。已修：从 round-trip FIFO 数据派生 per-symbol realized/unrealized，现金流口径仅作脏数据兜底；修复后 Σ symbol_contribution 与账户盈利精确相等；3 个 RED 测试转 GREEN。"
+  - id: F-INF-02
+    severity: P2
+    rule: "docs/backend_guide.md §10.1 所体现的 fail-fast 哲学；AGENTS.md『不产生静默错误结果』"
+    file: btcore/generic_sql.py
+    line: 126
+    note: "行情库以 mode=ro&immutable=1 打开：源库存在未 checkpoint 的 WAL 时后端静默读到旧数据/空数据而不报错（回测期间同步行情即触发）。建议 immutable 去掉或检测 -wal 非空告警。"
+  - id: F-INF-03
+    severity: P2
+    rule: "btcore/stats.py 自身注释契约（:40-42 np.divide where= 避免除零警告）——benchmark_compare 路径无守卫"
+    file: btcore/stats.py
+    line: 664
+    note: "_compute_benchmark_compare 的 strat_rets/bench_rets 直接相除：窗口内任一 total_value 或基准值 ≤ 0 → RuntimeWarning 泄漏 + inf/nan 静默写入 stats_json（beta=0.0、alpha=NaN）。"
+  - id: F-INF-04
+    severity: P2
+    rule: "docs/backend_guide.md §10.1 重复键 fail-fast（仅覆盖面板表）；AGENTS.md 软回退 vs Fail-Fast"
+    file: btcore/generic_sql.py
+    line: 195
+    note: "get_calendar 不去重：日历表同日多行时返回重复交易日，引擎将对同日 step 两次（公司行为/结算重复）。日历表不在 §10.1 重复键检查范围内。"
+  - id: F-INF-05
+    severity: P2
+    rule: "docs/backend_guide.md §10.1 重复键 fail-fast 精神未延伸到 benchmark 能力表"
+    file: btcore/generic_sql.py
+    line: 337
+    note: "_impl_get_benchmark_bars 的 close/adj 查询无 (code, date) 重复键检查：源表同键多行时 merge 爆炸，下游 stats 基准对比 np.cov 维度不匹配崩溃（已复现）。"
+  - id: F-INF-06
+    severity: P3
+    rule: "docs/backend_guide.md §8 表格『date | 该表日期列名覆盖 | 任何已被字段引用的表』"
+    file: docs/backend_guide.md
+    line: 327
+    note: "文档声称 tables.<t>.date 覆盖适用于任何被引用表，但对 calendar/dividends 表静默无效（日期列由专用空声明，覆盖无消费方）。文档漂移。"
+  - id: F-INF-07
+    severity: P3
+    rule: "docs/backend_guide.md §3.2『get_stock_industries … {symbol: 行业名称}，未找到的不出现在结果中』"
+    file: btcore/generic_sql.py
+    line: 392
+    note: "行业列值为 NULL 的行会以 {sym: None} 形式出现在返回值中，违反值为行业名称 str 的契约；missing-value 策略未定义。"
+  - id: F-RSR-01
+    severity: P1
+    rule: "docs/cli_and_research.md §2.5 — 小单买入检查：'资金 ≥10 万且 >50% 买入触发最低佣金 5 元'（告警条件是触发最低佣金，非固定金额）"
+    file: research/cross_validate.py
+    line: 175
+    note: "小单判定硬编码 turnover < 25000，而引擎成本模型触发边界 = min_commission/commission_rate（默认 ≈33333）：默认费率下 [25000,33333) 买单 false-pass；commission_rate=0.0003 时 20000 元买单 false positive。已修：阈值由 config 推导；2 个 RED 测试转 GREEN，skill/cli 文档同批更新。"
+  - id: F-RSR-02
+    severity: P1
+    rule: "docs/strategy_guide.md §4.4 — index_universe 类型 'list[str]'；配置类型错误不应静默降级交易域"
+    file: strategies/exploring/re_attack_500/config.yaml
+    line: 34
+    note: "index_universe 写成字符串 \"000905.SH\"：resolve_index_snapshots 拆成单字符列表 → 白名单静默不生效（交易域退化全市场），且基准错误回退 000300.SH。已修：改为 [\"000905.SH\"]（该目录在 .gitignore 中，修复仅存工作树）；回归测试 RED→GREEN。"
+  - id: F-RSR-03
+    severity: P2
+    rule: "docs/cli_and_research.md §2.7 — replay.py '无匹配快照时打印错误并以退出码 1 退出'"
+    file: research/replay.py
+    line: 99
+    note: "--symbol 过滤后所有日期均无该票快照时静默打印空行并以退出码 0 退出（脚本化 false-pass）。本轮回前已修：matched==0 时 stderr 错误并返回 1，命中路径不变；2 个测试锁定。"
+  - id: F-RSR-04
+    severity: P3
+    rule: "YAML 规范/可维护性（无书面契约违反）"
+    file: strategies/exploring/vol_shrink_resil/config.yaml
+    line: 21
+    note: "顶层 strategy: 键重复定义，PyYAML last-wins 掩盖了失效路径 strategies.exploring.vol_shrink_resil:VolShrinkResil（该路径实际不可导入）。当前加载结果正确，配置卫生问题。"
+  - id: F-RSR-05
+    severity: P3
+    rule: "docs/strategy_guide.md §5.2.1 — 条件单按列表顺序评估（代码依赖隐含顺序）"
+    file: strategies/examples/rolling_ranker/strategy.py
+    line: 132
+    note: "calc_conditions 在 for 循环内 conds.remove(c)（multi_model/strategy.py:305 同款）：删除元素会跳过下一个元素的 holding_days 自适应分支；当前安全仅因发射顺序巧合。建议改列表重建（value_momentum.py:123 已是正确写法）。"
+  - id: F-RSR-06
+    severity: P3
+    rule: "docs/cli_and_research.md §2.9 — sync 错误以 JSON ok:false 报告"
+    file: scripts/live.py
+    line: 92
+    note: "sync.yaml 缺 cash 键时 float(None) 在 JSON 错误处理 try 块之前抛裸 TypeError traceback；fail-fast 成立，仅错误通道不一致。"

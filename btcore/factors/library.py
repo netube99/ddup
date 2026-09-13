@@ -394,10 +394,11 @@ def compute_breadth(
         # Extract daily scalar (collapse factors: same value for all symbols on a date)
         # F-BRD-03：group_mean 因子同一日不同行业组值不同，first() 只取排序
         # 首行（任意行业组，有损：223/243 日多行业组，worst 0.198 vs [-0.027,0.299]）。
-        # 显式口径：各行业组值等权平均（industry 伪列已由 ensure_pseudo_columns 附着在 df）
-        spec = lib[factor_name]
-        expr = str(spec["expr"]).lstrip()
-        if expr.startswith("group_mean("):
+        # 显式口径：各行业组值等权平均（industry 伪列已由 ensure_pseudo_columns 附着在 df）。
+        # 组判定用 collapse_kind 结构判定而非字符串前缀——group_mean 不在表达式
+        # 首位时（如 "1 * group_mean(x, industry)"）前缀匹配会漏判，退化为
+        # first() 取任意行业组的有损口径。
+        if kind == "group":
             vals = factor_df[factor_name]
             grp = pd.DataFrame(
                 {"v": vals.to_numpy(), "g": df["industry"].to_numpy()},
