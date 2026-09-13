@@ -19,6 +19,8 @@ import sqlite3
 
 import pandas as pd
 
+from research.attribution import _load_bars_for_symbols
+
 
 def main():
     parser = argparse.ArgumentParser(description="导出 Brinson 归因数据")
@@ -99,15 +101,7 @@ def main():
         if not symbols:
             print("警告: 结果库区间内无交易，跳过 bars.parquet")
         else:
-            ph = ",".join("?" * len(symbols))
-            bars = pd.read_sql_query(
-                "SELECT ts_code AS symbol, trade_date, close, pct_chg "
-                f"FROM stk_factor_pro WHERE ts_code IN ({ph}) "
-                "AND trade_date BETWEEN ? AND ? ORDER BY trade_date, ts_code",
-                conn, params=symbols + [args.start, args.end],
-            )
-            if not bars.empty:
-                bars = bars.set_index(["trade_date", "symbol"]).sort_index()
+            bars = _load_bars_for_symbols(conn, symbols, args.start, args.end)
             bars.to_parquet(f"{args.out}/bars.parquet")
             print(f"bars: {bars.shape} ({len(symbols)} symbols)")
     else:

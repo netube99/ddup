@@ -77,7 +77,7 @@ class _Rewriter(ast.NodeTransformer):
     def __init__(self, mapping: dict[str, str]):
         self.mapping = mapping
 
-    def visit_Call(self, node):
+    def _sub(self, node):
         k = ast.dump(node)
         if k in self.mapping:
             return ast.copy_location(
@@ -85,13 +85,11 @@ class _Rewriter(ast.NodeTransformer):
             )
         return self.generic_visit(node)
 
+    def visit_Call(self, node):
+        return self._sub(node)
+
     def visit_BinOp(self, node):
-        k = ast.dump(node)
-        if k in self.mapping:
-            return ast.copy_location(
-                ast.Name(id=self.mapping[k], ctx=ast.Load()), node
-            )
-        return self.generic_visit(node)
+        return self._sub(node)
 
 
 def _extract_common_subtrees(nodes: dict[str, dict]) -> bool:

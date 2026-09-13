@@ -10,12 +10,16 @@ import functools
 import pandas as pd
 
 
-def extract_expr_names(expr: str) -> set[str]:
-    """提取表达式里的裸标识符名字（AST 扫描）。"""
+def _parse(expr: str) -> ast.Expression:
     try:
-        tree = ast.parse(expr, mode="eval")
+        return ast.parse(expr, mode="eval")
     except SyntaxError as exc:
         raise ValueError(f"invalid expression: {expr}") from exc
+
+
+def extract_expr_names(expr: str) -> set[str]:
+    """提取表达式里的裸标识符名字（AST 扫描）。"""
+    tree = _parse(expr)
     return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
 
@@ -25,10 +29,7 @@ def validate_expr(expr: str, engine: str = "numexpr") -> None:
     安全起见拒绝函数调用 / 属性访问，并用表达式引用的列名构造
     单行 DataFrame 试算，确认表达式可被求值。
     """
-    try:
-        tree = ast.parse(expr, mode="eval")
-    except SyntaxError as exc:
-        raise ValueError(f"invalid expression: {expr}") from exc
+    tree = _parse(expr)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Call, ast.Attribute)):
             raise ValueError(

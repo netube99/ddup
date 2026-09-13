@@ -247,24 +247,28 @@ def _eval_named(
     return memo[name]
 
 
-def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
+def eval_spec(df: pd.DataFrame, spec: dict) -> pd.Series:
     """对面板求单条因子定义；where 统一为求值后掩码（False → NaN）。"""
+    if ops.has_op_call(spec["expr"]):
+        values = ops.eval_op_expr(df, spec["expr"])
+        where = spec.get("where")
+        if where:
+            # F-EX-02：与纯表达式路径同语义——where 为 False/0/NaN 都掩码
+            values = values.where(where_mask(ops.eval_op_expr(df, where)))
+    else:
+        values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
+    return values
+
+
+def _eval_spec(df: pd.DataFrame, spec: dict, name: str) -> pd.Series:
     try:
-        if ops.has_op_call(spec["expr"]):
-            values = ops.eval_op_expr(df, spec["expr"])
-            where = spec.get("where")
-            if where:
-                # F-EX-02：与纯表达式路径同语义——where 为 False/0/NaN 都掩码
-                values = values.where(where_mask(ops.eval_op_expr(df, where)))
-        else:
-            values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
+        return eval_spec(df, spec)
     except Exception as e:
         missing = _detect_missing_columns(df, spec)
         detail = f"因子 '{name}' 求值失败: {e}"
         if missing:
             detail += f"\n  缺少列: {sorted(missing)}（不在数据面板中）"
         raise ValueError(detail) from e
-    return values
 
 
 def _detect_missing_columns(df: pd.DataFrame, spec: dict) -> set[str]:

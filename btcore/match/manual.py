@@ -1,16 +1,15 @@
 import logging
 
 from btcore.match.core import (
-    _cash_affordable,
     _warn_skip_reason,
-    apply_partial_sell,
+    buy_checked,
     cap_by_volume,
     check_tradable,
     exec_price,
-    execute_buy,
     execute_sell,
-    is_valid_price,
+    finalize_sell,
     make_holding,
+    position_value,
 )
 from btcore.types import bar_get
 
@@ -62,13 +61,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
                              (reasons_map or {}).get(symbol, trigger),
                              costs_fn, slip_fn, shares=shares)
         trades.append(trade)
-        if shares >= holding.shares:
-            del account.holdings[symbol]
-        else:
-            if shares < desired:
-                _warn("[%s] %s 成交量约束截断卖出: %d/%d",
-                               trade_date, symbol, shares, desired)
-            apply_partial_sell(holding, shares)
+        finalize_sell(account, holding, shares, desired=desired,
+                      warn=_warn, trade_date=trade_date)
 
     return trades
 
@@ -126,16 +120,10 @@ def manual_buy(account, bars: dict, buy_symbols: list,
                            trade_date, symbol, exec_px)
             continue
 
-        affordable, est_net = _cash_affordable(
-            account, exec_px, shares, slip_fn, costs_fn
-        )
-        if not affordable:
-            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
-                           trade_date, symbol, est_net, account.cash)
+        trade = buy_checked(account, symbol, bar, shares, exec_px, "MANUAL",
+                            trade_date, _warn, costs_fn, slip_fn)
+        if trade is None:
             continue
-
-        trade = execute_buy(account, symbol, bar, shares, exec_px, "MANUAL",
-                            costs_fn, slip_fn)
         trades.append(trade)
 
         account.holdings[symbol] = make_holding(symbol, bar, shares, trade.price)
@@ -146,11 +134,7 @@ def manual_buy(account, bars: dict, buy_symbols: list,
 def _calc_exec_total_value(account, bars: dict) -> float:
     value = account.cash
     for symbol, holding in account.holdings.items():
-        bar = bars.get(symbol)
-        price = exec_price(bar, account) if bar is not None else None
-        value += holding.shares * (
-            price if is_valid_price(price) else holding.last_price
-        )
+        value += position_value(holding, bars.get(symbol), account)
     return value
 
 
@@ -176,10 +160,7 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
             if bar is None:
                 _warn("%s 无当日行情（停牌/缺数据）, 跳过调仓", symbol)
                 continue
-            price = exec_price(bar, account)
-            current = holding.shares * (
-                price if is_valid_price(price) else holding.last_price
-            )
+            current = position_value(holding, bar, account)
         diff = target - current
         if diff < 0 and holding is not None:
             sells.append((symbol, -diff, target <= 0))
@@ -214,13 +195,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         trade = execute_sell(account, holding, bar, exec_px, "TARGET",
                              costs_fn, slip_fn, shares=shares)
         trades.append(trade)
-        if shares >= holding.shares:
-            del account.holdings[symbol]
-        else:
-            if shares < desired:
-                _warn("[%s] %s 成交量约束截断卖出: %d/%d",
-                               trade_date, symbol, shares, desired)
-            apply_partial_sell(holding, shares)
+        finalize_sell(account, holding, shares, desired=desired,
+                      warn=_warn, trade_date=trade_date)
 
     for symbol, amount in buys:
         holding = account.holdings.get(symbol)
@@ -248,16 +224,10 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
                            trade_date, symbol)
             continue
 
-        affordable, est_net = _cash_affordable(
-            account, exec_px, shares, slip_fn, costs_fn
-        )
-        if not affordable:
-            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
-                           trade_date, symbol, est_net, account.cash)
+        trade = buy_checked(account, symbol, bar, shares, exec_px, "TARGET",
+                            trade_date, _warn, costs_fn, slip_fn)
+        if trade is None:
             continue
-
-        trade = execute_buy(account, symbol, bar, shares, exec_px, "TARGET",
-                            costs_fn, slip_fn)
         trades.append(trade)
 
         if holding is None:

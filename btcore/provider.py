@@ -96,14 +96,10 @@ class DataProvider:
         回测进行中 end_date 被钳制到当前模拟日，策略传未来日期也拿不到未来数据。
         已 attach_bars 时返回预载数据的只读切片（勿原地修改），否则回源 SQL。
         """
-        if self._as_of_date is not None:
-            end_date = min(end_date, self._as_of_date)
-        prev = self.prev_trading_day(end_date)
-        if prev is None:
+        window = self._clamped_window(end_date, lookback_days)
+        if window is None:
             return pd.DataFrame()
-        lookback_start = (
-            date.fromisoformat(end_date) - timedelta(days=lookback_days)
-        ).strftime("%Y%m%d")
+        lookback_start, prev = window
         if self._bars_df is not None:
             sliced = self._bars_df.loc[lookback_start:prev]
             if symbols is not None:
@@ -140,14 +136,10 @@ class DataProvider:
         bench_fn = getattr(self.backend, "get_benchmark_bars", None)
         if not callable(bench_fn):
             return None
-        if self._as_of_date is not None:
-            end_date = min(end_date, self._as_of_date)
-        prev = self.prev_trading_day(end_date)
-        if prev is None:
+        window = self._clamped_window(end_date, lookback_days)
+        if window is None:
             return None
-        lookback_start = (
-            date.fromisoformat(end_date) - timedelta(days=lookback_days)
-        ).strftime("%Y%m%d")
+        lookback_start, prev = window
         key = (self.benchmark, lookback_start, prev)
         if key not in self._bench_cache:
             bench = bench_fn(self.benchmark, lookback_start, prev)
@@ -182,6 +174,24 @@ class DataProvider:
         return float((1 + recent).prod() - 1)
 
     # ── 内部 ──
+
+    def _clamped_window(
+        self, end_date: str, lookback_days: int
+    ) -> tuple[str, str] | None:
+        """前视钳制窗口（get_historical_bars / get_benchmark_returns 共用）。
+
+        as_of 钳制 → 前一交易日 → 回溯起点；无更早交易日时返回 None，
+        哨兵返回值由调用点自定。
+        """
+        if self._as_of_date is not None:
+            end_date = min(end_date, self._as_of_date)
+        prev = self.prev_trading_day(end_date)
+        if prev is None:
+            return None
+        lookback_start = (
+            date.fromisoformat(end_date) - timedelta(days=lookback_days)
+        ).strftime("%Y%m%d")
+        return lookback_start, prev
 
     def prev_trading_day(self, date_str: str) -> str | None:
         """date_str 的前一交易日（日历查 30 天窗口，找不到返回 None）。

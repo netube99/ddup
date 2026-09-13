@@ -108,14 +108,14 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 - `Engine.run(start, end)`（btcore/engine.py:404）：preload → 因子/ML 物化 → 逐日 step → 统计落库
 - `Engine.step`（engine.py:624）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
 - `Engine.compute_pending`（engine.py:732）：on_fills → on_tick → select → 校验 → calc_conditions
-- `Strategy` ABC（btcore/strategy.py:11）：声明式属性 REQUIRED_FIELDS/FACTOR_SPECS/FILTER_RULES +
+- `Strategy` ABC（btcore/strategy.py:8）：声明式属性 REQUIRED_FIELDS/FACTOR_SPECS/FILTER_RULES +
   钩子 get_universe/on_start/on_fills/on_tick/select/calc_conditions
-- `strategy_loader.load_strategy(path)`（strategy_loader.py:170）：YAML → Strategy；
+- `strategy_loader.load_strategy(path)`（strategy_loader.py:185）：YAML → Strategy；
   策略模型 features 以 materialize_only 并入因子闭包（build_strategy :40）
-- 因子：`ops.eval_op_expr`（factors/ops.py:385，_OPS 固定算子表）；
-  `plan.build_factor_plan`（factors/plan.py:176）/ `materialize`（:305 两路供给：广度面板→主面板）
+- 因子：`ops.eval_op_expr`（factors/ops.py:370，_OPS 固定算子表）；
+  `plan.build_factor_plan`（factors/plan.py:174）/ `materialize`（:287 两路供给：广度面板→主面板）
 - 撮合：`match.conditions.exit_conditions`(:79)/`entry_conditions`(:199)；
-  自定义条件单 `register_condition_handler`（match/conditions.py:25）
+  自定义条件单 `register_condition_handler`（match/conditions.py:24）
 - ML：`ml/runtime.materialize_predictions`(:100) → `ml_<name>` 列；`ml/dataset.build_panel`(:23)
   训练与引擎同一物化函数链；meta v3 契约（ml/spec.py:33 META_VERSION）
 - 结果库：`database.init_backtest_db`（database.py:90），6 表多 run 累积 SQLite

@@ -888,16 +888,14 @@ class Engine:
         )
 
     def _restore_state(self):
-        if self._saved_cash is not None:
-            self.account.cash = self._saved_cash
-        if self._saved_holdings is not None:
-            self.account.holdings = self._saved_holdings
-        if self._saved_total_value is not None:
-            self.account.total_value = self._saved_total_value
-            self.account.daily_pnl = self._saved_daily_pnl
-            self.account.cumulative_pnl = self._saved_cumulative_pnl
-        if self._saved_pending is not None:
-            self.pending_actions = self._saved_pending
+        if self._saved_cash is None:
+            return
+        self.account.cash = self._saved_cash
+        self.account.holdings = self._saved_holdings
+        self.account.total_value = self._saved_total_value
+        self.account.daily_pnl = self._saved_daily_pnl
+        self.account.cumulative_pnl = self._saved_cumulative_pnl
+        self.pending_actions = self._saved_pending
         if self.provider is not None:
             self.provider.set_as_of(self._saved_as_of)
 

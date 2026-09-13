@@ -22,14 +22,17 @@
 纯函数模块：不依赖 engine / match / database / provider。
 """
 
+import logging
 from collections import deque
 
 import numpy as np
 import pandas as pd
 
 from btcore.factors import cse, ops
-from btcore.factors.expr import evaluate_expr, extract_expr_names, where_mask
-from btcore.factors.library import spec_names
+from btcore.factors.expr import extract_expr_names
+from btcore.factors.library import eval_spec, spec_names
+
+logger = logging.getLogger(__name__)
 
 # 数据契约必需列（docs/backend_guide.md）——缺列直接报错，不走语义不精确的兜底
 # amount 不在其中：引擎内部不消费，仅为策略 select() 提供，策略通过 REQUIRED_FIELDS 声明
@@ -140,12 +143,11 @@ def ensure_pseudo_columns(
     *,
     backend,
     benchmark: str | None = None,
-    derive_idx_ret_fn=None,
 ) -> None:
     """按需附着伪列：industry / log_mktcap / idx_ret（原地写列）。
 
     引擎 preload 与训练侧/研究脚本共用，backend 为鸭子类型（只需有对应方法）。
-    idx_ret 默认用 derive_idx_ret 派生；调用方可传 derive_idx_ret_fn 覆盖。
+    idx_ret 默认用 derive_idx_ret 派生。
     """
     if needs.get(f"industry_{panel}"):
         fn = getattr(backend, "get_stock_industries", None)
@@ -160,11 +162,7 @@ def ensure_pseudo_columns(
         total_mv = df["total_mv"]
         df["log_mktcap"] = np.log(total_mv.where(total_mv > 0))
     if needs.get("index"):
-        fn = derive_idx_ret_fn
-        if fn is None:
-            def fn(d):
-                return derive_idx_ret(d, backend, benchmark)
-        df["idx_ret"] = fn(df)
+        df["idx_ret"] = derive_idx_ret(df, backend, benchmark)
 
 
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）
@@ -198,15 +196,7 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
     nodes = cse.rewrite(nodes)
     cse_temp = sorted(set(nodes) - original)
     # 闭包裁剪：只保留从入口可达的节点（容忍传入超集）
-    reachable: set[str] = set()
-    stack = [n for n in entry_names if n in nodes]
-    while stack:
-        name = stack.pop()
-        if name in reachable:
-            continue
-        reachable.add(name)
-        _, refs = spec_names(nodes[name], set(nodes))
-        stack.extend(refs)
+    reachable = _ref_closure(nodes, {n for n in entry_names if n in nodes})
     nodes = {n: nodes[n] for n in reachable}
     names = set(nodes)
     order = _topo_order(nodes, entry_names)
@@ -222,15 +212,7 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
             if ops.has_op_call(nodes[name]["expr"]) else None
         if kind:
             collapse[name] = kind
-    breadth: set[str] = set()
-    stack = list(collapse)
-    while stack:
-        name = stack.pop()
-        if name in breadth:
-            continue
-        breadth.add(name)
-        _, refs = spec_names(nodes[name], names)
-        stack.extend(refs)
+    breadth = _ref_closure(nodes, set(collapse))
     main_set = names - set(collapse)
 
     main_raw: set[str] = set()
@@ -317,13 +299,13 @@ def materialize(
     if breadth_df is not None:
         for name in plan["topo"]:
             if name in breadth_set:
-                breadth_df[name] = _eval_spec_on(breadth_df, nodes[name])
+                breadth_df[name] = eval_spec(breadth_df, nodes[name])
         for name, kind in plan["collapse"].items():
             _project(main_df, breadth_df, name, kind)
     main_set: set[str] = plan["main"]
     for name in plan["topo"]:
         if name in main_set:
-            main_df[name] = _eval_spec_on(main_df, nodes[name])
+            main_df[name] = eval_spec(main_df, nodes[name])
     for tmp in plan.get("cse_temp", ()):
         main_df.drop(columns=tmp, inplace=True, errors="ignore")
         if breadth_df is not None:
@@ -339,9 +321,6 @@ def validate_materialization(
     Returns:
         list of dicts with keys: level (info/warning/error), message
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
     issues = []
 
     for name in plan.get("collapse", {}):
@@ -373,6 +352,20 @@ def validate_materialization(
 # ── 内部 ──
 
 
+def _ref_closure(nodes: dict[str, dict], seeds: set[str]) -> set[str]:
+    """从种子节点出发的传递引用闭包（含种子自身）。"""
+    closure: set[str] = set()
+    stack = list(seeds)
+    while stack:
+        name = stack.pop()
+        if name in closure:
+            continue
+        closure.add(name)
+        _, refs = spec_names(nodes[name], set(nodes))
+        stack.extend(refs)
+    return closure
+
+
 def _topo_order(nodes: dict[str, dict], entry_names: list[str]) -> list[str]:
     """Kahn 拓扑排序：引用先于被引用方。nodes 已是闭包，entry_names 仅作语义标注。"""
     names = set(nodes)
@@ -397,18 +390,6 @@ def _topo_order(nodes: dict[str, dict], entry_names: list[str]) -> list[str]:
     return order
 
 
-def _eval_spec_on(df: pd.DataFrame, spec: dict) -> pd.Series:
-    if ops.has_op_call(spec["expr"]):
-        values = ops.eval_op_expr(df, spec["expr"])
-        where = spec.get("where")
-        if where:
-            # F-EX-02：与纯表达式路径同语义（NaN/0/False 掩码）
-            values = values.where(where_mask(ops.eval_op_expr(df, where)))
-    else:
-        values = evaluate_expr(df, spec["expr"], where=spec.get("where"))
-    return values
-
-
 def _project(
     main_df: pd.DataFrame,
     breadth_df: pd.DataFrame,
@@ -424,8 +405,6 @@ def _project(
     逐行 reindex 保留 where 后置掩码的 NaN——groupby.first() 会跳过 NaN
     把未掩码值泄漏给已掩码 symbol（docs/factor_library.md §8）。
     """
-    import logging
-
     main_dates = main_df.index.get_level_values("trade_date")
     if kind != "market" and group_col not in breadth_df.columns:
         raise ValueError(
@@ -435,6 +414,5 @@ def _project(
     main_df[name] = breadth_df[name].reindex(main_df.index).to_numpy()
     missing = main_dates[main_df[name].isna()].unique()
     if len(missing):
-        logger = logging.getLogger(__name__)
         logger.warning("坍缩因子 %r 在 %d 个交易日无值: %s ...",
                        name, len(missing), missing[:5].tolist())

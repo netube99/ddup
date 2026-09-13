@@ -30,7 +30,11 @@ def _load_stock_names() -> dict[str, str]:
     global _STOCK_NAME_CACHE, _STOCK_NAMES_LOADED
     if _STOCK_NAMES_LOADED:
         return _STOCK_NAME_CACHE
-    market_db = _market_db_path()
+    try:
+        from adapters.tushare import get_default_db_path
+        market_db = get_default_db_path()
+    except (ImportError, AttributeError):
+        market_db = None
     if not market_db:
         _STOCK_NAMES_LOADED = True
         return {}
@@ -47,23 +51,6 @@ def _load_stock_names() -> dict[str, str]:
         pass
     _STOCK_NAMES_LOADED = True
     return _STOCK_NAME_CACHE
-
-
-def _market_db_path() -> str | None:
-    """默认行情库路径：直接 import adapter 函数（不再正则解析源码）。"""
-    try:
-        from adapters.tushare import get_default_db_path
-        return get_default_db_path()
-    except (ImportError, AttributeError):
-        return None
-
-
-def _benchmark_name(code: str | None) -> str:
-    if not code:
-        return "基准"
-    names = _load_stock_names()
-    name = names.get(code)
-    return f"{name}({code})" if name else code
 
 
 def _stock_name(code: str) -> str:
@@ -361,12 +348,6 @@ def _nav_series(account_daily: pd.DataFrame) -> tuple[list[str], list[float]]:
     return dates, nav
 
 
-def _drawdown_series(nav: list[float]) -> list[float]:
-    arr = np.asarray(nav, dtype=float)
-    peak = np.maximum.accumulate(arr)
-    return (arr / peak - 1.0).tolist()
-
-
 def _trade_table(trade_log: pd.DataFrame) -> str:
     if trade_log.empty:
         return '<p class="empty">无成交记录</p>'
@@ -436,7 +417,8 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     trade_log = result["trade_log"]
 
     dates, nav = _nav_series(account_daily)
-    dd = _drawdown_series(nav)
+    arr = np.asarray(nav, float)
+    dd = (arr / np.maximum.accumulate(arr) - 1.0).tolist()
 
     parts = [f"<h1>{_esc(title)}</h1>", f'<p class="meta">{_esc(meta_line)}</p>']
 
@@ -445,7 +427,10 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
 
     # 净值曲线：策略 + 基准（如有）
     bm_code = result.get("benchmark_code")
-    bm_label = _benchmark_name(bm_code)
+    names = _load_stock_names()
+    bm_name = names.get(bm_code) if bm_code else None
+    bm_label = f"{bm_name}({bm_code})" if bm_name else (
+        bm_code if bm_code else "基准")
     nav_series = [("策略净值", nav, _PALETTE[0])]
     bm_nav = result.get("benchmark_nav")
     if bm_nav and len(bm_nav) == len(dates):
@@ -560,15 +545,6 @@ _COMPARE_SPEC = [
 ]
 
 
-def _dig(statistics: dict, dotted: str):
-    cur = statistics
-    for part in dotted.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            return None
-        cur = cur[part]
-    return cur
-
-
 def _run_label(run: dict) -> str:
     meta = run["meta"]
     return f"run{meta['run_id']} {meta.get('strategy', '')}"
@@ -581,8 +557,13 @@ def build_compare_table(runs: list[dict]) -> tuple[list[str], list[list[str]]]:
     for label, key, fmt in _COMPARE_SPEC:
         row = [label]
         for run in runs:
-            v = _dig(run["statistics"], key)
-            row.append(fmt(v) if v is not None else "-")
+            cur = run["statistics"]
+            for part in key.split("."):
+                if not isinstance(cur, dict) or part not in cur:
+                    cur = None
+                    break
+                cur = cur[part]
+            row.append(fmt(cur) if cur is not None else "-")
         rows.append(row)
     return header, rows
 

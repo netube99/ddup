@@ -25,6 +25,12 @@ from btcore.factors.library import load_library, resolve_closure, resolve_spec
 from btcore.filters import resolve_index_universe
 from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL, parse_models
 from btcore.strategy import Strategy
+from btcore.strategy_tools import (
+    _CONDITION_KEYS as _CONDITION_KEYS,
+)
+from btcore.strategy_tools import (
+    validate_conditions as _validate_conditions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +39,6 @@ _KNOWN_FILTER_KEYS = {
     "exclude_industries", "min_price", "exclude_loss",
     "index_universe", "factor_universe",
 }
-
-_CONDITION_KEYS = {"stop_loss_pct", "take_profit_pct", "trailing_pct", "model_exit"}
 
 
 def build_strategy(
@@ -89,15 +93,15 @@ def build_strategy(
 
     # model_exit 规则引用的模型必须已声明（静默读不到列 = 静默不触发，
     # 属明确声明的依赖缺失，fail-fast）
-    declared_models = {m.name for m in model_specs}
+    model_by_name = {m.name: m for m in model_specs}
     for rule in (config.get("conditions") or {}).get("model_exit") or []:
-        if rule["model"] not in declared_models:
+        m = model_by_name.get(rule["model"])
+        if m is None:
             raise ValueError(
                 f"conditions.model_exit 引用了未声明的模型 {rule['model']!r}，"
-                f"models 节中已声明: {sorted(declared_models)}"
+                f"models 节中已声明: {sorted(model_by_name)}"
             )
-        m = next((s for s in model_specs if s.name == rule["model"]), None)
-        if m is not None and m.post_transform != "none":
+        if m.post_transform != "none":
             logger.warning(
                 "conditions.model_exit 引用模型 %s 的 post_transform=%s——"
                 "阈值比较作用于变换后分数，持仓数过小时截面 rank/zscore 退化"
@@ -329,34 +333,6 @@ def _validate_filter_rules(rules: dict) -> dict:
         if key not in _KNOWN_FILTER_KEYS:
             logger.warning("filter_rules 含未知键 %r，StockFilter 将忽略", key)
     return dict(rules)
-
-
-def _validate_conditions(conditions: dict) -> dict:
-    if not isinstance(conditions, dict):
-        raise ValueError("conditions 必须是 dict")
-    for key, value in conditions.items():
-        if key not in _CONDITION_KEYS:
-            raise ValueError(
-                f"未知 conditions 键 {key!r}，支持: {sorted(_CONDITION_KEYS)}"
-            )
-        if key == "model_exit":
-            # [{model, threshold}]：holding scope 模型分数超阈值时生成 ML_EXIT
-            if not isinstance(value, list):
-                raise ValueError("conditions.model_exit 必须是 list")
-            for i, rule in enumerate(value):
-                if not isinstance(rule, dict) or "model" not in rule:
-                    raise ValueError(
-                        f"conditions.model_exit[{i}] 必须是含 model 键的 mapping"
-                    )
-                th = rule.get("threshold", 0.5)
-                if not isinstance(th, (int, float)) or not 0 < th < 1:
-                    raise ValueError(
-                        f"conditions.model_exit[{i}].threshold 必须 ∈ (0,1): {th!r}"
-                    )
-            continue
-        if not isinstance(value, (int, float)) or not 0 < value < 1:
-            raise ValueError(f"conditions.{key} 必须是 (0,1) 内的数值: {value!r}")
-    return dict(conditions)
 
 
 def _check_factor_conflicts(specs: list[dict], strategy_cls: type) -> None:

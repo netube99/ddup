@@ -25,7 +25,7 @@ docs/          设计文档（index.md 是导航入口）
 results/       回测结果库（*.db，SQLite，多 run 累积）
 ```
 
-### 依赖方向（`scripts/check_anticorrupt.py:205` 强制）
+### 依赖方向（`scripts/check_anticorrupt.py:209` 强制）
 
 ```
 types.py / constants.py  零依赖，被所有人依赖
@@ -88,11 +88,11 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
     `on_fills`(:86) / `on_tick`(:96, 可返回 buy_conditions) /
     `select(bars, snapshot, provider) -> dict`(:121, abstract) /
     `calc_conditions(symbol, entry_price, bar, holding_days) -> list[dict]`(:125, abstract)
-- `strategy_loader.build_strategy`（strategy_loader.py:40）YAML/dict → Strategy 管线：
+- `strategy_loader.build_strategy`（strategy_loader.py:44）YAML/dict → Strategy 管线：
   因子库加载 → `parse_models` → **materialize_only 合并**（:101-110，模型 features 并入因子
   闭包统一物化但不参与评分，raw_features 并入 REQUIRED_FIELDS）→ `resolve_closure` 求
   FACTOR_NODES → 校验 → 实例化挂接 → `ml_conditions.register()`
-- `load_strategy(path)`（strategy_loader.py:147）YAML 入口；`_validate_conditions`（:313）；
+- `load_strategy(path)`（strategy_loader.py:185）YAML 入口；`_validate_conditions`（:32）；
   `_check_factor_conflicts`（:341，scoring/materialize_only/条件单因子交叉 WARNING）
 - `strategy_tools`：策略编写工具 —— `bars_to_df`(:15)、`eval_factor_specs`(:20，截面
   percentile 加权合成 score∈[0,1])、`ConditionBuilder`(:66，YAML conditions → 条件单 dict)
@@ -103,23 +103,23 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 | 模块 | 关键符号 | 职责 |
 |---|---|---|
-| ops.py | `_OPS`（ops.py:197，**固定 dict 非注册表**）、`eval_op_expr`（:369）、`validate_op_expr`（:275）、`has_op_call`（:269）、`infer_window`（:320）、`collapse_kind`（:353） | 算子白名单：ts 族（delay/delta/roc/ma/ema/std/sum/max/min/corr/beta/resid_std）、截面保形（rank/zscore/winsorize/group_rank/neutralize/abs/log）、坍缩（mean/group_mean）；AST 白名单校验 |
-| expr.py | `evaluate_expr`（expr.py:46）、`validate_expr`（:22） | 无算子纯表达式 → pandas.eval/numexpr 截面求值，禁函数调用/属性访问 |
-| plan.py | `REQUIRED_BAR_COLUMNS`（plan.py:34）、`build_factor_plan`（:162）、`materialize`（:291，两路供给：广度面板物化→投影→主面板物化）、`validate_materialization`（:319）、`ensure_pseudo_columns`（:122，industry/log_mktcap/idx_ret）、`derive_fields`（:87，hfq/pct_chg 派生） | 物化规划：拓扑序、warmup 窗口推导（to_calendar_days :158 = rows×1.5+10）、广度/主面板分列 |
-| cse.py | `rewrite`（cse.py:24） | 公共子表达式消除：相同 AST 去重 + 高频 Call 子树提取为 `__cse_N` 临时节点 |
-| library.py | `load_library`（library.py:50）、`resolve_closure`（:147）、`compute_breadth`（:273，坍缩因子流式计算，签名 `(factor_name, backend, lib, start, end, *, benchmark=None, chunk_days=60)`） | library.yaml 加载（{name:{expr,where?,description?}}），where 为求值后掩码（False→NaN），DFS 循环检测 |
+| ops.py | `_OPS`（ops.py:201，**固定 dict 非注册表**）、`eval_op_expr`（:370）、`validate_op_expr`（:276）、`has_op_call`（:270）、`infer_window`（:321）、`collapse_kind`（:354） | 算子白名单：ts 族（delay/delta/roc/ma/ema/std/sum/max/min/corr/beta/resid_std）、截面保形（rank/zscore/winsorize/group_rank/neutralize/abs/log）、坍缩（mean/group_mean）；AST 白名单校验 |
+| expr.py | `evaluate_expr`（expr.py:47）、`validate_expr`（:26） | 无算子纯表达式 → pandas.eval/numexpr 截面求值，禁函数调用/属性访问 |
+| plan.py | `REQUIRED_BAR_COLUMNS`（plan.py:39）、`build_factor_plan`（:174）、`materialize`（:287，两路供给：广度面板物化→投影→主面板物化）、`validate_materialization`（:315）、`ensure_pseudo_columns`（:139，industry/log_mktcap/idx_ret）、`derive_fields`（:92，hfq/pct_chg 派生） | 物化规划：拓扑序、warmup 窗口推导（to_calendar_days :170 = rows×1.5+10）、广度/主面板分列 |
+| cse.py | `rewrite`（cse.py:35） | 公共子表达式消除：相同 AST 去重 + 高频 Call 子树提取为 `__cse_N` 临时节点 |
+| library.py | `load_library`（library.py:50）、`resolve_closure`（:158）、`compute_breadth`（:289，坍缩因子流式计算，签名 `(factor_name, backend, lib, start, end, *, benchmark=None, chunk_days=60)`） | library.yaml 加载（{name:{expr,where?,description?}}），where 为求值后掩码（False→NaN），DFS 循环检测 |
 
 ### 2.5 撮合 btcore/match/
 
 - **core.py**（共享原语）：`is_valid_price`(:4)、`exec_price`(:9)、`cap_by_volume`(:34，
-  成交量约束）、`check_tradable`(:63，涨跌停跳过 → LIMIT_UP/LIMIT_DOWN/LIMIT_UNKNOWN)、
-  `_execute_trade`(:79，滑点+费用+现金台账）、`execute_sell`(:123)/`execute_buy`(:133)
-- **conditions.py**（条件单）：`register_condition_handler`(:23) / `register_buy_condition_handler`(:28)
-  进程级注册表；`exit_conditions`(:57) / `entry_conditions`(:166，条件买单最后执行以吃当日
-  释放现金）；内置 STOP_LOSS(:120)/TAKE_PROFIT(:138)/TRAILING_TP/LIMIT_BUY(:241)/BREAKOUT_BUY(:256)。
+  成交量约束）、`check_tradable`(:80，涨跌停跳过 → LIMIT_UP/LIMIT_DOWN/LIMIT_UNKNOWN)、
+  `_execute_trade`(:135，滑点+费用+现金台账）、`execute_sell`(:179)/`execute_buy`(:189)
+- **conditions.py**（条件单）：`register_condition_handler`(:24) / `register_buy_condition_handler`(:35)
+  进程级注册表；`exit_conditions`(:79) / `entry_conditions`(:196，条件买单最后执行以吃当日
+  释放现金）；内置 STOP_LOSS(:146)/TAKE_PROFIT(:168)/TRAILING_TP/LIMIT_BUY(:256)/BREAKOUT_BUY(:271)。
   handler 协议：sell `(holding, cond, bar)` / buy `(order, bar)` → `(executed, fill_price, log_params)`
-- **manual.py**（普通单）：`manual_sell`(:22)、`manual_buy`(:81)、
-  `rebalance_to_targets`(:166，target_value 调仓，先卖后买）
+- **manual.py**（普通单）：`manual_sell`(:19)、`manual_buy`(:70)、
+  `rebalance_to_targets`(:141，target_value 调仓，先卖后买）
 - 层规：conditions.py 与 manual.py 互不 import，仅依赖 core.py
 
 ### 2.6 ML 子系统 btcore/ml/

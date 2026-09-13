@@ -2,13 +2,12 @@ import logging
 
 from btcore.match.core import (
     LIMIT_UNKNOWN,
-    _cash_affordable,
     _warn_skip_reason,
-    apply_partial_sell,
+    buy_checked,
     cap_by_volume,
     check_tradable,
-    execute_buy,
     execute_sell,
+    finalize_sell,
     is_valid_price,
     make_holding,
 )
@@ -138,10 +137,7 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             logger.info("[%s] %s 条件单 %s 成交: fill=%s shares=%d %s",
                         trade_date, symbol, cond["type"], trade.price,
                         trade.shares, log_params)
-            if shares >= holding.shares:
-                del account.holdings[symbol]
-            else:
-                apply_partial_sell(holding, shares)
+            finalize_sell(account, holding, shares)
             break
 
     return trades
@@ -242,18 +238,11 @@ def entry_conditions(account, bars: dict, orders: list[dict],
                            trade_date, symbol)
             continue
 
-        affordable, est_net = _cash_affordable(
-            account, fill_price, shares, slip_fn, costs_fn,
-            slip_ticks=slip_ticks,
-        )
-        if not affordable:
-            _warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
-                           trade_date, symbol, est_net, account.cash)
+        trade = buy_checked(account, symbol, bar, shares, fill_price,
+                            order["type"], trade_date, _warn, costs_fn,
+                            slip_fn, slip_ticks=slip_ticks)
+        if trade is None:
             continue
-
-        trade = execute_buy(account, symbol, bar, shares, fill_price,
-                            order["type"], costs_fn, slip_fn,
-                            slip_ticks=slip_ticks)
         trades.append(trade)
         logger.info("[%s] %s 条件买入 %s 成交: fill=%s shares=%d %s",
                     trade_date, symbol, order["type"], trade.price,

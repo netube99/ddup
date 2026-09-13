@@ -39,8 +39,8 @@ def check_engine_no_builtin_import(repo_root: str) -> list[str]:
     engine_path = os.path.join(repo_root, "btcore", "engine.py")
     if not os.path.exists(engine_path):
         return errors
-    # 复用 _iter_import_modules：ast.Import 需遍历 node.names 才能拿到模块名
-    for module, lineno in _iter_import_modules(engine_path):
+    # 复用 _iter_imports：ast.Import 需遍历 node.names 才能拿到模块名
+    for module, lineno in _iter_imports(engine_path):
         if "builtin" in module and "factors" in module:
             errors.append(
                 f"VIOLATION: engine.py imports factors.builtin: "
@@ -132,14 +132,18 @@ def check_factors_no_old_api(repo_root: str) -> list[str]:
     return errors
 
 
-def _iter_import_modules(path: str):
-    """Yield imported module strings from a Python file."""
+def _iter_imports(path: str, expand_btcore: bool = False):
+    """Yield (目标模块, lineno)。expand_btcore 时额外展开 `from btcore import x` 为 btcore.x。"""
     with open(path) as f:
         tree = ast.parse(f.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.level == 0:  # 跳过相对导入
-                yield node.module or "", node.lineno
+            if node.level == 0:
+                if expand_btcore and node.module == "btcore":
+                    for alias in node.names:
+                        yield f"btcore.{alias.name}", node.lineno
+                elif node.module:
+                    yield node.module, node.lineno
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, node.lineno
@@ -159,7 +163,7 @@ def check_btcore_no_user_layer_import(repo_root: str) -> list[str]:
     errors = []
     forbidden = ("strategies", "factors", "adapters")
     for path in _iter_py_files(os.path.join(repo_root, "btcore")):
-        for module, lineno in _iter_import_modules(path):
+        for module, lineno in _iter_imports(path):
             if module.split(".")[0] in forbidden:
                 errors.append(
                     f"VIOLATION: btcore imports user layer '{module}': "
@@ -175,7 +179,7 @@ def check_btcore_no_engine_import(repo_root: str) -> list[str]:
     for path in _iter_py_files(btcore_dir):
         if os.path.basename(path) == "engine.py":
             continue
-        for module, lineno in _iter_import_modules(path):
+        for module, lineno in _iter_imports(path):
             if module == "btcore.engine":
                 errors.append(
                     f"VIOLATION: btcore internal module imports engine: "
@@ -192,7 +196,7 @@ def check_factors_layer_deps(repo_root: str) -> list[str]:
         return errors
     forbidden = ("strategies", "research", "adapters", "scripts")
     for path in _iter_py_files(factors_dir):
-        for module, lineno in _iter_import_modules(path):
+        for module, lineno in _iter_imports(path):
             top = module.split(".")[0]
             if top == "factors":
                 continue  # 包内导入
@@ -242,7 +246,7 @@ def check_match_no_cross_import(repo_root: str) -> list[str]:
         path = os.path.join(match_dir, filename)
         if not os.path.exists(path):
             continue
-        for module, lineno in _iter_import_modules(path):
+        for module, lineno in _iter_imports(path):
             if not module.startswith("btcore.match"):
                 continue
             if module != "btcore.match.core":
@@ -259,7 +263,7 @@ def check_stats_pure(repo_root: str) -> list[str]:
     path = os.path.join(repo_root, "btcore", "stats.py")
     if not os.path.exists(path):
         return errors
-    for module, lineno in _iter_import_targets(path):
+    for module, lineno in _iter_imports(path, expand_btcore=True):
         if module == "sqlite3":
             errors.append(f"VIOLATION: stats.py imports sqlite3 line {lineno}")
         parts = module.split(".")
@@ -272,23 +276,6 @@ def check_stats_pure(repo_root: str) -> list[str]:
     return errors
 
 
-def _iter_import_targets(path: str):
-    """Yield (目标模块, lineno)：同时覆盖 import btcore.x 与 from btcore import x 两种写法。"""
-    with open(path) as f:
-        tree = ast.parse(f.read())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.level == 0:
-                if node.module == "btcore":
-                    for alias in node.names:
-                        yield f"btcore.{alias.name}", node.lineno
-                elif node.module:
-                    yield node.module, node.lineno
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                yield alias.name, node.lineno
-
-
 def check_factors_no_infra_deps(repo_root: str) -> list[str]:
     """btcore/factors 不得依赖 engine / match / database / provider / backend。"""
     errors = []
@@ -297,7 +284,7 @@ def check_factors_no_infra_deps(repo_root: str) -> list[str]:
     if not os.path.isdir(factors_dir):
         return errors
     for path in _iter_py_files(factors_dir):
-        for module, lineno in _iter_import_targets(path):
+        for module, lineno in _iter_imports(path, expand_btcore=True):
             parts = module.split(".")
             if parts[0] == "btcore" and len(parts) > 1 and parts[1] in forbidden:
                 errors.append(

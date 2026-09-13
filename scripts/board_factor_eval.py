@@ -27,6 +27,7 @@ from btcore.factors.library import compute_factors, load_library, resolve_closur
 from btcore.factors.plan import derive_fields, ensure_pseudo_columns
 from research import cli_common
 from research.factor_eval import (
+    _fmt_number,
     calc_ic,
     calc_ic_decay,
     calc_layered_returns,
@@ -59,12 +60,6 @@ def _pool_mask(index: pd.Index, pool: str, bars_df: pd.DataFrame) -> pd.Series:
     )
     rank = rank.reindex(index)
     return pd.Series(rank <= n, index=index)
-
-
-def _fmt(x: float) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return "-"
-    return f"{x:.4f}"
 
 
 def main() -> int:
@@ -205,20 +200,21 @@ def main() -> int:
                       f"{'RankIC':>8s}  {'RankIR':>7s}  {'Win':>7s}  {'n'}")
                 for h in horizons:
                     row = ddf.loc[h]
-                    print(f"  {h:>6d}  {_fmt(row['ic_mean']):>8s}  "
-                          f"{_fmt(row['ic_ir']):>7s}  "
-                          f"{_fmt(row['rank_ic_mean']):>8s}  "
-                          f"{_fmt(row['rank_ic_ir']):>7s}  "
-                          f"{_fmt(row['rank_ic_win']):>7s}  ({int(row['n_days'])}d)")
+                    print(f"  {h:>6d}  {_fmt_number(row['ic_mean']):>8s}  "
+                          f"{_fmt_number(row['ic_ir']):>7s}  "
+                          f"{_fmt_number(row['rank_ic_mean']):>8s}  "
+                          f"{_fmt_number(row['rank_ic_ir']):>7s}  "
+                          f"{_fmt_number(row['rank_ic_win']):>7s}  ({int(row['n_days'])}d)")
         else:
             for name in factor_names:
                 ic, ric = calc_ic(fdf[name], fwd)
                 p = summarize_ic(ic)
                 s = summarize_ic(ric)
-                print(f"  {name:<20s}  IC={_fmt(p['ic_mean']):>8s}  "
-                      f"IR={_fmt(p['icir']):>7s}  |  RankIC={_fmt(s['ic_mean']):>8s}  "
-                      f"RankIR={_fmt(s['icir']):>7s}  "
-                      f"Win={_fmt(s['ic_positive_ratio']):>7s}  ({p['n_days']}d)")
+                print(f"  {name:<20s}  IC={_fmt_number(p['ic_mean']):>8s}  "
+                      f"IR={_fmt_number(p['icir']):>7s}  |  "
+                      f"RankIC={_fmt_number(s['ic_mean']):>8s}  "
+                      f"RankIR={_fmt_number(s['icir']):>7s}  "
+                      f"Win={_fmt_number(s['ic_positive_ratio']):>7s}  ({p['n_days']}d)")
             # 分层
             print(f"\n  分层回测（5 档，{args.forward}d 前瞻）")
             for name in factor_names:

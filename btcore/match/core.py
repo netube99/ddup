@@ -53,6 +53,23 @@ def apply_partial_sell(holding, sold: int) -> None:
     holding.shares = remaining
 
 
+def finalize_sell(account, holding, shares: int, desired: int | None = None,
+                  warn=None, trade_date: str = "") -> None:
+    """卖出成交后收尾（manual/conditions/live 四路共用）。
+
+    全量卖出删除持仓；部分卖出经 apply_partial_sell 缩减。desired 存在且
+    shares < desired（成交量约束截断）时经 warn 告警；warn=None 静默
+    （条件单与实盘回放路径部分卖出不告警）。
+    """
+    if shares >= holding.shares:
+        del account.holdings[holding.symbol]
+    else:
+        if warn is not None and desired is not None and shares < desired:
+            warn("[%s] %s 成交量约束截断卖出: %d/%d",
+                 trade_date, holding.symbol, shares, desired)
+        apply_partial_sell(holding, shares)
+
+
 # 可成交校验的原因代码，供调用点分支记日志
 LIMIT_UNKNOWN = "LIMIT_UNKNOWN"  # 涨跌停无法判定（缺 pre_close / 未知板块）
 INVALID_PRICE = "INVALID_PRICE"  # 成交价 None / NaN / 非正
@@ -175,3 +192,30 @@ def execute_buy(account, symbol: str, bar, shares: int, fill_price: float,
     return _execute_trade(account, "BUY", symbol, bar, shares,
                           fill_price, trigger, costs_fn, slip_fn,
                           slip_ticks=slip_ticks)
+
+
+def buy_checked(account, symbol, bar, shares, base_price, trigger, trade_date,
+                warn, costs_fn, slip_fn,
+                slip_ticks: int | None = None) -> Trade | None:
+    """现金护栏 + 买入结算（manual_buy / rebalance / entry_conditions 共用）。
+
+    现金不足（含滑点与费用的净支出估算）时 warn 并返回 None，调用点跳过；
+    否则执行买入返回 Trade。slip_ticks 缺省用 account.slippage_ticks。
+    """
+    affordable, est_net = _cash_affordable(
+        account, base_price, shares, slip_fn, costs_fn, slip_ticks=slip_ticks
+    )
+    if not affordable:
+        warn("[%s] %s 现金不足 (need=%.2f cash=%.2f) 跳过",
+             trade_date, symbol, est_net, account.cash)
+        return None
+    return execute_buy(account, symbol, bar, shares, base_price, trigger,
+                       costs_fn, slip_fn, slip_ticks=slip_ticks)
+
+
+def position_value(holding, bar, account) -> float:
+    """持仓市值：执行价非法（None/NaN/非正）或 bar 缺失时回退 last_price。"""
+    price = exec_price(bar, account) if bar is not None else None
+    return holding.shares * (
+        price if is_valid_price(price) else holding.last_price
+    )

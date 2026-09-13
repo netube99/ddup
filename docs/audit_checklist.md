@@ -256,12 +256,12 @@
 ### 5.3 select 协议与 ConditionBuilder
 
 - [ ] **S-SEL-01** 名单防线 — buy/sell 非空串、无重复、同日不冲突（`engine.py:26-40,573-585`）；重复 symbol 曾致账户腐化（历史 P0，已修，回归项 R-HIS）。
-- [ ] **S-SEL-02** target_value — 与 buy/sell/buy_conditions 互斥；值 ≥0 有限数值校验；target=0 清仓含零碎股；未列出持仓不动（`engine.py:586-598`；`match/manual.py:173-304`）。
+- [ ] **S-SEL-02** target_value — 与 buy/sell/buy_conditions 互斥；值 ≥0 有限数值校验；target=0 清仓含零碎股；未列出持仓不动（`engine.py:586-598`；`match/manual.py:141-243`）。
 - [ ] **S-SEL-03** buy_weights — 键集恰等于 buy、∈(0,1]、和 ≤1（`engine.py:614-631`）。
 - [ ] **S-SEL-04** buy_conditions — {symbol,type,price}+value/shares 恰一；与 buy/sell 名单不重叠（`engine.py:633-664`）。
 - [ ] **S-COND-01** 条件单价格口径 — stop_loss=entry×(1−pct)；take_profit=entry×(1+pct)；**trailing 锚点=持仓期最高收盘价**（触发在盘中 low，`strategy_tools.py:93-128`）。
   边界：除权日 close 跳变使 trailing 锚点台阶式变化（公司行为 rescale 应抵消，`corporate.py:71-78`，构造除权+trailing 用例验证）。
-- [ ] **S-COND-02** 已持仓再买 — buy 名单含已持仓 symbol 静默跳过（`match/manual.py:98,105-106`）；条件买单已持仓静默跳过（`conditions.py:201-202`）——策略必须显式决定加仓策略，审查时确认这是设计意图而非漏单。
+- [ ] **S-COND-02** 已持仓再买 — buy 名单含已持仓 symbol 静默跳过（`match/manual.py:92-93`）；条件买单已持仓静默跳过（`conditions.py:208-209`）——策略必须显式决定加仓策略，审查时确认这是设计意图而非漏单。
 - [ ] **S-COND-03** 同日止损+接回 — exit_conditions 卖出 X 后 entry_conditions 同日可再买回 X（互斥校验只覆盖 sell 名单）——确认策略意图。
 
 ---
@@ -282,7 +282,7 @@
 - [ ] **E-MCH-02** 涨跌停 — 真实列优先，缺列按板块规则推导（`limits.py:8-54`）：主板 10%、300/301 自 2020-08-24 20%、688 20%、BJ 30%；**ST 5% 无档位（见 D-ST-03）**；缺 pre_close/未知板块→(None,None) 不拦截。
   动态：构造涨停日买单确认被拒且 WARNING（INV8 覆盖基础态，但创业板切换窗口 fixture 只有 limits 无 bars，需真实库样本）。
 - [ ] **E-MCH-03** 成交量 cap — 单笔 ≤ int(vol手×ratio)×100；vol NaN 不限制（`core.py:34-46`）；截断后 <100 股跳过。🛰 行为依赖后端停牌日行存在性约定（见 D-SQL-02）。
-- [ ] **E-MCH-04** 现金防线 — 现金不足跳过不缩股（`manual.py:145-151`）；est 含滑点+费。
+- [ ] **E-MCH-04** 现金防线 — 现金不足跳过不缩股（`manual.py:123,227`，护栏在 `core.buy_checked`）；est 含滑点+费。
 - [ ] **E-MCH-05** 整手取整 — 买侧 100 股整数倍；卖出可零碎（INV2）。
 - [ ] **E-MCH-06** 停牌 — bar 缺失即停牌/缺数据，跳过+WARNING，卖出不顺延（pending 次日重算）。🛰 fixture 无 vol=0 样本，停牌路径需真实库验证（探针 A-05 找真实停牌日样本构造用例）。
 

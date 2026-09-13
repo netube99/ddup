@@ -37,10 +37,6 @@ def _groll(s: pd.Series, n: int, method: str) -> pd.Series:
     return r.droplevel(0).reindex(s.index)
 
 
-def _ts_delay(x: pd.Series, n: int) -> pd.Series:
-    return _gshift(x, n)
-
-
 def _ts_delta(x: pd.Series, n: int) -> pd.Series:
     return x - _gshift(x, n)
 
@@ -79,17 +75,13 @@ def _ts_min(x: pd.Series, n: int) -> pd.Series:
 
 # 闭式 rolling 矩：cov(x,y) = E[xy] - E[x]E[y]，var 同理。
 # beta/corr 的分子分母同阶，ddof 口径在比值中抵消；resid_std 为总体口径。
-def _roll_mean(s: pd.Series, n: int) -> pd.Series:
-    return _groll(s, n, "mean")
-
-
 def _roll_cov(x: pd.Series, y: pd.Series, n: int) -> pd.Series:
-    return _roll_mean(x * y, n) - _roll_mean(x, n) * _roll_mean(y, n)
+    return _ts_ma(x * y, n) - _ts_ma(x, n) * _ts_ma(y, n)
 
 
 def _roll_var(x: pd.Series, n: int) -> pd.Series:
-    m = _roll_mean(x, n)
-    return _roll_mean(x * x, n) - m * m
+    m = _ts_ma(x, n)
+    return _ts_ma(x * x, n) - m * m
 
 
 def _ts_beta(x: pd.Series, y: pd.Series, n: int) -> pd.Series:
@@ -131,10 +123,6 @@ def _xs_winsorize(x: pd.Series, p: float) -> pd.Series:
     lo = g.transform("quantile", p)
     hi = g.transform("quantile", 1.0 - p)
     return x.clip(lower=lo, upper=hi)
-
-
-def _xs_log(x: pd.Series) -> pd.Series:
-    return np.log(x)
 
 
 def _by_date_and(x: pd.Series, g: pd.Series):
@@ -211,12 +199,9 @@ class _Op:
 
 
 _OPS: dict[str, _Op] = {
-    "delay": _Op(_ts_delay, 1, 1, "ts", "preserve",
-                 window_cost=lambda n: n),
-    "delta": _Op(_ts_delta, 1, 1, "ts", "preserve",
-                 window_cost=lambda n: n),
-    "roc": _Op(_ts_roc, 1, 1, "ts", "preserve",
-               window_cost=lambda n: n),
+    "delay": _Op(_gshift, 1, 1, "ts", "preserve"),
+    "delta": _Op(_ts_delta, 1, 1, "ts", "preserve"),
+    "roc": _Op(_ts_roc, 1, 1, "ts", "preserve"),
     "ma": _Op(_ts_ma, 1, 1, "ts", "preserve",
               window_cost=lambda n: n - 1),
     # ema 无限记忆，取 3n 作为工程近似
@@ -237,7 +222,7 @@ _OPS: dict[str, _Op] = {
     "resid_std": _Op(_ts_resid_std, 2, 1, "ts", "preserve",
                      window_cost=lambda n: n - 1),
     "abs": _Op(np.abs, 1, 0, "xsec", "preserve"),
-    "log": _Op(_xs_log, 1, 0, "xsec", "preserve"),
+    "log": _Op(np.log, 1, 0, "xsec", "preserve"),
     "rank": _Op(_xs_rank, 1, 0, "xsec", "preserve"),
     "zscore": _Op(_xs_zscore, 1, 0, "xsec", "preserve"),
     "winsorize": _Op(_xs_winsorize, 1, 1, "xsec", "preserve",

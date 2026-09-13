@@ -130,11 +130,6 @@ def validate_findings(doc: dict, errors: list[str]) -> None:
             errors.append(f"{prefix}: note 缺失——记录现象与证据")
 
 
-def _same_finding(a: dict, b: dict) -> bool:
-    """内容是否一致（severity/rule/file/line/note 五字段）。"""
-    return all(a.get(k) == b.get(k) for k in _FINDING_FIELDS)
-
-
 def cmd_check(args: argparse.Namespace) -> int:
     try:
         doc = yaml.safe_load(args.findings.read_text(encoding="utf-8"))
@@ -162,7 +157,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             skipped.append(f["id"])
         else:
             prev = closed_by_id.get(f["id"])
-            if prev is not None and _same_finding(prev, f):
+            if prev is not None and all(
+                prev.get(k) == f.get(k) for k in _FINDING_FIELDS
+            ):
                 skipped.append(f["id"])  # 已处理且内容未变 → 不重开
             else:
                 new_items.append({**f, "opened": _today()})

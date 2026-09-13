@@ -1,11 +1,8 @@
-import logging
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
 from btcore.filters import StockFilter
 from btcore.strategy_tools import ConditionBuilder
-
-logger = logging.getLogger(__name__)
 
 
 class Strategy(ABC):

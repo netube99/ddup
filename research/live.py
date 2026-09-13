@@ -21,7 +21,7 @@ import pandas as pd
 
 from btcore import corporate, database, types
 from btcore.engine import Engine, bars_to_dict, value_account
-from btcore.match.core import apply_partial_sell, is_valid_price
+from btcore.match.core import finalize_sell, is_valid_price
 
 logger = logging.getLogger(__name__)
 
@@ -307,10 +307,7 @@ def apply_fill(account: types.Account, fill: dict, today: str) -> types.Trade | 
         )
     net = turnover - fill["commission"] - fill["stamp_tax"] - fill["transfer_fee"]
     account.cash += net
-    if shares == holding.shares:
-        del account.holdings[symbol]
-    else:
-        apply_partial_sell(holding, shares)
+    finalize_sell(account, holding, shares)
     return types.Trade(
         date=today, symbol=symbol, side="SELL", trigger=fill["reason"],
         price=fill["price"], shares=shares, turnover=turnover,
@@ -542,20 +539,16 @@ def run_signal(strategy, provider, store: LedgerStore, end: str):
     return engine, calendar
 
 
-def next_trading_day(provider, date: str) -> str | None:
-    end = (pd.Timestamp(date) + pd.Timedelta(days=30)).strftime("%Y%m%d")
-    cal = provider.get_calendar(date, end)
-    for d in cal:
-        if d > date:
-            return d
-    return None
-
-
 def build_op_sheet(engine: Engine, provider, today: str) -> dict:
     """次日操作单：开盘手动单 + 券商条件单 + 提示。全部来自末日决策输出。"""
     pending = engine.pending_actions or {}
     account = engine.account
-    next_day = next_trading_day(provider, today)
+    probe_end = (pd.Timestamp(today) + pd.Timedelta(days=30)).strftime("%Y%m%d")
+    next_day = None
+    for d in provider.get_calendar(today, probe_end):
+        if d > today:
+            next_day = d
+            break
 
     sell_reasons = pending.get("sell_reasons") or {}
     sell_shares = pending.get("sell_shares") or {}
