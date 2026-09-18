@@ -9,7 +9,7 @@ from research.replay import run_replay
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="回放回测交易决策")
-    parser.add_argument("db", help="result.db 路径")
+    parser.add_argument("db", help="result.duckdb 路径")
     parser.add_argument("--run-id", type=int, default=None,
                         help="run_id（缺省取最新 run）")
     parser.add_argument("--symbol", help="过滤股票代码")

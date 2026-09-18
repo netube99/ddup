@@ -3,18 +3,18 @@
 用法:
     # 建仓（开户）：现金 + 已有持仓（entry_date/entry_price 用于 holding_days
     # 与 trailing 锚点重建；positions 文件可省，空仓开局）
-    python scripts/live.py init live/main.db --date 20260731 --cash 40000 \
+    python scripts/live.py init live/main.duckdb --date 20260731 --cash 40000 \
         [--positions positions.yaml]
 
     # 每日对账同步：全量账户信息一次性给到位（现金+持仓+今日成交）
-    python scripts/live.py sync live/main.db sync.yaml
+    python scripts/live.py sync live/main.duckdb sync.yaml
 
     # 每日信号：回放账本 → 明日操作单（开盘手动单 + 券商条件单 + 提示）
-    python scripts/live.py signal live/main.db strategies/selected/xxx/config.yaml \
+    python scripts/live.py signal live/main.duckdb strategies/selected/xxx/config.yaml \
         [--date 20260803] [--out opsheet.json]
 
     # 当前状态（衍生账户视图 + 最近成交）
-    python scripts/live.py status live/main.db
+    python scripts/live.py status live/main.duckdb
 
 账本与策略完全解耦：ledger_fills 是唯一手工数据源（append-only），
 runs/trade_log/account_daily/holdings 为每次 signal 重写的衍生表，
@@ -53,27 +53,58 @@ def _load_yaml(path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _normalize_positions(positions: list) -> list[tuple]:
+    """建账持仓整体预校验 → [(entry_date, symbol, price, shares)]。
+
+    任何条目非法在写库前报错（避免"已初始化但持仓残缺"的半账本）。
+    """
+    out = []
+    for p in positions:
+        try:
+            symbol = str(p.get("symbol") or "")
+            entry_date = str(p.get("entry_date") or "")
+            price = float(p.get("entry_price"))
+            shares = int(p.get("shares"))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ValueError(f"positions 条目非法（缺字段/类型错误）: {p!r}") from None
+        if not symbol or len(entry_date) != 8 or price <= 0 or shares <= 0:
+            raise ValueError(f"positions 条目非法（symbol/日期/价格/股数）: {p!r}")
+        out.append((entry_date, symbol, price, shares))
+    return out
+
+
 def cmd_init(args) -> int:
     store = LedgerStore(args.db)
     try:
         positions = []
         if args.positions:
             positions = _load_yaml(args.positions).get("positions") or []
-        cost = sum(p["shares"] * p["entry_price"] for p in positions)
+        try:
+            normalized = _normalize_positions(positions)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        cost = sum(shares * price for _, _, price, shares in normalized)
         initial_capital = args.cash + cost
-        store.init_account(args.date, args.cash, initial_capital)
         now = datetime.datetime.now().isoformat()
-        for p in positions:
-            store.append_fill(
-                p["entry_date"], p["symbol"], "OPENING",
-                price=p["entry_price"], shares=int(p["shares"]),
-                reason="OPENING", created_at=now,
-            )
-        store.conn.commit()
+        # 元数据 + OPENING 持仓同一事务：任一失败整体回滚，不留半初始化账本
+        store.conn.begin()
+        try:
+            store.init_account(args.date, args.cash, initial_capital)
+            for entry_date, symbol, price, shares in normalized:
+                store.append_fill(
+                    entry_date, symbol, "OPENING",
+                    price=price, shares=shares,
+                    reason="OPENING", created_at=now,
+                )
+            store.conn.commit()
+        except BaseException:
+            store.conn.rollback()
+            raise
         _print_json({
             "ok": True, "db": args.db, "start_date": args.date,
             "initial_cash": args.cash, "initial_capital": initial_capital,
-            "opening_positions": len(positions),
+            "opening_positions": len(normalized),
         })
     finally:
         store.close()
@@ -92,15 +123,21 @@ def cmd_sync(args) -> int:
     actual_cash = float(stmt.get("cash"))
     fills = stmt.get("fills") or []
 
-    store = LedgerStore(args.db)
-    provider = cli_common.make_provider()
+    store = None
+    provider = None
     try:
+        store = LedgerStore(args.db)
+        provider = cli_common.make_provider()
         if date < store.start_date:
             print(f"date {date} 早于账本起始日 {store.start_date}", file=sys.stderr)
             return 2
         now = datetime.datetime.now().isoformat()
+        # DuckDB 默认自动提交：回滚语义要求显式开启事务（含后续 ADJUST）
+        store.conn.begin()
         try:
-            appended, skipped = store.append_fills_idempotent(fills, now)
+            appended, skipped = store.append_fills_idempotent(
+                fills, now, default_date=date
+            )
             report = reconcile(store, provider, date, actual_cash, actual_holdings)
         except Exception as exc:  # 数据一致性错误（重复/缺买入等）→ 回滚 + JSON
             store.conn.rollback()
@@ -143,15 +180,19 @@ def cmd_sync(args) -> int:
             ),
         })
     finally:
-        provider.backend.close()
-        store.close()
+        if provider is not None:
+            provider.backend.close()
+        if store is not None:
+            store.close()
     return 0
 
 
 def cmd_signal(args) -> int:
-    store = LedgerStore(args.db)
-    provider = cli_common.make_provider()
+    store = None
+    provider = None
     try:
+        store = LedgerStore(args.db)
+        provider = cli_common.make_provider()
         end = args.date or datetime.datetime.now().strftime("%Y%m%d")
         if end < store.start_date:
             print(f"date {end} 早于账本起始日 {store.start_date}", file=sys.stderr)
@@ -169,8 +210,10 @@ def cmd_signal(args) -> int:
         sheet["_opsheet_file"] = out
         _print_json(sheet)
     finally:
-        provider.backend.close()
-        store.close()
+        if provider is not None:
+            provider.backend.close()
+        if store is not None:
+            store.close()
     return 0
 
 
@@ -217,7 +260,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init", help="建账（现金 + 可选已有持仓）")
-    p.add_argument("db", help="账本库路径（如 live/main.db）")
+    p.add_argument("db", help="账本库路径（如 live/main.duckdb）")
     p.add_argument("--date", required=True, help="建账日 YYYYMMDD")
     p.add_argument("--cash", type=float, required=True, help="当前可用资金")
     p.add_argument("--positions", default=None, help="已有持仓 YAML（可省）")

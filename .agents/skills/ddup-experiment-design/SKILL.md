@@ -25,12 +25,12 @@ description: ddup 回测实验设计与执行：单变量/极端值/反向假设
 
 ```bash
 python scripts/run.py strategies/.../config.yaml --start 20240101 --end 20250630 \
-    --out results/exploring_r3.db [--capital 200000] [--no-report] [--report [path]]
+    --out results/exploring_r3.duckdb [--capital 200000] [--no-report] [--report [path]]
 ```
-- **`--out` 不显式给 → :memory: 不落盘，结果蒸发**（研究必须显式 --out；此警示仅 run.py——sweep.py 缺省落盘 `cwd/sweep_result.db`）
+- **`--out` 不显式给 → :memory: 不落盘，结果蒸发**（研究必须显式 --out；此警示仅 run.py——sweep.py 缺省落盘 `cwd/sweep_result.duckdb`）
 - 报告 auto 路径 = `<策略目录>/reports/<yaml名>_<起>_<止>.html`；迭代期 `--no-report` 加速，最终阶段补：`python scripts/report.py <db> --out r3.html`（`--run-id` 缺省最新）
 - 同一 db 多次 run 按 run_id 累积（多 run 结果库）
-- **同一 db 文件禁止并行写**（sqlite 无 WAL/busy_timeout，开连接即写，并行必 SQLITE_BUSY）：多个独立策略并行跑必须各自不同 --out；同库累积只能串行
+- **同一 db 文件禁止并行写**（DuckDB 单写者：写连接排他，读连接与写连接跨进程互斥，冲突直接报错）：多个独立策略并行跑必须各自不同 --out；同库累积只能串行；sweep 子进程写库期间父进程不得持有同库连接
 
 ## sweep.py 网格
 
@@ -43,7 +43,7 @@ params:
   config.rebalance_interval: [1, 5, 22]
 ```
 ```bash
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results/sweep_r3.db [--dry-run]
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results/sweep_r3.duckdb [--dry-run]
 ```
 - params 点路径覆写 base，值列表做**笛卡尔积**（示例 5×3×3=45 组）；`--dry-run` 预览组合
 - 路径段支持**列表整数下标**：如 `config.factor_specs.0.weight: [0.5, 0.8]` 可扫 factor_specs 权重；仅当路径段对 list 用非整数段（如漏索引的 `config.factor_specs.weight`）才报错
@@ -52,7 +52,7 @@ python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results
 - 单次调用 = 一个窗口；多窗口网格需外层 shell 循环分次调用（每次独立 --out 或同库串行累积）
 - 执行 = subprocess **串行**调 run.py（共享 --out，规避并行锁）；失败组合打印 FAIL 跳过
 - 结果写同库 runs + sweep_results 表（label/params/stats），末尾打印收益/Sharpe/MDD 汇总行，直接 grep 即可
-- 多 run 横向对比：`python scripts/compare.py results/sweep_r3.db --html cmp.html`（11 项指标表 + 归一化净值叠加）
+- 多 run 横向对比：`python scripts/compare.py results/sweep_r3.duckdb --html cmp.html`（11 项指标表 + 归一化净值叠加）
 
 ## 两阶段验证（防过拟合）
 

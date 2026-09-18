@@ -4,7 +4,7 @@
 用法:
     python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
         [--index 000300.SH] [--start YYYYMMDD --end YYYYMMDD] \
-        [--result-db backtest.db]
+        [--result-db backtest.duckdb]
 
 - benchmark_weights.parquet 只聚合 --index 指定指数的成分股权重
   （index_weight 表含多指数时不过滤会把 15 个指数混成一个基准）。
@@ -15,10 +15,9 @@
 
 import argparse
 import os
-import sqlite3
 
-import pandas as pd
-
+from btcore.database import connect_result_db
+from btcore.generic_sql import connect_market_db
 from research.attribution import _load_bars_for_symbols
 
 
@@ -46,10 +45,10 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
 
-    conn = sqlite3.connect(f"file:{args.provider_db}?mode=ro", uri=True)
+    conn = connect_market_db(args.provider_db)
 
     # industry_map: ts_code → l1_name
-    df = pd.read_sql_query("SELECT ts_code, l1_name FROM index_member_all", conn)
+    df = conn.execute("SELECT ts_code, l1_name FROM index_member_all").df()
     df.to_parquet(f"{args.out}/industry_map.parquet", index=False)
     print(f"industry_map: {len(df)} rows")
 
@@ -58,7 +57,7 @@ def main():
     # 不先去重 pivot 会 ValueError（2026-08 审计实证：全表 66,110 组重复）
     sql = "SELECT trade_date, name, pct_change FROM sw_daily WHERE 1=1"
     sql += date_filter
-    df = pd.read_sql_query(sql, conn, params=date_params)
+    df = conn.execute(sql, date_params).df()
     df = df.drop_duplicates(subset=["trade_date", "name"])
     df["pct_change"] = df["pct_change"].astype(float) / 100
     sw_wide = df.pivot(index="trade_date", columns="name", values="pct_change")
@@ -66,15 +65,14 @@ def main():
     print(f"sw_returns: {sw_wide.shape}")
 
     # benchmark_weights: 单指数成分股权重聚合到行业（避免多指数混入）
-    weights = pd.read_sql_query(
+    weights = conn.execute(
         "SELECT iw.trade_date, im.l1_name, SUM(iw.weight) as weight "
         "FROM index_weight iw "
         "JOIN index_member_all im ON iw.con_code = im.ts_code "
         f"WHERE iw.index_code = ?{date_filter} "
         "GROUP BY iw.trade_date, im.l1_name",
-        conn,
-        params=[args.index, *date_params],
-    )
+        [args.index, *date_params],
+    ).df()
     if weights.empty:
         print(f"警告: index_weight 无 {args.index} 数据")
     bw_wide = weights.pivot(index="trade_date", columns="l1_name", values="weight")
@@ -88,12 +86,12 @@ def main():
         if not (args.start and args.end):
             conn.close()
             parser.error("--result-db 需要同时提供 --start/--end 才能导出 bars.parquet")
-        bt_conn = sqlite3.connect(f"file:{args.result_db}?mode=ro", uri=True)
+        bt_conn = connect_result_db(args.result_db, read_only=True)
         try:
             traded = bt_conn.execute(
                 "SELECT DISTINCT symbol FROM trade_log "
                 "WHERE date >= ? AND date <= ?",
-                (args.start, args.end),
+                [args.start, args.end],
             ).fetchall()
         finally:
             bt_conn.close()

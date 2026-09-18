@@ -10,7 +10,6 @@ scripts/cross_validate.py 是薄壳 CLI；被测逻辑全部在本模块。
 """
 
 import json
-import sqlite3
 from collections import Counter
 
 from btcore import database
@@ -36,29 +35,36 @@ def _expected_triggers() -> set[str]:
 def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
     """加载回测结果。返回 (trades_df, daily_df, stats_dict, config, run)。
 
-    读库走 database.init_backtest_db + read_run_data（trade_log 按
-    date,id 排序，保证同日时序与写入序一致）。
+    读库走 database.connect_result_db(read_only=True) + read_run_data
+    （trade_log 按 date,id 排序，保证同日时序与写入序一致）。纯读入口不开
+    读写连接：init_backtest_db 会执行 DDL 与 DELETE FROM holdings，且与
+    同进程只读连接 / 跨进程读者产生 DuckDB 连接配置冲突。
     """
-    conn = database.init_backtest_db(db_path)
-    conn.row_factory = sqlite3.Row
-
-    if run_id is None:
-        run_id = latest_run_id(conn)
+    conn = database.connect_result_db(db_path, read_only=True)
+    try:
         if run_id is None:
-            conn.close()
-            raise ValueError("No runs found in database")
+            run_id = latest_run_id(conn)
+            if run_id is None:
+                raise ValueError("No runs found in database")
 
-    run = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
-    if run is None:
+        run_df = conn.execute(
+            "SELECT * FROM runs WHERE run_id = ?", [run_id]
+        ).df()
+        if run_df.empty:
+            raise ValueError(f"Run {run_id} not found")
+        run = run_df.iloc[0].to_dict()
+
+        daily, trades, stats = database.read_run_data(conn, run_id)
+        stats = stats or {}
+        config_json = run.get("config_json")
+        config = (
+            json.loads(config_json)
+            if isinstance(config_json, str) and config_json
+            else {}
+        )
+        return trades, daily, stats, config, run
+    finally:
         conn.close()
-        raise ValueError(f"Run {run_id} not found")
-
-    daily, trades, stats = database.read_run_data(conn, run_id)
-    stats = stats or {}
-    config = json.loads(run["config_json"]) if run["config_json"] else {}
-
-    conn.close()
-    return trades, daily, stats, config, dict(run)
 
 
 def _min_commission_overhead(n_buys: int, capital: float, min_commission: float) -> float:

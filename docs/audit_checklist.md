@@ -38,7 +38,7 @@
 
 ### 0.4 全局环境事实（核查基线，2026-08-02 实证）
 
-- 真实数据库：`/home/netube/aiwork/tushare_db/data/market.db`（`adapters/tushare.py:4` `_DEFAULT_DB_PATH`）。
+- 真实数据库：`/home/netube/aiwork/tushare_db/data/market.duckdb`（`adapters/tushare.py:6` `_DEFAULT_DB_PATH`）。
 - 运行环境：所有 python 命令用 `uv run python ...`（系统 python 无 pandas）。
 - 实盘 ST 数据基线：`stock_st` 全表 309,897 行，`type` 枚举仅 `'ST'` 一个值，日频快照 2018-01-02→2026-07-31；`get_st_map('20240101')` 返回 624 个交易日快照、444 只不同股票、2024-01-02 当日 117 只 ST。**若未来探针结果偏离此基线（如出现 `*ST` 枚举），`type='ST'` 过滤假设立即失效，须重查 `D-ST-01`。**
 - fixture 实证基线（`tests/fixtures/`，10 个 parquet）：bars 6,520 行/326 只/20 交易日（2024-06-03→07-01）；st 与 bars 交集=0；无停牌行（vol==0 计数=0）；涨停仅 5 行/跌停 1 行；送转样本全部为北交所 920xxx.BJ；无新股数据；eps 无空值；创业板 2020-08 切换窗口只有 limits 无 bars。
@@ -77,7 +77,7 @@
 - [ ] **C7 能力开关语义** — 辅助能力以后端是否提供数据为开关，无额外配置。
   静态：`generic_sql.py:78-85` `_EXTRAS` 动态装配；能力空位 `st_symbol/industry_name/listing_date/index_code/index_member/benchmark_close/benchmark_adj_factor`（`generic_sql.py:99-102`）。
 
-- [ ] **C8 禁止重引入清单** — `scripts/check_anticorrupt.py` 13 项机械检查必须绿；另有人工补查项：无 `factors/builtin.py`、无因子类层次、Strategy ABC 无行为开关、无 GuardedProvider、无 ML 外挂模式（策略不得自行加载 ONNX）。
+- [ ] **C8 禁止重引入清单** — `scripts/check_anticorrupt.py` 14 项机械检查必须绿；另有人工补查项：无 `factors/builtin.py`、无因子类层次、Strategy ABC 无行为开关、无 GuardedProvider、无 ML 外挂模式（策略不得自行加载 ONNX）。
   动态：`python scripts/check_anticorrupt.py` 退出码 0。
 
 ---
@@ -96,7 +96,7 @@
 - [ ] **D-SQL-03** 重复键 fail-fast — 同表 (date,symbol) 重复报错并给示例前 3 条。
   动态：探针 A-02 对主表跑重复键检查，确认真实库无重复（否则引擎启动即炸，属数据卫生）。
 
-- [ ] **D-SQL-04** 键类型探针 — 日期列须 YYYYMMDD 文本、代码列须 TEXT（SQLite INTEGER<TEXT 比较恒假会静默查空）（`generic_sql.py:472-548`）。
+- [ ] **D-SQL-04** 键类型探针 — 日期/代码列须 VARCHAR（BIGINT/DATE 对齐失真或报错，初始化期拒绝）（`generic_sql.py` `_check_key_types`）。
   边界：新接后端/新表时此项是头号静默杀手，探针 A-01 验证各表键列类型。
 
 - [ ] **D-SQL-05** filter/filter_sql 适用范围 — 仅日历/分红/ST/指数成分四类角色表；对其他表配置 → 初始化期报错（`generic_sql.py:671-696`）。
@@ -349,12 +349,12 @@
 - [ ] **CLI-CMP-01** compare.py — <2 run 退 1；对比表 11 项（`research/report.py:548-560`）。
 - [ ] **CLI-FEV-01** factor_eval.py — 纯终端不落盘；fail-fast 集：未知因子/scope≠panel/--decay 与非默认 --forward 互斥/嵌套坍缩引用（`scripts/factor_eval.py:69-405`）；--model 评 ML 分数（scope 须 panel）。
 - [ ] **CLI-XV-01** cross_validate.py — **退出码=问题数**；10 检查项（trigger 分布/买卖比/同日冲突/公司行为/小单/卖出分类/频率/现金非负/持仓上限/权益）；磨损阈值=最低佣金×2+印花+分档 variable（`scripts/cross_validate.py:73-231`）。
-- [ ] **CLI-SWP-01** sweep.py — `--out` 缺省 sweep_result.db 落盘；单组失败 continue；每组=标准 run+sweep_results 表（`scripts/sweep.py:23-124`）。
+- [ ] **CLI-SWP-01** sweep.py — `--out` 缺省 sweep_result.duckdb 落盘；单组失败 continue；每组=标准 run+sweep_results 表（`scripts/sweep.py:23-124`）。
 - [ ] **CLI-RPL-01** replay.py — 依赖 debug=True 快照；--run-id 缺省最新（旧库无 runs 表则报错『结果库中无 run 记录』退出，无 run 1 回退——`scripts/replay.py:33-39`，代码注释『回退 run 1』与实现不符）。
 - [ ] **CLI-MLT-01** ml_train.py — holding 缺 --db 报错；meta version≠3 拒绝；YAML 写 post_transform 无效（以 meta 为准）（`scripts/ml_train.py:67-160`）。
 - [ ] **CLI-DMP-01** dump_fixtures.py — 窗口固定 20240601-0701（limits 额外 20200820-25）；ST 宽窗 dump 但 bars 主窗窄窗——**st 与 bars 交集为 0 的结构性空转即源于此**，改造 fixture 前先读 MlTestScout 实证统计（本文 §0.4）。
 - [ ] **CLI-BRN-01** dump_brinson_data.py — `--index` 过滤防多指数混入（2026-08 修复；SQL `WHERE iw.index_code=?` 硬过滤，缺省值 000300.SH 亦安全）；`--result-db` 须配 start/end 才导 bars。
-- [ ] **CLI-LINT-01** check_anticorrupt.py — 13 项检查（调用点 `scripts/check_anticorrupt.py:390-402`，docstring 13 条 1-19 行，与实际一致）；AGENTS.md 声称的 5 条架构规则曾经无检查（已补），核对 docstring 与实际检查数一致。
+- [ ] **CLI-LINT-01** check_anticorrupt.py — 14 项检查（调用点 `scripts/check_anticorrupt.py:main` 汇总，docstring 14 条 1-21 行，与实际一致）；AGENTS.md 声称的 5 条架构规则曾经无检查（已补），核对 docstring 与实际检查数一致。
 - [ ] **CLI-SYNC-01** check_skill_sync.py — 7 项对账（CLI flag/算子/select 键/filter 键/条件单键/meta v3/config 默认值）；接口变更后必跑。
 - [ ] **RS-FEV-01** research.factor_eval — IC<3 样本→NaN；分层 q=1 最低档；衰减 fwd_ret 用 close_hfq；corr<3 行跳过（`research/factor_eval.py:10-166`）。
 - [ ] **RS-CMP-01** research.composite — 滚动 IC/ICIR 权重只用 ≤t-1 日 IC（shift(1) 前视保护，`research/composite.py:29-77`）；全部无 IC 行保持 NaN 非 0。
@@ -426,11 +426,11 @@
 
 ## 附录 A：真实数据探针速查
 
-对 `/home/netube/aiwork/tushare_db/data/market.db` 执行（`sqlite3 <db> "<sql>"` 或 `uv run python`）。日期/代码列名以实际 schema 为准（先 `.tables` + `.schema <表>`）。
+对 `/home/netube/aiwork/tushare_db/data/market.duckdb` 执行（`uv run python` + duckdb，或 duckdb CLI）。日期/代码列名以实际 schema 为准（先 `SHOW TABLES` + `DESCRIBE <表>`）。
 
 ```sql
 -- A-01 键类型：对每张被引用表
-SELECT typeof(trade_date), typeof(ts_code) FROM stk_factor_pro LIMIT 1;   -- 期望 text/text
+SELECT typeof(trade_date), typeof(ts_code) FROM stk_factor_pro LIMIT 1;   -- 期望 VARCHAR/VARCHAR
 
 -- A-02 重复键
 SELECT trade_date, ts_code, COUNT(*) c FROM stk_factor_pro GROUP BY 1,2 HAVING c>1 LIMIT 3;  -- 期望 0 行
@@ -496,10 +496,10 @@ SELECT COUNT(*) FROM stk_factor_pro f JOIN (SELECT DISTINCT ts_code FROM bak_bas
 ```bash
 # E2E 冒烟（T-E2E-01）
 uv run python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
-  --start 20240603 --end 20240628 --out /tmp/audit.db
-uv run python scripts/cross_validate.py /tmp/audit.db; echo "exit=$?"
-uv run python scripts/replay.py /tmp/audit.db --symbol <持仓股> --date <交易日>
-uv run python scripts/report.py /tmp/audit.db --out /tmp/audit.html
+  --start 20240603 --end 20240628 --out /tmp/audit.duckdb
+uv run python scripts/cross_validate.py /tmp/audit.duckdb; echo "exit=$?"
+uv run python scripts/replay.py /tmp/audit.duckdb --symbol <持仓股> --date <交易日>
+uv run python scripts/report.py /tmp/audit.duckdb --out /tmp/audit.html
 
 # ST 探针（D-ST-01 动态层）
 uv run python -c "from adapters.tushare import TushareBackend; b=TushareBackend(); \

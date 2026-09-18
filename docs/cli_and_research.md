@@ -14,16 +14,16 @@ python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 
 # 2. 运行回测并落盘结果库
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
-    --start 20240101 --end 20240630 --out result.db
+    --start 20240101 --end 20240630 --out results/run.duckdb
 
 # 3. 交叉验证：检查交易行为与磨损是否合理
-python scripts/cross_validate.py result.db
+python scripts/cross_validate.py results/run.duckdb
 
 # 4. 生成 HTML 报告
-python scripts/report.py result.db --out report.html
+python scripts/report.py results/run.duckdb --out report.html
 
 # 5. 多次回测写入同一结果库后做多 run 对比
-python scripts/compare.py result.db --html compare.html
+python scripts/compare.py results/run.duckdb --html compare.html
 ```
 
 ---
@@ -34,7 +34,7 @@ python scripts/compare.py result.db --html compare.html
 
 ```bash
 python scripts/run.py <策略YAML> --start YYYYMMDD --end YYYYMMDD \
-    [--capital N] [--out result.db] [--report report.html | auto] [--no-report]
+    [--capital N] [--out results/run.duckdb] [--report report.html | auto] [--no-report]
 ```
 
 | 参数 | 说明 |
@@ -42,7 +42,7 @@ python scripts/run.py <策略YAML> --start YYYYMMDD --end YYYYMMDD \
 | `yaml` | 策略 YAML 配置路径（位置参数） |
 | `--start` / `--end` | 回测起止日期 YYYYMMDD，**必填** |
 | `--capital` | 初始资金 float，覆盖 YAML config |
-| `--out` | 结果库 SQLite 路径；缺省为内存库，不落盘 |
+| `--out` | 结果库 DuckDB 路径；缺省为内存库，不落盘 |
 | `--report` | HTML 报告路径。缺省 `auto`：生成到 `<策略目录>/reports/<yaml名>_<起>_<止>.html`（该目录已在 `.gitignore`）；`--report` 裸写（不带值）等价于 `auto` |
 | `--no-report` | 关闭报告生成 |
 
@@ -71,7 +71,7 @@ python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
 
 # 落盘结果库，后续离线生成报告/对比
 python scripts/run.py strategies/my_strategy/config.yaml \
-    --start 20240101 --end 20240630 --out results/my_run.db --no-report
+    --start 20240101 --end 20240630 --out results/my_run.duckdb --no-report
 ```
 
 ### 2.2 `factor_eval.py` — 因子评估
@@ -125,7 +125,7 @@ python scripts/factor_eval.py cci_z,turnover_z \
 ### 2.3 `report.py` — 单 run HTML 报告
 
 ```bash
-python scripts/report.py <结果库.db> [--run-id N] --out report.html
+python scripts/report.py <结果库.duckdb> [--run-id N] --out report.html
 ```
 
 | 参数 | 说明 |
@@ -141,7 +141,7 @@ python scripts/report.py <结果库.db> [--run-id N] --out report.html
 ### 2.4 `compare.py` — 多 run 对比
 
 ```bash
-python scripts/compare.py <结果库.db> [--runs 1,2,3] [--html compare.html]
+python scripts/compare.py <结果库.duckdb> [--runs 1,2,3] [--html compare.html]
 ```
 
 | 参数 | 说明 |
@@ -157,7 +157,7 @@ python scripts/compare.py <结果库.db> [--runs 1,2,3] [--html compare.html]
 ### 2.5 `cross_validate.py` — 交叉验证
 
 ```bash
-python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [--capital N]
+python scripts/cross_validate.py <结果库.duckdb> [--run-id N] [--strategy name] [--capital N]
 ```
 
 | 参数 | 说明 |
@@ -187,14 +187,14 @@ python scripts/cross_validate.py <结果库.db> [--run-id N] [--strategy name] [
 
 ```bash
 python scripts/sweep.py <sweep_config.yaml> --start YYYYMMDD --end YYYYMMDD \
-    [--out sweep_result.db] [--capital N] [--dry-run]
+    [--out results/sweep.duckdb] [--capital N] [--dry-run]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `sweep_config` | sweep 配置 YAML，**必填** |
 | `--start` / `--end` | **必填** |
-| `--out` | 汇总输出数据库，默认 `sweep_result.db` |
+| `--out` | 汇总输出数据库，默认 `sweep_result.duckdb` |
 | `--capital` | 初始资金，透传给每次 run（覆盖 YAML config） |
 | `--dry-run` | 仅打印参数组合，不运行 |
 
@@ -224,7 +224,7 @@ combos = expand_params({"config.top_k": [3, 5], "config.max_positions": [5, 10]}
 从 debug 模式写入的 `debug_snapshots` 表回放每日决策上下文，用于定位某标的在某交易日的买卖依据。
 
 ```bash
-python scripts/replay.py <result.db> [--run-id N] [--symbol SYM] [--date YYYYMMDD] [--list-symbols]
+python scripts/replay.py <结果库.duckdb> [--run-id N] [--symbol SYM] [--date YYYYMMDD] [--list-symbols]
 ```
 
 | 参数 | 说明 |
@@ -240,9 +240,9 @@ python scripts/replay.py <result.db> [--run-id N] [--symbol SYM] [--date YYYYMMD
 **前提**：回测时启用 debug 模式（`Engine(..., debug=True)`）且结果库落盘。无匹配快照时打印错误并以退出码 1 退出。
 
 ```bash
-python scripts/replay.py result.db --date 20240605 --list-symbols
-python scripts/replay.py result.db --symbol 000001.SZ
-python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
+python scripts/replay.py results/debug.duckdb --date 20240605 --list-symbols
+python scripts/replay.py results/debug.duckdb --symbol 000001.SZ
+python scripts/replay.py results/debug.duckdb --symbol 000001.SZ --date 20240605
 ```
 
 ### 2.8 `dump_brinson_data.py` — Brinson 归因数据导出
@@ -278,10 +278,10 @@ python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
 策略可随意切换——换一份 YAML 重新回放即得该策略口径的操作单。
 
 ```bash
-python scripts/live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]
-python scripts/live.py sync live/main.db sync.yaml          # 每日对账
-python scripts/live.py signal live/main.db strategies/selected/xxx/config.yaml [--date D] [--out o.json]
-python scripts/live.py status live/main.db
+python scripts/live.py init live/main.duckdb --date 20260731 --cash 40000 [--positions p.yaml]
+python scripts/live.py sync live/main.duckdb sync.yaml       # 每日对账
+python scripts/live.py signal live/main.duckdb strategies/selected/xxx/config.yaml [--date D] [--out o.json]
+python scripts/live.py status live/main.duckdb
 ```
 
 | 子命令 | 语义 |
@@ -318,8 +318,8 @@ fills:                                          # 今日实际成交（可为空
 |------|------|
 | `bench_universe_preload.py --start D --end D [--yaml path] [--skip-load] [--skip-engine]` | 性能基准：全市场 preload vs 沪深300+中证500+中证1000 成分并集 preload，分数据加载层（行数/耗时/内存）与端到端（engine.run 耗时）两层；调优 `get_universe` 时使用 |
 | `dump_fixtures.py` | 从真实行情库重新生成 `tests/fixtures/*.parquet` 测试 fixtures（无参数；数据库结构或数据更新后使用） |
-| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，13 项结构检查；开发工具） |
-| `live_e2e_check.py [--bt-db 回测库] [--ledger 账本] [--yaml 策略]` | 实盘账本全链路回归（需真实行情库）：以回测 result.db 为 ground truth 连续模拟交易日的 init → 每日 sync → 每日 signal，校验 signal 操作单等于回测次日实际成交、sync 对账通过、错报持仓回滚拒绝、中途建账与全程回放等价 |
+| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，14 项结构检查；开发工具） |
+| `live_e2e_check.py [--bt-db 回测库] [--ledger 账本] [--yaml 策略]` | 实盘账本全链路回归（需真实行情库）：以回测结果库为 ground truth 连续模拟交易日的 init → 每日 sync → 每日 signal，校验 signal 操作单等于回测次日实际成交、sync 对账通过、错报持仓回滚拒绝、中途建账与全程回放等价 |
 
 ---
 
@@ -389,14 +389,14 @@ from research.report import (
 generate_report(result, "report.html", title="我的策略报告")  # title 可选
 
 # 从结果库离线生成；run_id 缺省取最新 run
-generate_report_from_db("result.db", "report.html", run_id=1)
+generate_report_from_db("results/run.duckdb", "report.html", run_id=1)
 
 # 多 run 对比 HTML；run_ids 缺省取全部
-generate_compare_report("result.db", "compare.html", run_ids=[1, 2, 3])
+generate_compare_report("results/run.duckdb", "compare.html", run_ids=[1, 2, 3])
 
 # 加载 run 列表；每项 {"meta", "account_daily", "trade_log", "statistics"}
 # 老 run 无 stats_json 时现场重算（此时无基准对比与期末持仓浮盈数据）
-runs = load_runs("result.db", run_ids=[1, 2])
+runs = load_runs("results/run.duckdb", run_ids=[1, 2])
 
 # 构建指标对比表（compare.py 与对比 HTML 共用）
 header, rows = build_compare_table(runs)
@@ -454,8 +454,8 @@ result = evaluate_composite(composite, forward_returns, n_quantiles=10)
 
 ```python
 result = brinson_attribute(
-    db_path="result.db",                # 回测结果库（含 trade_log）
-    provider_db="/path/to/market.db",   # 行情数据库（只读打开）
+    db_path="results/run.duckdb",       # 回测结果库（含 trade_log）
+    provider_db="/path/to/market.duckdb",  # 行情数据库（只读打开）
     start="20240601",
     end="20240701",
     index_code="000300.SH",             # 基准指数，默认 000300.SH
@@ -522,7 +522,7 @@ result = brinson_attribute(
 
 ```python
 result = brinson_attribute_from_files(
-    result_db="backtest_output/run.db",
+    result_db="backtest_output/run.duckdb",
     industry_map="brinson_data/industry_map.parquet",
     sw_returns="brinson_data/sw_returns.parquet",
     benchmark_weights="brinson_data/benchmark_weights.parquet",
@@ -556,22 +556,22 @@ python scripts/factor_eval.py mom20,mom_60d,vol_z,ep_z \
 python scripts/factor_eval.py mom20 --start 20230101 --end 20240630 --decay 1,3,5,10,20
 # 按 strategy_guide.md 编写策略后：
 python scripts/run.py strategies/my_strategy/config.yaml \
-    --start 20240101 --end 20240630 --out results/v1.db
-python scripts/cross_validate.py results/v1.db --strategy my_strategy
-python scripts/report.py results/v1.db --out results/v1_report.html
+    --start 20240101 --end 20240630 --out results/v1.duckdb
+python scripts/cross_validate.py results/v1.duckdb --strategy my_strategy
+python scripts/report.py results/v1.duckdb --out results/v1_report.html
 ```
 
 ### 7.2 参数扫描与多 run 对比
 
 ```bash
 # 方式一：sweep 一键扫描（参数值列表展开；每组参数是标准 run，可直接 compare）
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.db
-python scripts/compare.py results/sweep.db --html results/sweep_compare.html
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.duckdb
+python scripts/compare.py results/sweep.duckdb --html results/sweep_compare.html
 
 # 方式二：手动多次 run 写入同一结果库（适用于策略文件不同的场景）
-python scripts/run.py cfg_top5.yaml  --start 20240101 --end 20240630 --out results/sweep.db --no-report
-python scripts/run.py cfg_top10.yaml --start 20240101 --end 20240630 --out results/sweep.db --no-report
-python scripts/compare.py results/sweep.db --html results/sweep_compare.html
+python scripts/run.py cfg_top5.yaml  --start 20240101 --end 20240630 --out results/sweep.duckdb --no-report
+python scripts/run.py cfg_top10.yaml --start 20240101 --end 20240630 --out results/sweep.duckdb --no-report
+python scripts/compare.py results/sweep.duckdb --html results/sweep_compare.html
 ```
 
 ### 7.3 Brinson 归因
@@ -579,7 +579,7 @@ python scripts/compare.py results/sweep.db --html results/sweep_compare.html
 ```python
 from research.attribution import brinson_attribute
 
-result = brinson_attribute("results/v1.db", "/path/to/market.db", "20240101", "20240630")
+result = brinson_attribute("results/v1.duckdb", "/path/to/market.duckdb", "20240101", "20240630")
 if "error" in result:
     raise RuntimeError(result["error"])
 

@@ -233,6 +233,13 @@ def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
         "mktcap_main": "log_mktcap" in main_raw,
         "mktcap_breadth": "log_mktcap" in breadth_raw,
     }
+    if collapse:
+        # 广度面板必须锚定在全市场行情网格上：GenericSQLBackend 的网格是
+        # 被请求表的 (trade_date, symbol) 键外并集，纯事件表坍缩表达式
+        # （如 pct_sealed 仅引 fd_amount）会让面板退化为事件行 → 分母丢失
+        # （2026-09-16 审查 F-FD0-02：0.78 vs 真实 0.01）。锚定一列行情
+        # 契约列保证网格=全市场；已有行情列时冗余无害。
+        breadth_raw.add("close")
     # log_mktcap 由 total_mv 派生：被引用的面板补请求 total_mv
     if needs["mktcap_main"]:
         main_raw.add("total_mv")

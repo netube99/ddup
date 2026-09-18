@@ -10,12 +10,12 @@
 """
 
 import html
-import sqlite3
 
 import numpy as np
 import pandas as pd
 
 from btcore import database, stats
+from btcore.generic_sql import connect_market_db
 
 _PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"]
 _STOCK_NAME_CACHE: dict[str, str] = {}
@@ -23,7 +23,7 @@ _STOCK_NAMES_LOADED = False
 
 
 def _load_stock_names() -> dict[str, str]:
-    """从 tushare market.db 加载 ts_code → 股票名称映射（含指数名）。
+    """从 tushare market.duckdb 加载 ts_code → 股票名称映射（含指数名）。
 
     负结果也缓存（库缺失/查询失败时不再逐行重试连接）。
     """
@@ -39,14 +39,16 @@ def _load_stock_names() -> dict[str, str]:
         _STOCK_NAMES_LOADED = True
         return {}
     try:
-        conn = sqlite3.connect(f"file:{market_db}?mode=ro", uri=True)
-        rows = conn.execute("SELECT ts_code, name FROM stock_basic").fetchall()
-        _STOCK_NAME_CACHE = {r[0]: r[1] for r in rows}
-        # 同时加载指数名称
-        idx_rows = conn.execute("SELECT ts_code, name FROM index_basic").fetchall()
-        for r in idx_rows:
-            _STOCK_NAME_CACHE[r[0]] = r[1]
-        conn.close()
+        conn = connect_market_db(market_db)
+        try:
+            rows = conn.execute("SELECT ts_code, name FROM stock_basic").fetchall()
+            _STOCK_NAME_CACHE = {r[0]: r[1] for r in rows}
+            # 同时加载指数名称
+            idx_rows = conn.execute("SELECT ts_code, name FROM index_basic").fetchall()
+            for r in idx_rows:
+                _STOCK_NAME_CACHE[r[0]] = r[1]
+        finally:
+            conn.close()
     except Exception:
         pass
     _STOCK_NAMES_LOADED = True
@@ -67,10 +69,12 @@ def load_runs(db_path: str, run_ids: list[int] | None = None) -> list[dict]:
 
     stats_json 为 NULL 的老 run 用 stats.calculate_statistics 现场重算
     （无 benchmark / 期末持仓，benchmark_compare 与浮盈口径会比 run 时略少）。
+
+    纯读入口：只读打开（旧格式 fail-fast），不做 schema 初始化/写操作——
+    init_backtest_db 会执行 DDL 与 DELETE FROM holdings，且与同进程只读
+    连接 / 跨进程读者产生 DuckDB 连接配置冲突。
     """
-    # 先经 init_backtest_db 打开一次，确保老库完成 stats_json 迁移
-    database.init_backtest_db(db_path).close()
-    conn = sqlite3.connect(db_path)
+    conn = database.connect_result_db(db_path, read_only=True)
     try:
         runs_df = database.read_runs(conn)
         if run_ids:

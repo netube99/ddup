@@ -4,7 +4,7 @@ Cross-Validation — 回测结果交叉验证（薄壳 CLI）。
 校验逻辑在 research/cross_validate.py（可 import 库，测试直接 import）。
 
 用法：
-  .venv/bin/python scripts/cross_validate.py result.db --strategy smart_money
+  .venv/bin/python scripts/cross_validate.py result.duckdb --strategy smart_money
 """
 
 import argparse

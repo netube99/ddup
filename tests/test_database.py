@@ -1,4 +1,3 @@
-import sqlite3
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,12 +6,14 @@ from btcore.database import (
     init_backtest_db,
     read_run_data,
     read_runs,
+    transaction,
     update_run_status,
     write_daily,
     write_holdings,
     write_run,
     write_run_stats,
     write_trade,
+    write_trades,
 )
 from tests.conftest import make_account, make_holding
 
@@ -43,14 +44,13 @@ def _write_run(conn, strategy: str = "test") -> int:
 
 def test_init_backtest_db():
     conn = init_backtest_db(":memory:")
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).fetchall()
-    table_names = [t[0] for t in tables]
-    assert "runs" in table_names
-    assert "account_daily" in table_names
-    assert "holdings" in table_names
-    assert "trade_log" in table_names
+    tables = {
+        r[0] for r in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert {"runs", "account_daily", "holdings", "trade_log",
+            "debug_snapshots", "ml_predictions"} <= tables
     conn.close()
 
 
@@ -63,6 +63,14 @@ def test_write_run():
     ).fetchone()
     assert row[0] == "test"
     assert row[1] == "running"
+    conn.close()
+
+
+def test_run_id_sequence_increments():
+    """DuckDB 无 AUTOINCREMENT：run_id 由 sequence 自增且跨重开延续。"""
+    conn = init_backtest_db(":memory:")
+    assert _write_run(conn) == 1
+    assert _write_run(conn) == 2
     conn.close()
 
 
@@ -108,6 +116,22 @@ def test_write_trade():
     conn.close()
 
 
+def test_write_trades_batch():
+    """批量写入：executemany 一次落多笔，id 按序自增。"""
+    conn = init_backtest_db(":memory:")
+    run_id = _write_run(conn)
+    trades = [FakeTrade(date="20240601"), FakeTrade(date="20240602", side="SELL")]
+    write_trades(conn, run_id, trades)
+    rows = conn.execute(
+        "SELECT id, date, side FROM trade_log ORDER BY id"
+    ).fetchall()
+    assert [(r[1], r[2]) for r in rows] == [
+        ("20240601", "BUY"), ("20240602", "SELL"),
+    ]
+    assert rows[0][0] < rows[1][0]
+    conn.close()
+
+
 def test_update_run_status():
     conn = init_backtest_db(":memory:")
     run_id = _write_run(conn)
@@ -119,9 +143,26 @@ def test_update_run_status():
     conn.close()
 
 
+def test_transaction_rollback():
+    """显式事务：异常回滚不落库，成功提交可见。"""
+    conn = init_backtest_db(":memory:")
+    run_id = _write_run(conn)
+    try:
+        with transaction(conn):
+            write_daily(conn, run_id, "20240601", 1.0, 1.0, 0.0, 0.0, 1.0)
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert conn.execute("SELECT COUNT(*) FROM account_daily").fetchone()[0] == 0
+    with transaction(conn):
+        write_daily(conn, run_id, "20240602", 1.0, 1.0, 0.0, 0.0, 1.0)
+    assert conn.execute("SELECT COUNT(*) FROM account_daily").fetchone()[0] == 1
+    conn.close()
+
+
 def test_multi_run_accumulate(tmp_path):
     """两次 init + 写入：runs 累积两行，trade_log 按 run_id 区分并可过滤。"""
-    db_path = str(tmp_path / "multi.db")
+    db_path = str(tmp_path / "multi.duckdb")
 
     conn = init_backtest_db(db_path)
     run1 = _write_run(conn, strategy="s1")
@@ -154,23 +195,6 @@ def test_multi_run_accumulate(tmp_path):
     conn.close()
 
 
-def test_old_schema_rebuilt(tmp_path):
-    """旧 schema（runs 无 run_id 列）检测后 DROP 重建为新 schema。"""
-    db_path = str(tmp_path / "old.db")
-
-    conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE runs (created_at TEXT, strategy TEXT)")
-    conn.execute("INSERT INTO runs VALUES ('x', 'old')")
-    conn.commit()
-    conn.close()
-
-    conn = init_backtest_db(db_path)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    assert "run_id" in cols
-    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
-    conn.close()
-
-
 def test_write_run_stats():
     """stats_json 写入并可读回；numpy 标量经 default 降级为 JSON 数值。"""
     conn = init_backtest_db(":memory:")
@@ -198,27 +222,4 @@ def test_read_run_data_no_stats():
     assert stats is None
     runs = read_runs(conn)
     assert list(runs["run_id"]) == [run_id]
-    conn.close()
-
-
-def test_stats_json_migration(tmp_path):
-    """老库（runs 有 run_id 无 stats_json）ALTER 迁移，历史行保留为 NULL。"""
-    db_path = str(tmp_path / "mig.db")
-
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "CREATE TABLE runs (run_id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " created_at TEXT, strategy TEXT, status TEXT)"
-    )
-    conn.execute("INSERT INTO runs (created_at, strategy, status)"
-                 " VALUES ('x', 'old', 'completed')")
-    conn.commit()
-    conn.close()
-
-    conn = init_backtest_db(db_path)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    assert "stats_json" in cols
-    row = conn.execute("SELECT strategy, stats_json FROM runs").fetchone()
-    assert row[0] == "old"
-    assert row[1] is None
     conn.close()

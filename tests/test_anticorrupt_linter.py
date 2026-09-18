@@ -7,7 +7,7 @@ from scripts import check_anticorrupt as ac
 
 
 def test_linter_passes_on_repo():
-    """整个仓库当前必须通过全部 13 项检查。"""
+    """整个仓库当前必须通过全部 14 项检查。"""
     r = subprocess.run(
         [sys.executable, "scripts/check_anticorrupt.py"],
         capture_output=True, text=True,
@@ -45,6 +45,12 @@ def test_stats_sqlite_detected(tmp_path):
     _make_tree(tmp_path, {"btcore/stats.py": "import sqlite3\n"})
     errs = ac.check_stats_pure(str(tmp_path))
     assert any("sqlite3" in e for e in errs)
+
+
+def test_stats_duckdb_detected(tmp_path):
+    _make_tree(tmp_path, {"btcore/stats.py": "import duckdb\n"})
+    errs = ac.check_stats_pure(str(tmp_path))
+    assert any("duckdb" in e for e in errs)
 
 
 def test_factors_infra_dep_detected(tmp_path):

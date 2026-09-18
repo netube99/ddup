@@ -4,7 +4,7 @@
 两种接入方式（二选一）
 ============================================================================
 
-A) 填表法（SQLite 数据库，数据在表里）
+A) 填表法（DuckDB 数据库，数据在表里）
    子类化 btcore.generic_sql.GenericSQLBackend，只填一个 Python dict 说明
    "表名.字段名" 的位置。零 SQL，全部由通用机械自动生成。
    完整示例见 adapters/tushare.py，教程见 docs/backend_guide.md §2。

@@ -95,7 +95,7 @@ conditions:
 # holding scope：标签 = 回测结果库 trade_log 中 TREND_BREAK 触发且净亏损的持仓回合
 .venv/bin/python scripts/ml_train.py strategies/my_strategy/config.yaml \
     --model tb_guard --start 20220101 --end 20250630 \
-    --db results/baseline.db --lookahead 3
+    --db results/baseline.duckdb --lookahead 3
 ```
 
 holding 标签只消费单一 run 的 trade_log：多 run 结果库缺省取最新

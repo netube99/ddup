@@ -51,7 +51,7 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model alpha_xs \
     --start 20220101 --end 20250630 --horizon 5 [-v]
 # holding（持仓预警模型；--db = 标签来源的历史回测库，必需）
 python scripts/ml_train.py strategies/my_strategy/config.yaml --model exit_guard \
-    --start 20220101 --end 20250630 --db results/base_run.db --lookahead 3
+    --start 20220101 --end 20250630 --db results/base_run.duckdb --lookahead 3
 ```
 - 标签：panel = horizon 日前向收益 close_hfq 截面 pct rank；holding = trade_log 回合重构，正样本=TREND_BREAK 且净亏损、距卖出∈[1,lookahead]
 - holding 标签只消费单一 run：`--run-id` 显式指定，缺省取最新 completed run（无 completed 回退最新 run，多 run 时 warning）；同日公司行为（DIV/STK_DIV 盘前）先于买卖，红利计入在持回合 pnl，实盘账本 ADJUST 审计行跳过

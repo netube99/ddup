@@ -10,15 +10,15 @@ description: ddup 实盘账本每日操作流程与故障排查：数据更新 �
 ## 每日节奏（收盘后，券商数据落地后）
 
 1. **更新行情库**（日线含 adj_factor；数据未更新时 signal 报"无行情数据"）
-2. **sync**：`python scripts/live.py sync live/main.db sync.yaml` — 全量账户信息一次性给到位
-3. **signal**：`python scripts/live.py signal live/main.db strategies/selected/<cfg>/config.yaml [--date D] [--out opsheet.json]`
+2. **sync**：`python scripts/live.py sync live/main.duckdb sync.yaml` — 全量账户信息一次性给到位
+3. **signal**：`python scripts/live.py signal live/main.duckdb strategies/selected/<cfg>/config.yaml [--date D] [--out opsheet.json]`
 4. **盘前执行**：open_sells/open_buys 开盘手动单；broker_conditions 设券商条件单（触发价精确、当日有效、每日重设）；同票多单首触后撤其余
 
 sync.yaml 格式：`date/cash/holdings[{symbol,shares}]/fills[{symbol,side,price,shares,commission,stamp_tax,transfer_fee,reason}]`（全量账户信息一次性给到位，可为空 fills）。
 
 ## 子命令
 
-- `init`：`live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]` 建账——positions 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账（entry_date/entry_price 用于 holding_days 与 trailing 锚点重建）；缺省空仓开局
+- `init`：`live.py init live/main.duckdb --date 20260731 --cash 40000 [--positions p.yaml]` 建账——positions 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账（entry_date/entry_price 用于 holding_days 与 trailing 锚点重建）；缺省空仓开局
 - `sync`：每日对账——追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST`（<0.01 忽略；>100 元 warning，可能是出入金/漏录费用）
 - `signal`：全量回放 → 明日操作单 JSON：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（每只持仓 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌、T+1 锁定）；衍生表（runs/trade_log/account_daily/holdings）整体重写，**与回测结果库同 schema**——report/cross_validate/replay 直接可用
 - `status`：最近一日 account_daily、持仓快照（ledger_holdings）、最近 10 条成交
@@ -49,4 +49,4 @@ sync.yaml 格式：`date/cash/holdings[{symbol,shares}]/fills[{symbol,side,price
 
 ## 回归验证
 
-引擎/机制改动后跑 `python scripts/live_e2e_check.py [--bt-db 回测库] [--ledger 账本]`：以回测 result.db 为 ground truth 模拟 23 个交易日（init → 每日 sync → 每日 signal），操作单必须与回测次日实际成交**逐符号逐 reason 一致**；坏 statement 拒绝、中途建账播种与全程回放等价。
+引擎/机制改动后跑 `python scripts/live_e2e_check.py [--bt-db 回测库] [--ledger 账本]`：以回测结果库为 ground truth 模拟 23 个交易日（init → 每日 sync → 每日 signal），操作单必须与回测次日实际成交**逐符号逐 reason 一致**；坏 statement 拒绝、中途建账播种与全程回放等价。

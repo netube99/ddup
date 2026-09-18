@@ -1,0 +1,282 @@
+meta:
+  date: 2026-09-16
+  scope: 因子库设计审查（217 因子全覆盖，7 个并行子代理 + 主控复核）
+findings:
+  # ── 主控 lead 发现 ──
+  - id: F-FD0-05
+    severity: P1
+    rule: "AGENTS.md 设计契约：不产生静默错误结果 / 崩溃；docs/factor_library.md §4 纯表达式路径应对任何合法面板产出 NaN"
+    file: btcore/factors/expr.py
+    line: 90
+    note: "事件表在请求窗口内零行时 GenericSQLBackend 返回 object dtype 全 NaN 列（空结果集 dtype 推断），pandas.eval 对这类列抛 TypeError/RecursionError 而非产出 NaN：实测 pledge_detail 空表下 compute_factors(['pledge_risk']) 抛 RecursionError（2026-09-16 探针）；任何纯表达式因子引用窗口内无数据的事件列都会崩溃（如 lhb_*/inst_* 在无上榜窗口）。修复：求值路径统一 coerce_all_nan_object_columns 把 object 全 NaN 列转 float64（expr.evaluate_expr 与 ops.eval_op_expr 两路径），回归测试 test_all_nan_object_columns_do_not_crash。"
+  - id: F-FD0-01
+    severity: P1
+    rule: "docs/factor_library.md §9.2：pct_chg = (close - pre_close) / pre_close（小数口径，非百分数）"
+    file: factors/library.yaml
+    line: 514
+    note: "limit_up_pct 表达式 mean(pct_chg >= 9.8) 阈值量纲错：pct_chg 是小数，9.8 是百分数，比较恒 False。DB 实证 20240930（3185 只涨幅≥9.8%）：SQL AVG((close/pre_close-1)>=9.8)=0.000179；compute_breadth('limit_up_pct') 实测 0.000179，而同日的 limit_down_pct（用小数阈值 -0.095）工作正常（20241009=0.546）。第十四轮注释却记为『+0.061 弱正』——对恒零因子下了结论。"
+  - id: F-FD0-02
+    severity: P1
+    rule: "docs/factor_library.md §12：坍缩算子始终在全市场面板上逐日聚合，候选池大小不影响其值"
+    file: factors/library.yaml
+    line: 63
+    note: "pct_sealed=mean(fd_amount>0) 的广度面板请求列仅 fd_amount → btcore/generic_sql.py:189-192 的网格=各被引用表 (trade_date,symbol) 键外并集，网格退化为 limit_list_d 事件行，全市场分母被静默丢弃（引擎 _preload_breadth 同样按 breadth_columns 请求，engine.py:606-609）。实测 20240923：compute_breadth('pct_sealed')=0.780822（=57/73 事件行内占比），真实全市场封板占比=57/5590=0.010197；同一函数追加 close 请求后即得 0.010197——因子值取决于同批请求的其它列。第十四轮『pct_sealed corr +0.139』择时结论建立在错误口径上。"
+  - id: F-FD0-03
+    severity: P2
+    rule: "adapters/tushare.py extra_fields 是列登记唯一事实源，未登记列运行期拒绝（fail-fast）"
+    file: factors/library.yaml
+    line: 527
+    note: "accrual_z(527) 引用 net_profit/n_cashflow_act，cfo_quality(535) 同，leverage_change(543) 引用 total_liab：三列均未在 adapters/tushare.py extra_fields 登记，实库 PRAGMA table_info(bak_basic) 亦无这些列（只有 total_assets/liquid_assets 等）→ 三个因子不可物化（策略引用即 preload 报错），描述里的『⚠ 需 bak_basic 表含…列』从未落实，属死定义。"
+  - id: F-FD0-04
+    severity: P2
+    rule: "factors/library.yaml:9 顶部通告：本文件所有修正前的 RankIR/分层/衰减数字均失效，需用修复后的 factor_eval 重测"
+    file: factors/library.yaml
+    line: 9
+    note: "评估标注系统性失效：大量段落仍把作废数字写成『★通过/有效/旗舰』，与同文件修正后结论/顶部通告直接互斥。例：winner_rate_z(172『筹码簇真实有效』) vs 通告 -0.11/-0.09；close_vs_cost50(182『0.41/0.48』) vs -0.04/-0.03；cvw_ma5(766『★0.574/0.282 比裸 cvw 强一倍』)与 cvw_chg5/cvw_neutral(774-786) vs -0.06/-0.03；winner_chg20(857『★0.51/0.62』) vs 0.00/0.02；技术指标蒸馏节(261-319)全部 2026-07-27 数字；中性化节(354-373『0.64/0.53/0.54/0.49/0.52』与 mom5『0.83』) vs 重测 mom 族 -0.07~-0.15；基本面节(326-348)与 1276 行符号相反；事件/低拥挤段(377-397/1241-1274)同类。第 15/16 轮『★ 全存活』与 1285-1291『此前通过判定全部撤销』同页并存，读者无法区分有效/作废（策略层后果见 F-FDX-06）。"
+  # ── 第 1 组：基础/事件/资金流/筹码/两融/量价 ──
+  - id: F-FD1-01
+    severity: P1
+    rule: "docs/audit_checklist.md D-EXT-02 量纲核对（量纲错不报错、全链路静默错）；adapters/tushare.py:23 amount 注释为千元"
+    file: factors/library.yaml
+    line: 164
+    note: "mf_divergence=(buy_lg_amount-sell_lg_amount)/amount：moneyflow 金额列单位为万元，amount 为千元，资金流项被系统性压低 10 倍。DB 实证 000001.SZ 20240605：moneyflow 四档买单合计 111415.6（万元）= stk_factor_pro.amount 1114156.0（千元）÷10。探针（两日面板 n=5090）：现值与 -roc(close_hfq,5) 相关 0.9944，正确量纲版 0.6236，Spearman(现值,正确值)=0.6576 → 截面排序被改变，『资金流与价格背离』实质退化为 5 日反转；该因子被 strategies/selected/trend_guard_bw_300（weight 0.15）等消费。"
+  - id: F-FD1-02
+    severity: P2
+    rule: "docs/audit_checklist.md D-EXT-02 量纲核对；adapters/tushare.py:23 amount 千元"
+    file: factors/library.yaml
+    line: 143
+    note: "lg_net_rate/elg_net_rate/md_net_rate/total_net_rate/lg_net_ma5/elg_net_ma5（143/146/149/152/155/158）同源：moneyflow 万元 ÷ amount 千元 = 真实占比×0.1。截面排名不受常数缩放影响，但任何绝对阈值（如 where: lg_net_rate > 0.05）静默错 10 倍；lg_net_z 经 zscore 抵消、数值正确。"
+  - id: F-FD1-03
+    severity: P2
+    rule: "factors/library.yaml:51 描述『涨停封单金额/流通市值（封板强度，仅封板日有值）』；adapters/tushare.py:181 limit_flag: U涨停/D跌停/Z炸板"
+    file: factors/library.yaml
+    line: 49
+    note: "limit_list_d 的跌停(D)行 fd_amount/open_times/limit_times 同样有值，where fd_amount>0 不区分 U/D → seal_strength/limit_solidity/sealed_days5 把跌停日计为『涨停封板』。DB 实证 2024 全年：D 行 5881 行全部 fd_amount>0（如 603863.SH 20240605 limit_times=2 且当日 -10.01%），U 行 17761 → 约 25% 的『封板』观测来自跌停；sealed_days5 被 selected/core_lowvol_500 作为评分因子消费，信号含义被静默改写。"
+  - id: F-FD1-04
+    severity: P2
+    rule: "factors/library.yaml:58 描述『连板数（仅上榜日有值，原始事件列）』"
+    file: factors/library.yaml
+    line: 57
+    note: "limit_streak=limit_times 无掩码，而 D(跌停)行 limit_times 为连续跌停天数 → 『2 连板』与『2 连跌停』同值（20240605 实例 603863.SH=2，当日 -10.01%）；Z 行全 NULL。U/D 在因子值上不可区分。"
+  - id: F-FD1-05
+    severity: P2
+    rule: "docs/factor_library.md §10.1 ascending: true=小值排名靠前；§11.4 陷阱三（ascending 语义写反）"
+    file: factors/library.yaml
+    line: 101
+    note: "rev_5d=-roc(close_hfq,5)：expr 高值=过去 5 日输家。描述『买跌卖涨，升序排名』三处互斥：升序（值小优先）选出的是过去涨幅最大者（买涨）；要执行『买跌』须降序（取 -roc 最负）。策略按字面配置会反向，同型见 rev10_z(229) 与 F-FD2-05。"
+  # ── 第 2 组：筹码/两融/量价/技术指标 ──
+  - id: F-FD2-01
+    severity: P1
+    rule: "AGENTS.md 设计契约·价格体系：因子计算、排名使用后复权（*_hfq），不可混用；docs/factor_library.md §9.2"
+    file: factors/library.yaml
+    line: 266
+    note: "pct_b/cci_z/macd_golden/macd_z/kdj_golden/pdi_mdi/mfi_z/close_vs_bbi/ema_bullish（266-306）消费 adapters/tushare.py:75-137 注册的 *_bfq（不复权）列，而同表 *_hfq 变体齐全且有值（boll_upper/lower_hfq、cci_hfq、macd_*_hfq、kdj_*_hfq、dmi_*_hfq、mfi_hfq、bbi_hfq、ema_hfq_*，2018 起全量）。除权日实测 000429.SZ 20260810：pct_b_bfq=-0.1933 vs pct_b_hfq=+0.0680（符号相反）；macd_dif_bfq=-0.032 vs hfq=+0.23。261 行注释自述 bfq 口径，属已知契约违背（9 因子中 7 个被策略/ML 消费）。"
+  - id: F-FD2-02
+    severity: P1
+    rule: "因子描述『净买入压力占比（bak_daily 口径）』（占比需同量纲）；docs/backend_guide.md vol 单位为手"
+    file: factors/library.yaml
+    line: 257
+    note: "net_buy_pressure=(bk_buying-bk_selling)/amount = 手 ÷ 千元，异量纲比。DB 实证 000001.SZ 20260916：buying=383663、selling=565963、vol=949626（手），amount=1106652.94（千元）→ 比值 -0.1648 手/千元；跨截面被价格水平污染（高价股比值偏小），不是任何『占比』。"
+  - id: F-FD2-05
+    severity: P3
+    rule: "docs/factor_library.md §11.4 陷阱三（ascending 与 IC 符号）"
+    file: factors/library.yaml
+    line: 230
+    note: "rev10_z=zscore(-roc(close_hfq,10)) 高值=过去 10 日输家；description 同时写『反转』与『升序』互斥（买跌应降序）。与 F-FD1-05 同型。"
+  - id: F-FD2-06
+    severity: P3
+    rule: "AGENTS.md 财报数据对齐契约 + adapters/tushare.py:272-277 注释（stk_holdernumber_agg 按 ann_date 对齐）"
+    file: factors/library.yaml
+    line: 244
+    note: "holder_count 描述『仅定期报告日有值』与数据事实不符：agg 表按 ann_date 对齐；2026 年 ann_date=end_date 行中 end_date 为季末仅 110/18716，样本多为 20260731/20260720 等 → 实为月度级公告快照。无前视，但描述低估披露频率、误导口径判断。"
+  - id: F-FD2-07
+    severity: P3
+    rule: "docs/factor_library.md §8：where 是后置掩码，表达式先完整求值（不保护 where 之前的滚动窗口）"
+    file: factors/library.yaml
+    line: 200
+    note: "margin_ma5=ma(rzmre/rzye,5) 滚动前无分母保护：margin_detail 中 rzye=0 共 204 行（其中 145 行 rzmre>0 → +inf），rolling mean 窗口含 inf 即整窗 NaN，此后 4 日 margin_ma5 静默 NaN；where rzye>0 只掩当日。当前 204 行均为基金代码（不在 stk_factor_pro 股票池），未实际污染，属潜在缺陷。"
+  # ── 第 3 组：基本面/中性化/事件/尾部风险/规模/广度 ──
+  - id: F-FD3-01
+    severity: P1
+    rule: "AGENTS.md 软回退 vs Fail-Fast（明确声明的依赖缺失→加载/preload 报错）；factors/library.yaml:1168『pledge_detail/stk_holdernumber 同理解锁——holder_count/pledge_risk 恢复可用』"
+    file: factors/library.yaml
+    line: 395
+    note: "DB 实况：pledge_detail 0 行、pledge_detail_agg 0 行（其它事件表已更新至 20260916），tushare_db/database/etl.py REGISTRY 无 pledge_detail 拉取项 → pledge_p_total_ratio/pledge_h_total_ratio 恒 NaN，pledge_risk 全程全 NaN 且无任何报错；而 379/396 行注释与 1168 行『恢复可用』仍记 RankIC -0.03『方向正确』，与数据实况矛盾。"
+  - id: F-FD3-02
+    severity: P1
+    rule: "adapters/tushare.py:234-236 列登记『机构席位净买入』；factors/library.yaml:384 描述『机构席位净买入』"
+    file: factors/library.yaml
+    line: 383
+    note: "DB top_inst 129347 行 = 129347 个 distinct (ts_code,trade_date)，PK(trade_date,ts_code) 折叠（INSERT OR REPLACE 每股每日只留单席位行），与 tushare top_inst 的逐席位多行语义不符；全表 exalter='机构专用' 仅 15116/129347=11.7%。inst_net_buy/inst_buy_rate 实为『单一任意席位值』而非机构席位合计，因子语义静默错误（inst_net_buy_z/inst_buy_pct 均为低信号保留区，但描述错误）。"
+  - id: F-FD3-03
+    severity: P1
+    rule: "因子描述声明『20日收益偏度 / 超额峰度（矩展开近似）』；docs/audit_checklist.md FA-OP-02（分母/NaN 语义）"
+    file: factors/library.yaml
+    line: 444
+    note: "ret_kurt20/ret_skew20 分母保护项 1e-4 与 std^4/std^3 量级失配：DB 实测日收益 std 0.0165-0.0291 → std^4=9.1e-8~7.2e-7，1e-4 大 139~1100 倍，对绝大多数个股近似常数 → ret_kurt20≈m4/1e-4-3（由四阶矩/波动尺度主导）而非峰度；ret_skew20 同型（std^3 仅占 1e-4 的 2%~20%，偏度被常数压缩）。对比 sharpe_20 的 1e-4（分母 std 量级 1e-2）合理，可见幂次后未同步缩放 epsilon。"
+  - id: F-FD3-04
+    severity: P3
+    rule: "factors/library.yaml:431 注释（EDGE-14）对布尔掩码 NaN 行为的方向性声明"
+    file: factors/library.yaml
+    line: 431
+    note: "说明写反：ops.py 比较 .astype(float) 把掩码 NaN 变为 0.0，随后 0.0×NaN=NaN（IEEE 语义），warmup 首行 NaN 被保留；实测 roc(close_hfq,1)*(roc(close_hfq,1)<0) 首行输出 NaN，与 min(x,0) 的 NaN 处理一致，不存在描述所称『首行计为 0 收益』的差异。行为正确、文档错误。"
+  - id: F-FD3-05
+    severity: P2
+    rule: "factors/library.yaml:389/392 描述『连板封单量』；adapters/tushare.py:238 kpl_lu_limit_order=连板封单量"
+    file: factors/library.yaml
+    line: 391
+    note: "kpl_lianban 取 kpl_list.lu_limit_order（当日涨停封单量，20240605 量级 3.6e7~9.9e8），kpl_list 表无任何连板数字段（连板数在 limit_list_d.limit_times）→ 因子名承诺『连板数』，实际给的是封单量原始值，『连板封单量』把两个概念混写。"
+  - id: F-FD3-08
+    severity: P2
+    rule: "factors/library.yaml:465 描述『近5日主力净流入天数（0-5）』；docs/audit_checklist.md FA-OP-02（比较式 NaN 语义）"
+    file: factors/library.yaml
+    line: 464
+    note: "ops 比较把 NaN 折为 False→0，源列缺失日被静默计为『非流入』而非未知；实测 sum(dc_net_rate>0,3) 对 [1,NaN,-2] 输出 1（窗口内 1 正 1 负 1 缺失）。moneyflow_dc 仅 2023-09-11 起，此前回测该因子对全部个股恒 0（无截面变异、无告警），描述未标覆盖起点与缺失语义。"
+  - id: F-FD3-09
+    severity: P3
+    rule: "docs/factor_library.md §10.1 ascending 语义（方向标注须与收益方向自洽）"
+    file: factors/library.yaml
+    line: 441
+    note: "ret_skew20 自述『高偏度→低未来收益』却标『降序排名』（应升序）；amihud_illiq(404) 自述『低流动性溢价（升序）』而低流动性溢价通常指高 illiq 高收益（应降序）。与 vol_z/downside_vol20 的自洽写法对照可见不一致。"
+  # ── 第 4 组：ML 特征/尾盘/资金流微结构/超额/beta ──
+  - id: F-FD4-01
+    severity: P1
+    rule: "factors/library.yaml:702-704 自述『与 dc_net_rate 区别：net_rate 看净流入，本因子看买盘总量强度（不分卖盘对冲）』；adapters/tushare.py:201-204 登记为『买入占比』"
+    file: factors/library.yaml
+    line: 700
+    note: "moneyflow_dc 的 buy_elg/lg/md/sm_amount_rate 实为分档净流入率（四档对消），不是买入占比：DB 20240603 000001.SZ net_amount_rate=-6.47=elg(-4.0)+lg(-2.47)，md+sm=+6.47；两日 11452 行中 elg+lg≡net（|差|≤0.01）。故 dc_big_buy_rate ≡ dc_net_rate（zscore 版即 hot_money:78），『买盘总量强度』的区分声明为假；dc_sm_buy_z(687)/dc_elg_sm_div(693) 同错，且注释推荐『优先取本因子』→ 组合会双计同一净流入信号。"
+  - id: F-FD4-03
+    severity: P1
+    rule: "docs/factor_library.md §6.1 roc『基准值为 0 处得 NaN』；docs/audit_checklist.md FA-OP-02（NaN/分母语义）"
+    file: factors/library.yaml
+    line: 606
+    note: "roc_decay=roc_3/(roc_10+0.0001)-1 的 epsilon 对负/零分母无效且制造极端值：实测（2023-2024，50 股 24027 行）roc_10==0 共 134 行（0.56%，最小报价单位下的 10 日往返，如 000001.SZ 20240627 vs 20240711 close_hfq 相同），这些行 roc_decay ∈ [-751,+1236.7]，全样本 |roc_decay|>10 占 2.7%；roc_10∈(-1e-4,0) 时还会分母变号。该因子被 docs/devlog/ml_signal_design.md:65 标为核心特征，应显式 NaN/where 而非 epsilon。"
+  - id: F-FD4-04
+    severity: P2
+    rule: "docs/backend_guide.md:292 net_mf_amount（万元）；amount 实库为千元"
+    file: factors/library.yaml
+    line: 596
+    note: "mf_raw=net_mf_amount/(amount+0.0001) 分子分母量纲差 10×（000001.SZ 20240603：-38491.51/1456086.02=-0.0264，同单位应为 -0.2644）；截面排名不受常数缩放影响，但水平值与阈值解读偏小 10 倍，mf_chg 继承。"
+  - id: F-FD4-05
+    severity: P2
+    rule: "库内冗余登记惯例（factors/library.yaml:785-792：close_vs_cost_avg 自述与既有因子 corr 0.97 二选一）；:265 已登记 pct_b"
+    file: factors/library.yaml
+    line: 580
+    note: "bb_position=(close-boll_lower)/(boll_upper-boll_lower+0.0001) 与 pct_b 是同一定义：实测 24027 行 |差| max 8.2e-4（p99 3e-4）。差异仅 pct_b 有 where 掩码无 epsilon、bb_position 无 where 加 1e-4（退化带 upper==lower 时产出极端值）。未标注等价关系 → ML/多因子同时声明即同一特征/信号双计。"
+  - id: F-FD4-06
+    severity: P2
+    rule: "factors/library.yaml:729-733 自述『截面排名 ≡ mom5/mom20』；:37 mom_z 已存在"
+    file: factors/library.yaml
+    line: 741
+    note: "alpha_z5=zscore(alpha_mom5) 恒等于 zscore(mom5)；alpha_z20(743) 恒等于 mom_z(37)——zscore 对逐日截面常数平移不变，alpha_mom* 减 idx_ret 后『市场相对口径更稳健』的保留价值在 z 变换后完全消失；factor_specs 同时引用即同一信号双倍权重。"
+  - id: F-FD4-07
+    severity: P2
+    rule: "docs/ml_guide.md §1 训练与回测同源（同一定义/同一物化链）；docs/factor_library.md §9.3 benchmark 推导规则"
+    file: scripts/ml_train.py
+    line: 133
+    note: "引擎在 config.benchmark 缺省时从 filter_rules.index_universe 推导基准（btcore/engine.py:346-353），ml_train 只读 config.benchmark、不做同一推导 → 含 idx_ret 的特征因子（alpha_mom5/20、alpha_z5/20、idio_vol20、beta20、mkt_corr20）在『单指数 index_universe 且未显式写 benchmark』的策略中：引擎回测可跑，ml_train 的 build_panel→derive_idx_ret 直接 ValueError（btcore/factors/plan.py:117-121）。训练/回测同源契约在基准解析环节不成立。"
+  - id: F-FD4-08
+    severity: P3
+    rule: "docs/audit_checklist.md FA-OP-02（比较式 NaN→False 的静默语义）"
+    file: factors/library.yaml
+    line: 610
+    note: "mom_diverge=(roc_3>0)!=(roc_10>0)：比较式对 NaN 返回 False，单边 NaN（新股 roc_10 窗口未满而 roc_3 已可算）被编码为 1=转向信号；ML 特征无 NaN 掩码 → 新股前 10 个交易日为虚假分歧。"
+  - id: F-FD4-09
+    severity: P3
+    rule: "docs/audit_checklist.md FA-OP-02（零分母约定）"
+    file: factors/library.yaml
+    line: 640
+    note: "volume_impulse=volume_ratio/delay(volume_ratio,5)-1 无零保护：实库 2024 年 volume_ratio==0 有 36 行，若落分母位则输出 ±inf 进入面板/ML 特征；turnover_chg(643) 同构造但 2024 年 turnover_rate 零值 0 行，未触发。"
+  # ── 第 5 组：cvw/筹码变化/收益分解/影线/行业内排名/坍缩 ──
+  - id: F-FD5-01
+    severity: P1
+    rule: "docs/audit_checklist.md D-EXT-02 量纲核对；因子描述『融券偿还额/融券余额』"
+    file: factors/library.yaml
+    line: 1015
+    note: "short_repay=rqchl/rqye 把股÷元：tushare margin_detail 中 rqye 为金额(元)，rqchl/rqmcl/rqyl 为股数。DB 20250110 截面 n=2280：rqye/rqyl 与 close 逐行相等（偏差<4e-5），故 rqchl/rqye≡(rqchl/rqyl)/close，量纲 1/元，截面排序被 1/price 污染（Spearman 0.118）；short_open(1097)=rqmcl/rqye 同缺陷（0.199）。修正：rqchl/rqyl、rqmcl/rqyl。"
+  - id: F-FD5-02
+    severity: P2
+    rule: "factors/library.yaml:816-817 自述『rep_amount 单位万元，circ_mv 单位万元，比值无量纲』"
+    file: factors/library.yaml
+    line: 813
+    note: "repurchase.amount 实为元：DB 600821.SH 20260612 vol=4,003,000 股 / amount=25,652,800 → 隐含价 6.41 元/股；circ_mv 为万元 → rep_amount/circ_mv 比描述值大 1e4（实测值 4.05~231.8，真占比 4e-4~2.3e-2）。截面排序不受常数缩放影响，但『比值无量纲』承诺使按绝对值设阈值的消费方错 1e4 倍；w_rep_intensity(1092) 同源。"
+  - id: F-FD5-03
+    severity: P2
+    rule: "AGENTS.md 财报/公告数据按公告日对齐成日频列的契约；adapters/tushare.py:271 repurchase date=ann_date"
+    file: factors/library.yaml
+    line: 812
+    note: "rep_amount 以 ann_date 直接落成 trade_date：ann_date 为非交易日时该行只有 rep_amount、circ_mv 无 bar → where 掩码后 NaN；下一交易日行又无 rep_amount → 公告永不可见（不是『其余日期 NaN』的延迟语义）。DB：13.1%（8108/61685）的 ann_date 非 SSE 交易日；probe 688326.SH 20260718（周六）公告在全窗无 rep_intensity，对照 20260715 得 136.65。既有 pension_float_daily 会滚动到下一交易日，此处未做。"
+  - id: F-FD5-04
+    severity: P2
+    rule: "factors/library.yaml:952-954 描述『距涨停价空间（0=涨停收盘）』；AGENTS.md 五要素边界情况"
+    file: factors/library.yaml
+    line: 950
+    note: "新股首日 stk_limit.up_limit 为哨兵 999999.999/99999.999（2024-2025 共 910 行），dist_to_limit 达 27699.8/4829.9，where 只护 close>0 → 截面极大离群值进入 zscore/中性化/ML；且各板块涨跌停带宽不同（主板 10%/ST 5%/创业科创 20%/北交 30%），20250110 dist_to_limit 与板块带宽 Spearman=0.751——因子主要排序『板块带宽』而非距涨停远近，描述未提示。"
+  - id: F-FD5-06
+    severity: P2
+    rule: "AGENTS.md 五要素边界『空名单是预期行为』；factors/library.yaml:960-961 描述『下跌市自动空仓』"
+    file: factors/library.yaml
+    line: 958
+    note: "cvw_mkt_gate=cvw_ma5*(sum(idx_ret,20)>0) 在下跌日整列恒 0（全截面无区分度），并非『空仓』；策略模板 sort_values(ascending=False).head(top_k) 对并列 0 仍买满 k 只，且与真实 cvw_ma5≈0 的值混叠。若意图门控关闭应改用 where 使整列 NaN 后 dropna。"
+  # ── 第 6 组：低拥挤/行业内排名/re_attack/养老 ──
+  - id: F-FD6-01
+    severity: P1
+    rule: "adapters/tushare.py:254『pen_age 距披露日自然日数（新鲜度）』+ factors/library.yaml:1434『400 自然日归零』"
+    file: factors/library.yaml
+    line: 1431
+    note: "DB pen_age 实为 YYYYMMDD 整数差而非自然日数（tushare_db/scripts/_derived_tables.py:77 用整数日历值相减）：618295 行中 347747 行（56.2%）>400，max 18903 → pen_decay_pct=pen_ratio*(1-pen_age/400) 对 56% 的行为负（极端 -46.26 倍），跨月跳变（001221.SZ 20261231 pen_age=421 vs 真实自然日 143）；where 只挡 pen_ratio>0，负值全部放行。"
+  - id: F-FD6-02
+    severity: P1
+    rule: "因子描述『养老组合合计持股占总股本比(%)』；AGENTS.md 财报对齐 + 不产生静默错误结果"
+    file: factors/library.yaml
+    line: 1419
+    note: "refresh_pension_daily.py 的事件聚合仅 GROUP BY (ts_code,ann_date) 丢弃 end_date：同一次公告同时携带上年年报与一季报两条同持有人记录时 SUM 双计。实例 000089.SZ ann=20260424（end_date=20251231 与 20260331）：pen_ratio_sum=2.3006=2×1.1503，pen_chg_sum=-614900 为跨期混合；全库 311 个事件组/209 只股票，前向携带约 400 自然日 → pen_held_pct/pen_float_pct/pen_decay_pct/pen_add_ev 全部受影响。"
+  - id: F-FD6-03
+    severity: P1
+    rule: "factors/library.yaml:1173 描述『股东增减持比例截面标准化（>0 增持，<0 减持）』——列必须保方向"
+    file: factors/library.yaml
+    line: 1170
+    note: "stk_holdertrade.change_vol/change_ratio 均为无符号数量（MIN=0，负值 0 行），方向在独立列 in_de；VIEW stk_holdertrade_agg 未使用 in_de → insider_chg_ratio 恒 ≥0，『<0 减持』不可达。实例 600267.SH 20230520 change_ratio=47.10 来自纯减持（DE）却为大正值，zscore 后与增持同向排名。"
+  - id: F-FD6-04
+    severity: P2
+    rule: "factors/library.yaml:1441-1442 描述『仅披露日附近非零，是事件型信号（加仓确认），非状态型』"
+    file: factors/library.yaml
+    line: 1441
+    note: "carry_expand 把 pen_chg_sum 逐日前向携带：001221.SZ ann=20260810 的 -407200 连续携带 271 个交易日（20260810~20270913），002568.SZ 同；pen_add_ev 实为最长约 400 自然日的陈旧状态信号；pen_combo_n『当期在榜』在养老实际退出后同样可保留 400 天（脚本 docstring『退出后信号失效』与实现不符）。"
+  # ── 第 7 组：文档/标注/可用性横切 ──
+  - id: F-FDX-01
+    severity: P3
+    rule: "AGENTS.md 接口/数据变更须同批更新 docs；docs/factor_library.md:975 自述零引用判定口径"
+    file: docs/factor_library.md
+    line: 966
+    note: "§18 写『现有 126 个因子…86 个零引用』，实际库 217 个因子；按文档口径重跑实际零引用 157 个，清单漏列 78 个（cvw_ma5/winner_chg20/re_attack_*/pen_*/ind_rank_* 等），清单内 9 个已被引用（winner_rate_z/margin_change/vol10 见 strategies/exploring/ml_lowcrowd/models/alpha_xs.meta.json；close_vs_cost50 见 core_five_500 config 等）。ARCHITECTURE.md:19/174 同错。"
+  - id: F-FDX-02
+    severity: P1
+    rule: "docs/factor_library.md:533-537：此前用 pct_change().shift() 链，扁平 shift 在 (trade_date,symbol) 面板跨 symbol 污染…2026-08-07 之前的评估数字全部作废"
+    file: docs/factor_library.md
+    line: 551
+    note: "§11.2 Python API 示例仍为修复前的反模式：fwd_ret = bars_df['close_hfq'].groupby('symbol').pct_change(5).shift(-5)。groupby.pct_change 返回原序（date-major）Series，链式 .shift(-5) 是扁平位移（d5 的 A 行取得 d6 的 C 行值），与 CLI/正确写法（research/factor_eval.py 的显式 groupby shift）完全不等价；且上一行自称『与 CLI 一致』。照抄示例会原样重现导致全库存量评估数字作废的污染 bug。"
+  - id: F-FDX-03
+    severity: P2
+    rule: "AGENTS.md 软回退 vs Fail-Fast（不产生静默错误结果）；docs/audit_checklist.md:164 声称全 NaN 由 validate_materialization 兜底"
+    file: btcore/factors/plan.py
+    line: 326
+    note: "validate_materialization 只遍历 collapse 因子（engine.py:551 同），非坍缩因子全 NaN 零告警（实测传入全 NaN 列返回 []）。库内事件/新数据因子（dc_* 2023-09 起、limit_list_d 2019-11 起、pen_*/rep_*/lhb_*/margin_* 等）均无数据起点元数据。实证：selected/core_lowvol_500 用 sealed_days5 且 runs 表窗口自 20180101，而 limit_list_d 首日 20191128 → 2018 年该因子输出恒 0（比较式 NaN→False，非 NaN），前约 23 个月静默失效；策略侧 eval_factor_specs 对全 NaN 因子 rank fillna(0)（btcore/strategy_tools.py:97）→ 单因子策略退化为索引序 top-k。"
+  - id: F-FDX-04
+    severity: P3
+    rule: "docs/factor_library.md:637『完全重复去重…mom60 与 mom_60d…后者重写为对前者的引用』+ audit_checklist.md:220『去重后只剩一份列』"
+    file: factors/library.yaml
+    line: 225
+    note: "库内 (expr,where) 完全重复组为 0；实际有 17 组纯名字别名（mom60←mom_60d、roc_5/10/20←mom5/10/20、close_vs_ma20←bias20、dc_big_money←dc_elg_rate、limit_streak←limit_times、lhb_inflow←lhb_net_rate、inst_buy_pct←inst_buy_rate、kpl_lianban←kpl_lu_limit_order、holder_count←holder_num、strength_raw←strength、pen_* 四组）。cse.rewrite 实证别名各自保留为独立节点（各自物化一列），文档『只剩一份列』不成立；factor_specs 同时列别名与原名为同一信号双倍权重，loader 无别名/重名检测。"
+  - id: F-FDX-05
+    severity: P3
+    rule: "docs/audit_checklist.md:164 D-EXT-01『因子用 sum(x>0,5) 计数时 NaN 与 0 不等价（ops sum 遇 NaN 整窗 NaN）』"
+    file: btcore/factors/ops.py
+    line: 403
+    note: "代码行为与 checklist 相反：比较运算先按 pandas 语义把 NaN 折成 False，再 .astype(float)→0，源列全 NaN 时 sum(cond,5) 窗口满后恒 0（实测 unique=[NaN(前 n-1 行), 0.]）。受影响：sum 族 sealed_days5/div_pay3y/mf_streak5/elg_streak5/mf_big_small_div 与 mean 族 pct_above_ma20/pct_sealed/adv_dec_ratio/limit_up_pct/new_high_ratio20/limit_down_pct/nh_nl_diff（分母把停牌/新股/窗口未满行计为 False）。另 FA-OP-02 引用的 _xs_log 在 ops.py 不存在（log 直挂 np.log，log(0)=-inf 非 NaN）。"
+  - id: F-FDX-06
+    severity: P2
+    rule: "factors/library.yaml:9 通告与 1285-1291『此前通过判定全部撤销』（策略配置不得依据作废数字）"
+    file: strategies/selected/trend_guard_bw_300/config.yaml
+    line: 19
+    note: "在产策略按作废数字配置评分：① trend_guard_bw_300 config.yaml:19-20 引用 cci_z RankIC IR=0.52、mf_divergence IR=-0.65（修正前蒸馏数字），该策略 cci_z/mf_divergence/macd_z/chip_support 合计 0.5 权重（:33-42），而修复后重测这些族为 -0.08~-0.11 或 ~0；② core_lowvol_500:37,40 用 rev_yoy_z/npr_z（库描述仍写『2025H1 无效』，与策略结论二者必有一错）；③ dv_tg_barbell:37 用 chip_support（同族 close_vs_cost50 已被撤销）。"

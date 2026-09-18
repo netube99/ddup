@@ -24,7 +24,7 @@ description: ddup 量化策略自主研究的元流程：多轮探索循环、�
 用行情库三个实测指标回答"当前环境适合什么策略"（数据表：`idx_factor_pro` 指数日频、`sw_daily` 申万行业日线）：
 
 1. **大小盘相对强弱**（决定 universe）：半年窗口 idx_factor_pro 首/末 close **配对相除**（MAX/MIN 是窗口极值不是收益，必须首末配对）；CSI500 vs CSI300 差 >8pp → 中盘牛（500 池 beta 顺风），CSI300 领先 → 大盘/价值市（500 池被 beta 拖累）
-2. **行业分化度**（决定行业动量可用性）：sw_daily 各行业窗口收益的 P90−P10 分化（sqlite3 无 STDDEV，用 Python statistics）；经验阈值：>45pp → 行业轮动市（industry_mom 有效），~25-33pp → 无区分度只剩换手损耗
+2. **行业分化度**（决定行业动量可用性）：sw_daily 各行业窗口收益的 P90−P10 分化（DuckDB 可用 `stddev_samp`/窗口函数直接算）；经验阈值：>45pp → 行业轮动市（industry_mom 有效），~25-33pp → 无区分度只剩换手损耗
 3. **前瞻 IC**（决定因子权重与持有期）：`python scripts/factor_eval.py "<候选因子>" --start <近6月> --end <今日> --decay 5,10 --universe <候选池>`；10d RankIC > 0.04 = 核心因子；价值因子 IC 转负 ≠ 权重归零（组合分散器，仅降权）
 
 输出格式：`当前环境 = X 型市场，适合 Y 机制，不适配 Z` + 三个指标数字，写进 research_state.yaml 再进下一轮。已证反例（勿重试）：universe 单换 300→500 只加 beta 不加 alpha；固定双周持有零离场全窗口差（TREND_BREAK 快切才是 alpha 引擎）。
@@ -36,7 +36,7 @@ Round N:
  1. 观察：读 results/research_state.yaml + 上轮一行摘要
  2. 假设："改 X 应改善 Y"（单变量，见 ddup-experiment-design）
  3. 实现：新建/修改策略或 sweep 配置（ddup-strategy-craft）
- 4. 验证：run.py 单点（必须显式 --out，否则 :memory: 蒸发）或 sweep.py 网格（缺省落盘 cwd/sweep_result.db，建议显式命名）
+ 4. 验证：run.py 单点（必须显式 --out，否则 :memory: 蒸发）或 sweep.py 网格（缺省落盘 cwd/sweep_result.duckdb，建议显式命名）
  5. 记录：state 文件追加一行摘要 + 更新方向状态
 
  每 2-3 轮：深度分析（ddup-backtest-analysis：trade_log SQL + cross_validate）
@@ -55,7 +55,7 @@ directions:
   - name: "方向A"               # 示意格式
     status: exhausted           # unexplored | exploring | completed | exhausted
     rounds: 3
-    best: "+12.3% / sharpe 0.9 / dd -15.0% (results/exploring_r3.db run_id=2)"
+    best: "+12.3% / sharpe 0.9 / dd -15.0% (results/exploring_r3.duckdb run_id=2)"
     finding: "一句话关键结论"
 current_direction: "方向B"
 next_plan: "下一轮要做的具体一件事"
@@ -70,7 +70,7 @@ round_log:
 
 禁止凭空续写，按此重建：
 
-1. **从 results/*.db 恢复轮次统计**：runs 表（run_id/strategy/start/end/status/stats_json→total_return/sharpe/max_drawdown）；命名约定 `r{N}_{实验名}_{窗口}.db` 按前缀归组重建方向；config_json 通常为空 dict，参数只能从 stats 反推，别假设完整
+1. **从 results/*.duckdb 恢复轮次统计**：runs 表（run_id/strategy/start/end/status/stats_json→total_return/sharpe/max_drawdown）；命名约定 `r{N}_{实验名}_{窗口}.duckdb` 按前缀归组重建方向；config_json 通常为空 dict，参数只能从 stats 反推，别假设完整
 2. **先核对引擎世代**（先于一切结论）：runs.created_at vs `git log` 提交时间——**旧引擎结果不可直接对比当前引擎**（如 2026-08 ML 子系统重构 `_ml_config`/`MLEvaluator` → models 节+meta v3，旧 run 的分数口径全变）；旧 run 只作方向线索，必须重跑当前引擎建新基线
 3. **存盘策略可加载性**：`load_strategy("strategies/selected/xxx/config.yaml")` 抛错=失效；加载成功 ≠ 行为正确（旧 `type: ml_feature` 被静默当普通评分因子；materialize_only 趋势因子丢失 → TREND_BREAK 永不触发）——回测前先跑一个窗口看 trade_log trigger 分布
 

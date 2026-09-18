@@ -1,8 +1,10 @@
 """btcore.factors.library 测试：因子库的加载、校验、DAG 与递归计算。"""
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from btcore.factors.expr import evaluate_expr
 from btcore.factors.library import (
     compute_breadth,
     compute_factors,
@@ -30,6 +32,28 @@ def _panel(rows: int = 30) -> pd.DataFrame:
         [10 + i * 0.1 + j for i in range(rows) for j in range(3)], index=idx
     )
     return pd.DataFrame({"close_hfq": close})
+
+
+def test_all_nan_object_columns_do_not_crash(tmp_path):
+    """回归（2026-09-16）：事件表窗口零行时后端返回 object dtype 全 NaN 列，
+    pandas.eval 会抛 TypeError/RecursionError；求值路径需先转 float64 得 NaN。"""
+    idx = pd.MultiIndex.from_product(
+        [["20240102", "20240103"], ["A", "B"]], names=["trade_date", "symbol"]
+    )
+    df = pd.DataFrame(
+        {
+            "fd_amount": pd.Series([np.nan] * 4, dtype=object),
+            "close": [1.0, 2.0, 3.0, 4.0],
+        },
+        index=idx,
+    )
+    out = evaluate_expr(df, "fd_amount / (close + 1)")
+    assert out.isna().all()
+    lib = load_library(
+        _write_lib(tmp_path, 'factors:\n  probe_z:\n    expr: "zscore(fd_amount)"\n')
+    )
+    out2 = compute_factors(["probe_z"], df, lib)["probe_z"]
+    assert out2.isna().all()
 
 
 class TestLoad:
@@ -401,10 +425,11 @@ class TestBoolSumSemantics:
             "ema_20": [2, 2, 3, 2, 2, 3],
             "ema_60": [3, 4, 2, 3, 4, 2],
             "ema_250": [4, 1, 1, 4, 1, 1],
-            # 空头信号：macd_dif<=dea / close<bbi / ema和<3 / pdi<mdi
+            # 空头信号：macd_dif<=dea / close_hfq<bbi / ema和<3 / pdi<mdi
             "macd_dif": [1, 1, 3, 1, 1, 3],
             "macd_dea": [2, 2, 2, 2, 2, 2],
             "close": [5, 5, 3, 5, 5, 3],
+            "close_hfq": [5, 5, 3, 5, 5, 3],
             "bbi": [3, 3, 3, 3, 3, 3],
             "dmi_pdi": [6, 6, 6, 6, 6, 6],
             "dmi_mdi": [1, 1, 1, 1, 1, 1],
@@ -434,7 +459,7 @@ class TestBoolSumSemantics:
         )
         expect = (
             (df["macd_dif"] <= df["macd_dea"]).astype(int)
-            + (df["close"] < df["bbi"]).astype(int)
+            + (df["close_hfq"] < df["bbi"]).astype(int)
             + (ema_sum < 3).astype(int)
             + (df["dmi_pdi"] < df["dmi_mdi"]).astype(int)
         )

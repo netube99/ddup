@@ -1,6 +1,6 @@
 """实盘 CLI 全流程核查（真实行情库）：init → 每日 sync → 每日 signal。
 
-以回测 result.db 为 ground truth，模拟窗口取回测 run 自身全部交易日：
+以回测 result.duckdb 为 ground truth，模拟窗口取回测 run 自身全部交易日：
   - signal(D) 的操作单 open_sells/open_buys 必须等于回测在 D 的次一交易日实际成交
   - sync 的 statement 来自回测账本（cash/持仓/当日成交全量），必须 ok
   - 中途插入一次错报持仓 → 必须回滚拒绝，随后正确 statement 必须通过
@@ -12,17 +12,18 @@
 import argparse
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 
 import yaml
 
+from btcore import database
+from btcore.generic_sql import connect_market_db
 from research.cli_common import latest_run_id
 
 _p = argparse.ArgumentParser()
-_p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.db")
-_p.add_argument("--ledger", default="live/e2e_check.db")
+_p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.duckdb")
+_p.add_argument("--ledger", default="live/e2e_check.duckdb")
 _p.add_argument("--yaml", default="strategies/selected/dv_lowvol_300/config.yaml")
 _p.add_argument("--start", default=None, help="建账日（缺省=回测首个交易日）")
 _args = _p.parse_args()
@@ -33,7 +34,7 @@ MARKET = None
 YAML = _args.yaml
 PY = ".venv/bin/python"
 
-conn = sqlite3.connect(BT)
+conn = database.connect_result_db(BT, read_only=True)
 # 最新 run 解析口径统一走 runs 表（此前查 trade_log，空 trade_log 的 run 会错位）
 rid = latest_run_id(conn)
 
@@ -47,10 +48,10 @@ def _market_path():
 
 
 def cal_next(d):
-    c = sqlite3.connect(_market_path())
+    c = connect_market_db(_market_path())
     nxt = c.execute(
         "SELECT cal_date FROM trade_cal WHERE is_open=1 AND cal_date>?"
-        " ORDER BY cal_date LIMIT 1", (d,)).fetchone()[0]
+        " ORDER BY cal_date LIMIT 1", [d]).fetchone()[0]
     c.close()
     return nxt
 
@@ -121,8 +122,8 @@ def fills_from(trades, date):
 def main():
     if os.path.exists(LEDGER):
         os.remove(LEDGER)
-    if os.path.exists("live/test_b.db"):
-        os.remove("live/test_b.db")
+    if os.path.exists("live/test_b.duckdb"):
+        os.remove("live/test_b.duckdb")
 
     # ── 模拟窗口 = 回测 run 自身的交易日（account_daily 逐日记录）──
     # 旧版写死 20260105,20260204 已过期；从回测库动态取，不再依赖过期日期
@@ -224,7 +225,7 @@ def main():
           f" holdings={len(r['holdings'])}")
 
     # ── 5) 中途建账（OPENING 播种）等价性：B 在 0108 建账 vs A 回放 ──
-    lb = "live/test_b.db"
+    lb = "live/test_b.duckdb"
     d = days[3]
     cash, holdings, entry = account_state(d)
     pos_file = "/tmp/live_e2e_positions.yaml"

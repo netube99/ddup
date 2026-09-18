@@ -16,7 +16,6 @@ Locks three behaviors:
 """
 
 import hashlib
-import sqlite3
 
 import numpy as np
 import pytest
@@ -25,6 +24,7 @@ pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
 pytest.importorskip("xgboost", reason="需要 xgboost")
 pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
 
+from btcore import database
 from btcore.engine import Engine
 from btcore.ml.dataset import build_panel
 from btcore.provider import DataProvider
@@ -122,7 +122,7 @@ def test_raw_only_panel_model_full_engine_run(tmp_path):
     # select 真实读到了 ml 列并据此交易（缺列会被 eval_factor_specs 报错）
     assert len(engine.strategy.FACTOR_SPECS) == 1
     trades = engine.account.holdings, engine.run_id
-    conn = sqlite3.connect(db)
+    conn = database.connect_result_db(db, read_only=True)
     n_trades = conn.execute("SELECT COUNT(*) FROM trade_log").fetchone()[0]
     n_pred = conn.execute(
         "SELECT COUNT(*) FROM ml_predictions WHERE model='raw_only'"

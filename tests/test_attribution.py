@@ -1,11 +1,11 @@
 """Brinson 归因测试 — 合成数据单测 + 真库冒烟。"""
 
-import sqlite3
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from btcore import database
 from research.attribution import (
     _aggregate_period,
     _compute_brinson_daily,
@@ -295,6 +295,19 @@ class TestAggregatePeriod:
         assert result["exposure_summary"]["max_single_industry_name"] == "银行"
 
 
+
+
+def _make_bt_db(path):
+    """最小结果库（真实 schema，DuckDB）：归因测试的 trade_log 载体。"""
+    conn = database.init_backtest_db(str(path))
+    database.write_run(
+        conn, created_at="x", strategy="t", start_date="20240601",
+        end_date="20240701", initial_capital=1e6, config_json="{}",
+        status="completed",
+    )
+    return conn
+
+
 # ═══════════════════════════════════════════
 # 真库冒烟测试
 # ═══════════════════════════════════════════
@@ -307,35 +320,8 @@ class TestRealDBAttribution:
     def test_full_attribution_pipeline(self, tmp_path):
         """使用 fixtures 中的 bars 合成一次简易回测 DB，跑归因。"""
         # 1. 制造一个简单的回测 DB
-        db_path = str(tmp_path / "test_backtest.db")
-        backtest_conn = sqlite3.connect(db_path)
-        backtest_conn.executescript("""
-            CREATE TABLE IF NOT EXISTS trade_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                trigger TEXT NOT NULL DEFAULT 'MANUAL',
-                price REAL NOT NULL DEFAULT 0,
-                shares INTEGER NOT NULL,
-                turnover REAL NOT NULL DEFAULT 0,
-                commission REAL NOT NULL DEFAULT 0,
-                stamp_tax REAL NOT NULL DEFAULT 0,
-                transfer_fee REAL NOT NULL DEFAULT 0,
-                slippage_amount REAL NOT NULL DEFAULT 0,
-                net_amount REAL NOT NULL DEFAULT 0,
-                reason TEXT NOT NULL DEFAULT ''
-            );
-            CREATE TABLE IF NOT EXISTS account_daily (
-                date TEXT PRIMARY KEY,
-                cash REAL NOT NULL,
-                total_value REAL NOT NULL,
-                daily_pnl REAL NOT NULL DEFAULT 0,
-                cumulative_pnl REAL NOT NULL DEFAULT 0,
-                initial_capital REAL NOT NULL,
-                n_holdings INTEGER NOT NULL DEFAULT 0
-            );
-        """)
+        db_path = str(tmp_path / "test_backtest.duckdb")
+        backtest_conn = _make_bt_db(db_path)
 
         # 插入模拟交易: 大量买入银行股，少量食品饮料
         trades = [
@@ -343,12 +329,12 @@ class TestRealDBAttribution:
             ("20240603", "601398.SH", "BUY", 100000),
             ("20240603", "600519.SH", "BUY", 100),
         ]
-        for i, (d, s, side, sh) in enumerate(trades):
+        for i, (d, sym, side, sh) in enumerate(trades):
             backtest_conn.execute(
-                "INSERT INTO trade_log (id, date, symbol, side, shares) VALUES (?,?,?,?,?)",
-                (i+1, d, s, side, sh),
+                "INSERT INTO trade_log (id, run_id, date, symbol, side, trigger,"
+                " price, shares, turnover, commission) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (i + 1, 1, d, sym, side, "MANUAL", 0.0, sh, 0.0, 0.0),
             )
-        backtest_conn.commit()
         backtest_conn.close()
 
         # 2. 跑归因
@@ -386,27 +372,8 @@ class TestBrinsonFromFiles:
     def test_full_pipeline_from_files(self, tmp_path):
         """合成 parquet 文件 → brinson_attribute_from_files → 验证输出结构。"""
         # 创建回测 DB（trade_log）
-        db_path = str(tmp_path / "test_backtest.db")
-        bconn = sqlite3.connect(db_path)
-        bconn.executescript("""
-            CREATE TABLE IF NOT EXISTS trade_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                trigger TEXT NOT NULL DEFAULT 'MANUAL',
-                price REAL NOT NULL DEFAULT 0,
-                shares INTEGER NOT NULL,
-                turnover REAL NOT NULL DEFAULT 0,
-                commission REAL NOT NULL DEFAULT 0,
-                stamp_tax REAL NOT NULL DEFAULT 0,
-                transfer_fee REAL NOT NULL DEFAULT 0,
-                slippage_amount REAL NOT NULL DEFAULT 0,
-                net_amount REAL NOT NULL DEFAULT 0,
-                reason TEXT NOT NULL DEFAULT '',
-                run_id INTEGER NOT NULL DEFAULT 1
-            );
-        """)
+        db_path = str(tmp_path / "test_backtest.duckdb")
+        bconn = _make_bt_db(db_path)
         trades = [
             (1, "20240603", "600036.SH", "BUY", 10000),
             (2, "20240603", "600519.SH", "BUY", 2000),
@@ -414,13 +381,12 @@ class TestBrinsonFromFiles:
             (4, "20240605", "600036.SH", "SELL", 5000),
             (5, "20240606", "600519.SH", "SELL", 1000),
         ]
-        for tid, d, s, side, sh in trades:
+        for tid, d, sym, side, sh in trades:
             bconn.execute(
-                "INSERT INTO trade_log (id, date, symbol, side, shares, run_id) "
-                "VALUES (?,?,?,?,?, 1)",
-                (tid, d, s, side, sh),
+                "INSERT INTO trade_log (id, run_id, date, symbol, side, trigger,"
+                " price, shares, turnover, commission) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (tid, 1, d, sym, side, "MANUAL", 0.0, sh, 0.0, 0.0),
             )
-        bconn.commit()
         bconn.close()
 
         # 创建合成 parquet 文件
@@ -509,15 +475,8 @@ class TestBrinsonFromFiles:
 
     def test_missing_file_raises(self, tmp_path):
         """缺少 parquet 文件应抛出 FileNotFoundError。"""
-        db_path = str(tmp_path / "test.db")
-        bconn = sqlite3.connect(db_path)
-        bconn.executescript("""
-            CREATE TABLE IF NOT EXISTS trade_log (
-                id INTEGER PRIMARY KEY, date TEXT, symbol TEXT, side TEXT,
-                shares INTEGER, run_id INTEGER DEFAULT 1
-            );
-        """)
-        bconn.close()
+        db_path = str(tmp_path / "test.duckdb")
+        _make_bt_db(db_path).close()
 
         nonexistent = str(tmp_path / "nonexistent.parquet")
         with pytest.raises(FileNotFoundError, match="industry_map"):
@@ -531,15 +490,8 @@ class TestBrinsonFromFiles:
 
     def test_empty_sw_returns(self, tmp_path):
         """空 sw_returns 返回 error。"""
-        db_path = str(tmp_path / "test.db")
-        bconn = sqlite3.connect(db_path)
-        bconn.executescript("""
-            CREATE TABLE IF NOT EXISTS trade_log (
-                id INTEGER PRIMARY KEY, date TEXT, symbol TEXT, side TEXT,
-                shares INTEGER, run_id INTEGER DEFAULT 1
-            );
-        """)
-        bconn.close()
+        db_path = str(tmp_path / "test.duckdb")
+        _make_bt_db(db_path).close()
 
         out_dir = str(tmp_path / "parquet_data")
         import os

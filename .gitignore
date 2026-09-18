@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 *.db
+*.duckdb
+*.duckdb.wal
 backtest_output/
 results/
 .pytest_cache/
@@ -33,3 +35,6 @@ docs/.vitepress/cache/
 
 # 实盘账本（账户隐私数据）
 live/
+
+# 运行日志（上游维护/本地运行产物）
+logs/

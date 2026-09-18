@@ -414,7 +414,7 @@ class Engine:
 
             # runs 行独立事务提交: 后续 step 回滚不会把它带走,
             # 崩溃时才能把状态改写成 failed
-            with conn:
+            with database.transaction(conn):
                 self.run_id = database.write_run(
                     conn,
                     created_at=pd.Timestamp.now().isoformat(),
@@ -472,7 +472,7 @@ class Engine:
                     if first > 0:
                         benchmark_nav = (bm[price_col] / first).tolist()
                         benchmark_nav = [float(v) for v in benchmark_nav]
-            with conn:
+            with database.transaction(conn):
                 # 基准净值随 stats_json 落库：离线 report 才能画出基准叠加线
                 stats_payload = dict(stats_result)
                 stats_payload["benchmark_nav"] = benchmark_nav
@@ -493,7 +493,7 @@ class Engine:
             # 崩溃（含 KeyboardInterrupt/SystemExit）不留 "running" 假象；
             # run_id=0 说明还没落库，无需标记
             if self.run_id:
-                with conn:
+                with database.transaction(conn):
                     database.update_run_status(conn, self.run_id, "failed")
             raise
         finally:
@@ -640,7 +640,7 @@ class Engine:
         self._save_state()
 
         try:
-            with conn:
+            with database.transaction(conn):
                 corporate_log = []
                 corporate.adjust(self.account, today, bars_dict,
                                  self.provider, corporate_log)
@@ -723,11 +723,11 @@ class Engine:
         )
         # PERF-06: 不再逐日 write_holdings（运行期无读方）——终态快照在
         # run() 收尾 update_run_status 之后写一次
-        for trade in trades:
-            database.write_trade(conn, self.run_id, trade)
         # 公司行为衍生行（DIV/STK_DIV）与实盘回放共用同一构造口径
-        for trade in corporate.derived_trades(corporate_log):
-            database.write_trade(conn, self.run_id, trade)
+        database.write_trades(
+            conn, self.run_id,
+            list(trades) + corporate.derived_trades(corporate_log),
+        )
 
     def compute_pending(self, calc_date: str, bars_dict: dict | None = None,
                         trades: list | None = None):

@@ -29,8 +29,8 @@ python scripts/check_anticorrupt.py
 python scripts/run.py strategies/examples/rolling_ranker/config.yaml --start 20240603 --end 20240628
 
 # 从结果库生成单 run HTML 报告 / 多 run 对比
-python scripts/report.py result.db --out report.html
-python scripts/compare.py result.db --html compare.html
+python scripts/report.py results/run.duckdb --out report.html
+python scripts/compare.py results/run.duckdb --html compare.html
 
 # 因子 IC 评估 / 分层回测 / 相关性矩阵（--model 可评 ML 模型分数）
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
@@ -39,7 +39,7 @@ python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20240630
 python scripts/ml_train.py strategies/my_strategy/config.yaml --model alpha_xs --start 20220101 --end 20250630 --horizon 5
 
 # 回测结果交叉验证（交易行为、磨损合理性检查）
-python scripts/cross_validate.py result.db --strategy name --run-id 1
+python scripts/cross_validate.py results/run.duckdb --strategy name --run-id 1
 
 # skill 与代码事实同步校验（改 CLI/算子/YAML 键/协议后必跑）
 python scripts/check_skill_sync.py
@@ -51,22 +51,31 @@ python scripts/review_gate.py close F-EMA-01 --waive "用户决策：暂不修"
 python scripts/review_gate.py done
 
 # 参数扫描批量回测（YAML 路径语法展开参数空间）
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out sweep.db
+python scripts/sweep.py sweep.yaml --start 20240101 --end 20240630 --out results/sweep.duckdb
 
 # 交易决策回放（按 symbol/日期定位调试上下文）
-python scripts/replay.py result.db --symbol 000001.SZ --date 20240605
+python scripts/replay.py results/run.duckdb --symbol 000001.SZ --date 20240605
 
 # 实盘账本：建账 / 每日对账同步 / 明日操作单 / 状态（账本与策略解耦，可换任意策略 YAML）
-python scripts/live.py init live/main.db --date 20260731 --cash 40000 [--positions p.yaml]
-python scripts/live.py sync live/main.db sync.yaml
-python scripts/live.py signal live/main.db strategies/selected/dv_lowvol_300/config.yaml --date 20260731
-python scripts/live.py status live/main.db
+python scripts/live.py init live/main.duckdb --date 20260731 --cash 40000 [--positions p.yaml]
+python scripts/live.py sync live/main.duckdb sync.yaml
+python scripts/live.py signal live/main.duckdb strategies/selected/dv_lowvol_300/config.yaml --date 20260731
+python scripts/live.py status live/main.duckdb
 
 # Brinson 归因数据导出（一次性导出 parquet，后续离线归因）
-python scripts/dump_brinson_data.py /path/to/tushare.db --out brinson_data
+python scripts/dump_brinson_data.py /path/to/market.duckdb --out brinson_data
 
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
+
+# 黄金研究库刷新（4 只黄金 ETF 行情/份额 + 美债实际收益率/汇率/上海金/M2，
+# 海外序列按"严格早于中国交易日"对齐；写入 data/gold_market.duckdb）
+python scripts/refresh_gold_db.py
+
+# 黄金策略回测（DDUP_BACKEND 切换后端，缺省 = adapters/tushare.py 股票后端）
+DDUP_BACKEND=adapters.tushare_gold:TushareGoldBackend \
+  python scripts/run.py strategies/exploring/gold_mid_term/config.yaml \
+  --start 20190101 --end 20260914 --out results/gold.duckdb
 ```
 
 ---
@@ -80,7 +89,8 @@ btcore/     — 全部机制/基础设施（勿随意修改）：engine.py 主�
               match/ 撮合（core 原语 / conditions 条件单 / manual 普通单，子模块互不 import）、
               ml/ ML 子系统（spec/dataset/runtime/trainer/conditions/export）、
               database.py 结果库、stats.py 统计纯函数、generic_sql.py 填表法后端
-adapters/   — 用户数据后端实现（可编辑）：tushare.py = GenericSQLBackend 填表
+adapters/   — 用户数据后端实现（可编辑）：tushare.py = GenericSQLBackend 填表（股票）、
+              tushare_gold.py = 黄金 ETF/宏观对齐后端（DDUP_BACKEND 选择）
 research/   — 研究工具库（纯 importable 模块，不含 CLI）：factor_eval/composite/attribution/report、
               HTML 报告生成、实盘账本回放 research/live.py
 scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、参数扫描、
@@ -94,7 +104,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 
 - `types.py` / `constants.py`：零依赖（被所有人依赖）
 - `match/*`（manual.py / conditions.py / core.py）：子模块之间不允许互相 import，仅可依赖 core.py 工具
-- `stats.py`：纯函数，不含 sqlite3 import，不依赖 provider / engine
+- `stats.py`：纯函数，不含 duckdb/sqlite3 import，不依赖 provider / engine
 - `factors/*`：不得依赖 engine / match / database / provider
 - `engine.py`：不允许被 btcore 内部模块 import（仅用户代码调用）
 - `btcore/` 不得 import `strategies/`、顶层 `factors/`、`adapters/`——单向依赖
@@ -118,7 +128,7 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
   自定义条件单 `register_condition_handler`（match/conditions.py:24）
 - ML：`ml/runtime.materialize_predictions`(:100) → `ml_<name>` 列；`ml/dataset.build_panel`(:23)
   训练与引擎同一物化函数链；meta v3 契约（ml/spec.py:33 META_VERSION）
-- 结果库：`database.init_backtest_db`（database.py:90），6 表多 run 累积 SQLite
+- 结果库：`database.init_backtest_db`（database.py:132），6 表多 run 累积 DuckDB（sequence 自增 + 显式事务）
 - 统计：`stats.calculate_statistics`（stats.py:13，纯函数）
 
 ## 数据流（一天）

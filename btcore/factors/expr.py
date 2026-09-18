@@ -44,6 +44,23 @@ def validate_expr(expr: str, engine: str = "numexpr") -> None:
         raise ValueError(f"invalid factor expression (engine={engine}): {expr}") from exc
 
 
+def coerce_all_nan_object_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """把 object dtype 且全 NaN 的列转 float64。
+
+    事件表在请求窗口内零行时后端返回 object dtype 全 NaN 列（空结果集
+    dtype 推断），pandas.eval 对这类列会抛 TypeError / RecursionError 而非
+    产出 NaN（2026-09-16 实测 pledge_detail 空表触发）。语义不变（仍为
+    NaN），非全 NaN 的 object 列（字符串列）不动。
+    """
+    obj_cols = [c for c in df.columns if df[c].dtype == object and df[c].isna().all()]
+    if not obj_cols:
+        return df
+    df = df.copy(deep=False)
+    for col in obj_cols:
+        df[col] = df[col].astype("float64")
+    return df
+
+
 def evaluate_expr(
     df: pd.DataFrame,
     expr: str,
@@ -69,6 +86,7 @@ def evaluate_expr(
     symbol 索引的表达式值 Series。
     """
     _validate_cached(expr, engine)
+    df = coerce_all_nan_object_columns(df)
     result = df.eval(expr, engine=engine)
     if not isinstance(result, pd.Series):
         result = pd.Series(result, index=df.index)

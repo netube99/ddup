@@ -12,9 +12,11 @@ Checks that key anti-corruption invariants are not violated:
   9. types.py / constants.py must be zero-dependency (no btcore imports)
   10. match/ submodules (manual / conditions) must not import each other,
       only btcore.match.core
-  11. stats.py must stay pure: no sqlite3, no provider/engine imports
+  11. stats.py must stay pure: no duckdb/sqlite3, no provider/engine imports
   12. btcore/factors must not depend on engine/match/database/provider/backend
   13. btcore module graph must be acyclic (no circular imports)
+  14. source layers (btcore/research/scripts/adapters) must be DuckDB-only:
+      no sqlite3 import and no SQLite API residue
 """
 
 import ast
@@ -258,14 +260,14 @@ def check_match_no_cross_import(repo_root: str) -> list[str]:
 
 
 def check_stats_pure(repo_root: str) -> list[str]:
-    """stats.py 纯函数：不得 import sqlite3，不得依赖 provider/engine。"""
+    """stats.py 纯函数：不得 import 数据库驱动，不得依赖 provider/engine。"""
     errors = []
     path = os.path.join(repo_root, "btcore", "stats.py")
     if not os.path.exists(path):
         return errors
     for module, lineno in _iter_imports(path, expand_btcore=True):
-        if module == "sqlite3":
-            errors.append(f"VIOLATION: stats.py imports sqlite3 line {lineno}")
+        if module in ("sqlite3", "duckdb"):
+            errors.append(f"VIOLATION: stats.py imports {module} line {lineno}")
         parts = module.split(".")
         if parts[0] == "btcore" and len(parts) > 1 and parts[1] in (
             "provider", "engine", "database", "match", "backend",
@@ -371,6 +373,45 @@ def check_no_circular_imports(repo_root: str) -> list[str]:
     return errors
 
 
+# SQLite 专属 API 字面量（DuckDB 无这些 API）；注释/字符串中出现同样视为残留
+_SQLITE_API_TOKENS = (
+    "sqlite_master", "AUTOINCREMENT", "executescript", "lastrowid", "row_factory",
+)
+
+
+def check_no_sqlite_residue(repo_root: str) -> list[str]:
+    """源码层 DuckDB-only：无 sqlite3 import，无 SQLite API 残留（rule 14）。
+
+    tests/ 豁免（tests/test_generic_sql.py 故意构造旧 SQLite 文件验证
+    fail-fast）；旧格式拒绝逻辑见 btcore/database.assert_duckdb_file。
+    """
+    errors = []
+    # 本文件是规则定义处，必然出现被禁 token 字面量，从扫描中豁免
+    self_path = os.path.abspath(__file__)
+    for layer in ("btcore", "research", "scripts", "adapters"):
+        layer_root = os.path.join(repo_root, layer)
+        if not os.path.isdir(layer_root):
+            continue
+        for path in _iter_py_files(layer_root):
+            if os.path.abspath(path) == self_path:
+                continue
+            for module, lineno in _iter_imports(path):
+                if module == "sqlite3" or module.startswith("sqlite3."):
+                    errors.append(
+                        f"VIOLATION: sqlite3 import in DuckDB-only layer: "
+                        f"{path} line {lineno}"
+                    )
+            with open(path) as f:
+                for lineno, line in enumerate(f, start=1):
+                    for token in _SQLITE_API_TOKENS:
+                        if token in line:
+                            errors.append(
+                                f"VIOLATION: sqlite residue '{token}': "
+                                f"{path} line {lineno}"
+                            )
+    return errors
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     all_errors = []
@@ -387,6 +428,7 @@ def main():
     all_errors.extend(check_stats_pure(repo_root))
     all_errors.extend(check_factors_no_infra_deps(repo_root))
     all_errors.extend(check_no_circular_imports(repo_root))
+    all_errors.extend(check_no_sqlite_residue(repo_root))
 
     if all_errors:
         print("反腐检查失败:")

@@ -1,7 +1,7 @@
 """多 run 回测结果对比 CLI。
 
 用法:
-    python scripts/compare.py result.db [--runs 1,2,3] [--html compare.html]
+    python scripts/compare.py result.duckdb [--runs 1,2,3] [--html compare.html]
 
 终端打印关键指标对比表；--html 时同时产出对比报告
 （指标表 + 归一化净值叠加曲线）。

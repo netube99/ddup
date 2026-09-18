@@ -2,13 +2,12 @@
 rebalance 零碎股清仓、run 异常状态落库。"""
 
 import logging
-import sqlite3
 
 import pandas as pd
 import pytest
 
 from btcore.costs import calc_trade_costs
-from btcore.database import init_backtest_db
+from btcore.database import connect_result_db, init_backtest_db
 from btcore.engine import Engine
 from btcore.limits import get_limit_prices
 from btcore.match import conditions
@@ -165,7 +164,7 @@ def test_run_marks_failed_on_exception(tmp_path):
     with pytest.raises(RuntimeError, match="boom"):
         engine.run("20240603", "20240607")
 
-    conn = sqlite3.connect(db)
+    conn = connect_result_db(db, read_only=True)
     try:
         status = conn.execute("SELECT status FROM runs").fetchone()[0]
     finally:
@@ -541,7 +540,7 @@ def test_run_marks_failed_on_keyboard_interrupt(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         engine.run("20240603", "20240607")
 
-    conn = sqlite3.connect(db)
+    conn = connect_result_db(db, read_only=True)
     try:
         status = conn.execute("SELECT status FROM runs").fetchone()[0]
     finally:

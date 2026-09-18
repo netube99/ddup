@@ -102,8 +102,8 @@ def test_engine_logs_stk_div_trade(tmp_path):
     )
     engine.run("20240603", "20240612")
 
-    import sqlite3
-    conn = sqlite3.connect(db_path)
+    from btcore import database
+    conn = database.connect_result_db(str(db_path), read_only=True)
     try:
         buy = conn.execute(
             "SELECT shares FROM trade_log WHERE side='BUY' AND symbol='920469.BJ'"

@@ -8,11 +8,11 @@
 "账户态特征的计算公式训练侧重放与引擎推理共用同一定义"）。
 """
 
-import sqlite3
 
 import pandas as pd
 import pytest
 
+from btcore import database
 from btcore.ml.labels import build_guard_samples, extract_trade_pairs
 from tests.conftest import make_spec
 from tests.test_ml import _db
@@ -146,9 +146,11 @@ class TestEngineReplayParity:
         samples = build_guard_samples(panel, pairs, spec, lookahead=0)
         assert len(samples) >= 8
 
-        conn = sqlite3.connect(db)
+        conn = database.connect_result_db(db, read_only=True)
         engine_entry = {}
-        for d, js in conn.execute("SELECT date, snapshot_json FROM debug_snapshots"):
+        for d, js in conn.execute(
+            "SELECT date, snapshot_json FROM debug_snapshots"
+        ).fetchall():
             h = json.loads(js)["holdings_detail"].get(sym)
             if h:
                 engine_entry[d] = h["entry_price"]

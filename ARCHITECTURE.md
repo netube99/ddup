@@ -22,7 +22,7 @@ research/      研究工具库（纯 importable 模块，无 CLI）：因子评�
 scripts/       可执行 CLI 入口（回测、报告、评估、训练、扫描、回放、校验）
 tests/         pytest 套件（539 测试）+ fixtures/*.parquet + test_invariants/（INV1-INV8）
 docs/          设计文档（index.md 是导航入口）
-results/       回测结果库（*.db，SQLite，多 run 累积）
+results/       回测结果库（*.duckdb，DuckDB，多 run 累积）
 ```
 
 ### 依赖方向（`scripts/check_anticorrupt.py:209` 强制）
@@ -30,7 +30,7 @@ results/       回测结果库（*.db，SQLite，多 run 累积）
 ```
 types.py / constants.py  零依赖，被所有人依赖
 match/*                  子模块互不 import，仅可依赖 core.py
-stats.py                 纯函数：禁 sqlite3，不依赖 provider/engine
+stats.py                 纯函数：禁 duckdb/sqlite3，不依赖 provider/engine
 btcore/factors/*         不依赖 engine/match/database/provider
 engine.py                不被 btcore 内部模块 import（仅用户代码调用）
 btcore/                  不 import strategies/ 顶层 factors/ adapters/（单向）
@@ -152,7 +152,7 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 | slippage.py | `apply_slippage`(:4) | tick 滑点：price ± ticks×0.01 |
 | corporate.py | `adjust`(:15) | 除权除息：送股股数/价格重缩放、现金分红（除息日预缴红利税 ≤30d 20%/≤1y 10%/>1y 免） |
 | filters.py | `StockFilter`(:25)、`filter_required_columns`(:13) | 见 2.3 |
-| database.py | `init_backtest_db`(:87，含 stats_json 轻量迁移）、write_run(:114)/write_daily(:125)/write_trade(:156)/write_run_stats(:190)/read_runs(:198)/read_run_data(:203)/write_ml_predictions(:223)/write_debug_snapshot(:234) | 结果库 SQLite：runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions 六表 |
+| database.py | `init_backtest_db`(:124)、`transaction`(:101)、write_run(:133)/write_daily(:151)/write_trades(:208)/write_run_stats(:230)/read_runs(:239)/read_run_data(:247)/write_ml_predictions(:266)/write_debug_snapshot(:288) | 结果库 DuckDB：runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions 六表（sequence 自增，显式事务） |
 | stats.py | `calculate_statistics`(:9) | 统计指标纯函数：收益/回撤/夏普/Sortino/VaR/回合 FIFO(:216)/卖出来源归因(:374)/成本分解(:439)/交易磨损(:459)/管理复杂度(:505)/基准对比(:557) |
 
 ---
@@ -197,14 +197,14 @@ moneyflow/cyq_perf/margin_detail 等表的字段以「别名: 表名.字段名�
 
 | 脚本 | main | 用途 |
 |---|---|---|
-| run.py | :38 | YAML 策略回测 → result.db |
+| run.py | :38 | YAML 策略回测 → 结果库.duckdb |
 | report.py / compare.py | :15 / :28 | 单 run HTML 报告 / 多 run 对比表+HTML |
 | factor_eval.py | :64 | 因子 IC/分层/相关性（--model 可评 ML 分数列） |
 | ml_train.py | :66 | ML 训练（panel/holding 双 scope，同一物化路径） |
 | sweep.py | :47 | 参数扫描批量回测（点路径语法展开参数空间） |
 | replay.py | :10 | 交易决策回放（消费 debug_snapshots） |
 | cross_validate.py | :213 | 回测结果交叉验证（validate_trades :56 / validate_daily :178） |
-| check_anticorrupt.py | :205 | 反破坏 linter（13 项结构检查，提交前必过） |
+| check_anticorrupt.py | :205 | 反破坏 linter（14 项结构检查，提交前必过） |
 | dump_fixtures.py / dump_brinson_data.py | :54 / :10 | fixtures 再生成 / 归因数据导出 |
 | bench_universe_preload.py | :70 | universe preload 性能基准 |
 
@@ -272,8 +272,8 @@ bars_to_dict → _save_state（事务回滚快照）
 | materialize_only | factor_specs 标记位：物化为列供 calc_conditions/模型特征读取，不参与评分；loader 自动为模型 features 追加 |
 | ML 分数列 | `ml_<name>`：panel scope 物化为面板列（裁切前）；holding scope 决策时点注入 bar dict。策略不得自行加载 ONNX 逐日推理 |
 | 财报对齐 | 引擎只消费 (交易日,代码) 日频网格列，不做季度推断；公告日对齐由后端在数据层完成 |
-| 事务模型 | write_run 独立事务；每 step 一个 `with conn`，异常 _restore_state 回滚账户态；崩溃标 failed |
-| 结果库 | 多 run 累积 SQLite，6 表（runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions）；holdings 为瞬态快照每 run 清空；stats_json 缺列时 ALTER TABLE 轻量迁移 |
+| 事务模型 | write_run 独立事务；每 step 一个 `database.transaction(conn)`（DuckDB 的 `with conn` 是关连接），异常 _restore_state 回滚账户态；崩溃标 failed |
+| 结果库 | 多 run 累积 DuckDB，6 表（runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions）；holdings 为瞬态快照每 run 清空；run_id/trade_log.id 走 sequence；旧 SQLite 文件显式拒绝（不保留兼容） |
 
 ---
 

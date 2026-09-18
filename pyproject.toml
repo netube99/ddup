@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.0",
     "numexpr>=2.14.2",
     "pyyaml>=6.0",
+    "duckdb>=1.5,<2",
 ]
 
 [project.optional-dependencies]

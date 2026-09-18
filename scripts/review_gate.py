@@ -269,9 +269,9 @@ def cmd_done(args: argparse.Namespace) -> int:
             failed += 1
             print((r.stdout + r.stderr).strip()[-3000:])
     print("可用的剩余验收（需真实库，手动执行）：")
-    print("  python scripts/cross_validate.py <最新 result.db> --strategy <策略名>")
+    print("  python scripts/cross_validate.py <最新 result.duckdb> --strategy <策略名>")
     print("    --run-id 1")
-    print("  python scripts/live.py sync live/main.db sync.yaml")
+    print("  python scripts/live.py sync live/main.duckdb sync.yaml")
     if failed:
         print(f"done-bar FAIL: {failed} 项失败")
         return 1

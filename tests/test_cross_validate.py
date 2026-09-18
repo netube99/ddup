@@ -1,17 +1,17 @@
 """cross_validate 测试 — 自定义 trigger 降级 / 键名对齐 / 成本口径从 config 读取。
 
-用合成 sqlite 库验证：DYNAMIC_STOP 等自定义 handler 的 trigger 不再误报
+用合成 DuckDB 结果库验证：DYNAMIC_STOP 等自定义 handler 的 trigger 不再误报
 UNEXPECTED_TRIGGER（示例策略 condition_hunter/multi_model 同款），
 统计指标键名与 btcore.stats 实际输出对齐，STK_DIV 行不破坏买卖计数。
 """
 
 import json
-import sqlite3
 import subprocess
 import sys
 
 import pytest
 
+from btcore import database
 from research.cross_validate import (
     _expected_triggers,
     _min_commission_overhead,
@@ -22,22 +22,15 @@ from tests.test_stats import make_trades
 
 def make_db(tmp_path, stats_json=None, config_json=None, extra_trades=()):
     """构造最小结果库（runs + trade_log + account_daily）。"""
-    db = tmp_path / "cv.db"
-    conn = sqlite3.connect(db)
-    conn.execute("""CREATE TABLE runs (run_id INTEGER PRIMARY KEY, created_at TEXT,
-        strategy TEXT, start_date TEXT, end_date TEXT, initial_capital REAL,
-        config_json TEXT, status TEXT, stats_json TEXT)""")
-    conn.execute("""CREATE TABLE trade_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id INTEGER, date TEXT, symbol TEXT, side TEXT, trigger TEXT, price REAL,
-        shares INTEGER, turnover REAL, commission REAL, stamp_tax REAL,
-        transfer_fee REAL, slippage_amount REAL, net_amount REAL, reason TEXT)""")
-    conn.execute("""CREATE TABLE account_daily (run_id INTEGER, date TEXT, cash REAL,
-        total_value REAL, pnl REAL, n_holdings INTEGER)""")
+    db = tmp_path / "cv.duckdb"
+    conn = database.init_backtest_db(str(db))
     conn.execute(
-        "INSERT INTO runs VALUES (1,'2026','demo','20240603','20240607',100000,?,"
-        "'completed',?)",
-        (json.dumps(config_json or {"initial_capital": 100000}),
-         json.dumps(stats_json or {})),
+        "INSERT INTO runs (run_id, created_at, strategy, start_date, end_date,"
+        " initial_capital, config_json, status, stats_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        [1, "2026", "demo", "20240603", "20240607", 100000,
+         json.dumps(config_json or {"initial_capital": 100000}),
+         "completed", json.dumps(stats_json or {})],
     )
     base = [
         (1, "20240603", "000001.SZ", "BUY", "MANUAL", 10.0, 10000, 100000.0,
@@ -49,9 +42,12 @@ def make_db(tmp_path, stats_json=None, config_json=None, extra_trades=()):
         conn.execute(
             "INSERT INTO trade_log (run_id,date,symbol,side,trigger,price,shares,"
             "turnover,commission,stamp_tax,transfer_fee,slippage_amount,"
-            "net_amount,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", t)
-    conn.execute("INSERT INTO account_daily VALUES (1,'20240603',90000,100000,0,1)")
-    conn.commit()
+            "net_amount,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", list(t))
+    conn.execute(
+        "INSERT INTO account_daily (run_id, date, cash, total_value, daily_pnl,"
+        " initial_capital, n_holdings) VALUES (?,?,?,?,?,?,?)",
+        [1, "20240603", 90000, 100000, 0, 100000, 1],
+    )
     conn.close()
     return db
 

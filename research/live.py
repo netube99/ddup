@@ -29,33 +29,34 @@ LIVE_RUN_ID = 1  # 衍生表统一挂在 run_id=1（每个账本库一个逻辑 
 
 LEDGER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS ledger_meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    key   VARCHAR PRIMARY KEY,
+    value VARCHAR NOT NULL
 );
 
+CREATE SEQUENCE IF NOT EXISTS ledger_fills_id_seq;
 CREATE TABLE IF NOT EXISTS ledger_fills (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    date         TEXT NOT NULL,
-    symbol       TEXT NOT NULL DEFAULT '',
-    side         TEXT NOT NULL,
-    price        REAL NOT NULL DEFAULT 0,
-    shares       INTEGER NOT NULL DEFAULT 0,
-    commission   REAL NOT NULL DEFAULT 0,
-    stamp_tax    REAL NOT NULL DEFAULT 0,
-    transfer_fee REAL NOT NULL DEFAULT 0,
-    reason       TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL
+    id           BIGINT PRIMARY KEY DEFAULT nextval('ledger_fills_id_seq'),
+    date         VARCHAR NOT NULL,
+    symbol       VARCHAR NOT NULL DEFAULT '',
+    side         VARCHAR NOT NULL,
+    price        DOUBLE NOT NULL DEFAULT 0,
+    shares       BIGINT NOT NULL DEFAULT 0,
+    commission   DOUBLE NOT NULL DEFAULT 0,
+    stamp_tax    DOUBLE NOT NULL DEFAULT 0,
+    transfer_fee DOUBLE NOT NULL DEFAULT 0,
+    reason       VARCHAR NOT NULL DEFAULT '',
+    created_at   VARCHAR NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_fills_date ON ledger_fills(date);
 
 CREATE TABLE IF NOT EXISTS ledger_holdings (
-    symbol       TEXT PRIMARY KEY,
-    entry_date   TEXT NOT NULL,
-    entry_price  REAL NOT NULL,
-    shares       INTEGER NOT NULL,
-    cost         REAL NOT NULL,
-    last_price   REAL NOT NULL DEFAULT 0,
-    holding_days INTEGER NOT NULL DEFAULT 0
+    symbol       VARCHAR PRIMARY KEY,
+    entry_date   VARCHAR NOT NULL,
+    entry_price  DOUBLE NOT NULL,
+    shares       BIGINT NOT NULL,
+    cost         DOUBLE NOT NULL,
+    last_price   DOUBLE NOT NULL DEFAULT 0,
+    holding_days BIGINT NOT NULL DEFAULT 0
 );
 """
 
@@ -83,7 +84,7 @@ class LedgerStore:
         self.path = path
         # init_backtest_db 建 runs/trade_log/account_daily/holdings 同构表
         self.conn = database.init_backtest_db(path)
-        self.conn.executescript(LEDGER_SCHEMA_SQL)
+        self.conn.execute(LEDGER_SCHEMA_SQL)
         self.conn.commit()
 
     def close(self):
@@ -108,6 +109,11 @@ class LedgerStore:
 
     def init_account(self, start_date: str, initial_cash: float,
                      initial_capital: float):
+        """写账户元数据；调用方负责事务边界（cmd_init 整段事务化）。
+
+        本方法不 commit：DuckDB 下调用方可能已 begin()，内部提交会破坏
+        建账+OPENING 持仓写入的原子性。
+        """
         if self.is_initialized():
             raise ValueError("账本已初始化（initial_capital 已存在）")
         if initial_cash < 0 or initial_capital <= 0:
@@ -117,7 +123,6 @@ class LedgerStore:
         self.set_meta("start_date", start_date)
         self.set_meta("initial_cash", repr(float(initial_cash)))
         self.set_meta("initial_capital", repr(float(initial_capital)))
-        self.conn.commit()
 
     @property
     def start_date(self) -> str:
@@ -161,11 +166,14 @@ class LedgerStore:
         )
 
     def append_fills_idempotent(self, fills: list[dict],
-                                created_at: str) -> tuple[int, int]:
+                                created_at: str,
+                                default_date: str | None = None) -> tuple[int, int]:
         """幂等追加：完全重复的成交跳过（agent 重跑同一 statement 不双重入账）。
 
         重复判定按 (date, symbol, side, price, shares, commission,
         stamp_tax, transfer_fee, reason) 全字段归一化后精确匹配。
+        default_date: fill 缺 date 时的缺省成交日（sync.yaml 的 statement
+        级 date——见 docs/cli_and_research.md §2.9 的 fills 格式）。
         返回 (appended, skipped)。
         """
         existing = {
@@ -177,7 +185,7 @@ class LedgerStore:
         }
         appended = skipped = 0
         for f in fills:
-            key = (str(f.get("date") or ""), f["symbol"], f["side"],
+            key = (str(f.get("date") or default_date or ""), f["symbol"], f["side"],
                    round(float(f["price"]), 6), int(f["shares"]),
                    round(float(f.get("commission") or 0.0), 6),
                    round(float(f.get("stamp_tax") or 0.0), 6),
@@ -216,39 +224,57 @@ class LedgerStore:
     def rewrite_derived(self, daily_rows: list[dict], trade_rows: list[dict],
                         account: types.Account, initial_capital: float):
         """signal 回放产出整体重写（DELETE+INSERT，幂等确定性）。"""
-        with self.conn:
-            self.conn.execute("DELETE FROM trade_log WHERE run_id = ?", (LIVE_RUN_ID,))
-            self.conn.execute("DELETE FROM account_daily WHERE run_id = ?", (LIVE_RUN_ID,))
-            if not self.conn.execute(
-                "SELECT 1 FROM runs WHERE run_id = ?", (LIVE_RUN_ID,)
-            ).fetchone():
+        with database.transaction(self.conn):
+            # 衍生表按 LIVE_RUN_ID 固定挂载：先校验 runs 行归属，再删写，
+            # 避免 run_id 被回测占用时静默覆写（fail-fast 而非并存）
+            existing = self.conn.execute(
+                "SELECT strategy FROM runs WHERE run_id = ?", (LIVE_RUN_ID,)
+            ).fetchone()
+            end_date = daily_rows[-1]["date"] if daily_rows else self.start_date
+            if existing is None:
                 database.write_run(
-                    self.conn, created_at=pd.Timestamp.now().isoformat(),
+                    self.conn, run_id=LIVE_RUN_ID,
+                    created_at=pd.Timestamp.now().isoformat(),
                     strategy="live", start_date=self.start_date,
-                    end_date=daily_rows[-1]["date"] if daily_rows else self.start_date,
+                    end_date=end_date,
                     initial_capital=initial_capital,
                     config_json=json.dumps({"ledger": self.path}, ensure_ascii=False),
                     status="live",
                 )
+            elif existing[0] != "live":
+                raise ValueError(
+                    f"账本库 run_id={LIVE_RUN_ID} 已被非账本 run 占用"
+                    f"（strategy={existing[0]!r}）——请使用独立的账本库文件"
+                )
+            else:
+                # signal 逐日推进：区间末端跟随回放末日（报告/对比展示口径）
+                self.conn.execute(
+                    "UPDATE runs SET end_date = ? WHERE run_id = ?",
+                    (end_date, LIVE_RUN_ID),
+                )
+            self.conn.execute("DELETE FROM trade_log WHERE run_id = ?", (LIVE_RUN_ID,))
+            self.conn.execute("DELETE FROM account_daily WHERE run_id = ?", (LIVE_RUN_ID,))
             for r in daily_rows:
                 database.write_daily(
                     self.conn, LIVE_RUN_ID, r["date"], r["cash"], r["total_value"],
                     r["daily_pnl"], r["cumulative_pnl"], initial_capital,
                     r["n_holdings"],
                 )
-            for t in trade_rows:
-                database.write_trade(self.conn, LIVE_RUN_ID, t)
+            database.write_trades(self.conn, LIVE_RUN_ID, trade_rows)
             database.write_holdings(self.conn, account)
             # init_backtest_db 每次打开清空 holdings 瞬态表；ledger_holdings
             # 是跨会话持久的当前持仓快照（status 数据源）
             self.conn.execute("DELETE FROM ledger_holdings")
-            for h in account.holdings.values():
-                self.conn.execute(
+            if account.holdings:
+                self.conn.executemany(
                     "INSERT INTO ledger_holdings (symbol, entry_date,"
                     " entry_price, shares, cost, last_price, holding_days)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (h.symbol, h.entry_date, h.entry_price, h.shares,
-                     h.cost, h.last_price, h.holding_days),
+                    [
+                        (h.symbol, h.entry_date, h.entry_price, h.shares,
+                         h.cost, h.last_price, h.holding_days)
+                        for h in account.holdings.values()
+                    ],
                 )
 
 

@@ -7,10 +7,10 @@
 """
 
 import json
-import sqlite3
 
 import pandas as pd
 
+from btcore import database
 from btcore.strategy_loader import load_strategy
 from research.cross_validate import validate_trades
 from research.replay import run_replay
@@ -60,11 +60,8 @@ def test_re_attack_500_index_universe_is_code_list():
 
 
 def _make_debug_db(tmp_path, symbols_in_snapshot):
-    db = tmp_path / "replay.db"
-    conn = sqlite3.connect(db)
-    conn.execute("""CREATE TABLE debug_snapshots (
-        run_id INTEGER, date TEXT, snapshot_json TEXT,
-        PRIMARY KEY (run_id, date))""")
+    db = tmp_path / "replay.duckdb"
+    conn = database.init_backtest_db(str(db))
     snap = {
         "date": "20240603",
         "account": {"cash": 100000.0, "total_value": 100000.0, "n_holdings": 0},
@@ -72,11 +69,11 @@ def _make_debug_db(tmp_path, symbols_in_snapshot):
         "holdings_detail": {},
         "bars_subset": {s: {"close": 10.0} for s in symbols_in_snapshot},
     }
-    conn.execute("INSERT INTO debug_snapshots VALUES (1, '20240603', ?)",
-                 (json.dumps(snap),))
-    conn.execute("""CREATE TABLE runs (run_id INTEGER PRIMARY KEY)""")
-    conn.execute("INSERT INTO runs VALUES (1)")
-    conn.commit()
+    conn.execute(
+        "INSERT INTO debug_snapshots (run_id, date, snapshot_json) VALUES (?,?,?)",
+        [1, "20240603", json.dumps(snap)],
+    )
+    conn.execute("INSERT INTO runs (run_id) VALUES (1)")
     conn.close()
     return str(db)
 

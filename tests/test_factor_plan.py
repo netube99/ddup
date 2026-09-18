@@ -30,7 +30,8 @@ class TestBuildPlan:
         assert p["breadth"] == {"industry_mom", "pct_above_ma20", "mom20"}
         assert p["main"] == {"mom20", "mom_z", "rel_mom"}
         assert p["main_columns"] == {"close_hfq"}
-        assert p["breadth_columns"] == {"close_hfq"}
+        # 坍缩存在时锚定 close：保证广度面板网格=全市场（F-FD0-02）
+        assert p["breadth_columns"] == {"close_hfq", "close"}
 
     def test_needs_flags(self):
         p = plan.build_factor_plan(_NODES, ["rel_mom"])
@@ -38,6 +39,15 @@ class TestBuildPlan:
         assert p["needs"]["industry_main"] is True   # group 投影需要主面板 industry
         assert p["needs"]["industry_breadth"] is True
         assert p["needs"]["index"] is False
+
+    def test_event_only_collapse_anchors_market_grid(self):
+        """F-FD0-02 回归：纯事件表坍缩（pct_sealed 仅引 fd_amount）的广度请求
+        必须包含行情契约列，否则后端网格退化为事件表行、全市场分母丢失。"""
+        nodes = {"pct_sealed": {"expr": "mean(fd_amount > 0)"}}
+        p = plan.build_factor_plan(nodes, ["pct_sealed"])
+        assert p["collapse"] == {"pct_sealed": "market"}
+        assert "close" in p["breadth_columns"]
+        assert plan.expand_columns(p["breadth_columns"]) != ["fd_amount"]
 
     def test_no_collapse_no_breadth(self):
         p = plan.build_factor_plan(_NODES, ["mom_z"])

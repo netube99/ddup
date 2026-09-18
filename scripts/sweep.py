@@ -2,7 +2,8 @@
 """参数扫描：批量运行回测，探索参数空间。
 
 用法:
-    python scripts/sweep.py sweep_config.yaml --start 20240101 --end 20240630 --out sweep_result.db
+    python scripts/sweep.py sweep_config.yaml --start 20240101 --end 20240630 \
+        --out results/sweep.duckdb
 
 每组参数作为标准 run 写入 --out 库的 runs 表（config_json 含参数），
 compare.py / report.py 原生可读；sweep_results 表保留参数标签汇总。
@@ -10,7 +11,6 @@ compare.py / report.py 原生可读；sweep_results 表保留参数标签汇总�
 
 import argparse
 import json
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,6 +18,7 @@ from pathlib import Path
 
 import yaml
 
+from btcore import database
 from research.cli_common import latest_run_id
 from research.sweep import expand_params, nested_set
 
@@ -27,7 +28,7 @@ def main():
     parser.add_argument("sweep_config", help="sweep 配置文件 YAML")
     parser.add_argument("--start", required=True, help="回测起始日期 YYYYMMDD")
     parser.add_argument("--end", required=True, help="回测结束日期 YYYYMMDD")
-    parser.add_argument("--out", default="sweep_result.db", help="输出数据库")
+    parser.add_argument("--out", default="sweep_result.duckdb", help="输出数据库")
     parser.add_argument("--capital", type=float, default=None, help="初始资金（覆盖 YAML config）")
     parser.add_argument("--dry-run", action="store_true", help="仅打印参数组合，不运行")
     args = parser.parse_args()
@@ -46,8 +47,11 @@ def main():
             print(f"  {label}")
         return
 
-    # 准备输出数据库
+    # 准备输出数据库；已存在的文件先做旧格式拒止（SQLite 会被
+    # sqlite_scanner 静默打开），再启动子进程
     out_path = Path(args.out)
+    if out_path.exists():
+        database.assert_duckdb_file(str(out_path), "结果库")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -61,6 +65,14 @@ def main():
 
             for key_path, value in params.items():
                 nested_set(base_config, key_path, value)
+
+            # factor_library 相对基 YAML 目录解析（load_strategy 语义）；临时
+            # config 写在 tmpdir，相对路径会解析到错误位置——改写为绝对路径
+            lib = base_config.get("factor_library")
+            if lib and not Path(lib).is_absolute():
+                base_config["factor_library"] = str(
+                    (Path(base_path).resolve().parent / lib).resolve()
+                )
 
             tmp_config = tmpdir / f"config_{i}.yaml"
             with open(tmp_config, "w") as f:
@@ -86,13 +98,16 @@ def main():
 
             # 聚合结果：读取刚写入的 run 的 stats_json，附加参数标签
             try:
-                out_conn = sqlite3.connect(str(out_path))
                 row = None
-                rid = latest_run_id(out_conn)
-                if rid is not None:
-                    row = out_conn.execute(
-                        "SELECT stats_json FROM runs WHERE run_id = ?", (rid,)
-                    ).fetchone()
+                out_conn = database.connect_result_db(str(out_path), read_only=True)
+                try:
+                    rid = latest_run_id(out_conn)
+                    if rid is not None:
+                        row = out_conn.execute(
+                            "SELECT stats_json FROM runs WHERE run_id = ?", [rid]
+                        ).fetchone()
+                finally:
+                    out_conn.close()
 
                 if row and row[0]:
                     stats = json.loads(row[0])
@@ -100,33 +115,43 @@ def main():
                     stats["params"] = {str(k): v for k, v in params.items()}
 
                     # 汇总表（兼容旧 CLI 输出；归因/对比请直接用 runs 表）
-                    out_conn.execute(
-                        "CREATE TABLE IF NOT EXISTS sweep_results ("
-                        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                        "label TEXT, params_json TEXT, stats_json TEXT)"
-                    )
-                    out_conn.execute(
-                        "INSERT INTO sweep_results (label, params_json, stats_json) "
-                        "VALUES (?, ?, ?)",
-                        (label, json.dumps(params, default=str),
-                         json.dumps(stats, default=str)),
-                    )
-                    out_conn.commit()
+                    out_conn = database.connect_result_db(str(out_path))
+                    try:
+                        out_conn.execute(
+                            "CREATE SEQUENCE IF NOT EXISTS sweep_results_id_seq;"
+                            " CREATE TABLE IF NOT EXISTS sweep_results ("
+                            "id BIGINT PRIMARY KEY DEFAULT nextval('sweep_results_id_seq'), "
+                            "label VARCHAR, params_json VARCHAR, stats_json VARCHAR)"
+                        )
+                        out_conn.execute(
+                            "INSERT INTO sweep_results (label, params_json, stats_json) "
+                            "VALUES (?, ?, ?)",
+                            (label, json.dumps(params, default=str),
+                             json.dumps(stats, default=str)),
+                        )
+                        out_conn.commit()
+                    finally:
+                        out_conn.close()
 
                     total_return = stats.get("total_return", 0)
                     sharpe = stats.get("sharpe", 0)
                     mdd = stats.get("max_drawdown", 0)
                     print(f"  OK: return={total_return:.1%} sharpe={sharpe:.2f} mdd={mdd:.1%}")
-                out_conn.close()
             except Exception as e:
                 print(f"  ERROR aggregating: {e}")
 
     # 输出汇总
     print(f"\n结果已保存到: {out_path}")
-    out_conn = sqlite3.connect(str(out_path))
-    rows = out_conn.execute(
-        "SELECT label, stats_json FROM sweep_results ORDER BY id"
-    ).fetchall()
+    if not out_path.exists():
+        print("所有参数组合均未产出结果库，跳过汇总（检查上方 FAIL/ERROR）")
+        return
+    out_conn = database.connect_result_db(str(out_path), read_only=True)
+    try:
+        rows = out_conn.execute(
+            "SELECT label, stats_json FROM sweep_results ORDER BY id"
+        ).fetchall()
+    finally:
+        out_conn.close()
     if rows:
         print(f"\n{'参数组合':<50} {'收益':>8} {'Sharpe':>7} {'MDD':>8}")
         print("-" * 80)
@@ -136,7 +161,6 @@ def main():
             sharpe = stats.get("sharpe", 0)
             mdd = stats.get("max_drawdown", 0)
             print(f"{label:<50} {total_return:>7.1%} {sharpe:>7.2f} {mdd:>7.1%}")
-    out_conn.close()
 
 
 if __name__ == "__main__":

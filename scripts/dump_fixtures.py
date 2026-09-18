@@ -14,16 +14,14 @@ Outputs to tests/fixtures/:
 """
 
 import os
-import sqlite3
 import sys
 
 import pandas as pd
 
 from adapters.tushare import get_default_db_path
+from btcore.generic_sql import connect_market_db
 
 DB_PATH = get_default_db_path()
-if not DB_PATH:
-    raise SystemExit("错误: 请在 adapters/tushare.py 中设置 _DEFAULT_DB_PATH")
 if len(sys.argv) > 1:
     # 2026-08 审计：此前任意参数（含 --help）被静默忽略并直接执行 dump，
     # 有覆盖 tests/fixtures/*.parquet 的风险；改为显式拒绝
@@ -62,8 +60,7 @@ BAR_COLUMNS = [
 def main():
     os.makedirs(FIXTURES_DIR, exist_ok=True)
 
-    uri = f"file:{DB_PATH}?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True)
+    conn = connect_market_db(DB_PATH)
 
     # ---- 1. Determine symbol list ----
     main_symbols = _get_000300_components(conn, TARGET_START, TARGET_END)
@@ -183,7 +180,7 @@ def _dump_bars(conn, symbols, start, end):
         f"WHERE s.ts_code IN ({placeholders}) "
         "AND s.trade_date BETWEEN ? AND ?"
     )
-    df = pd.read_sql_query(sql, conn, params=symbols + [start, end])
+    df = conn.execute(sql, symbols + [start, end]).df()
     df.rename(columns={"ts_code": "symbol"}, inplace=True)
     return df
 
@@ -201,7 +198,7 @@ def _dump_dividends(conn, symbols, start, end):
         "AND div_proc='实施' AND ex_date IS NOT NULL "
         "AND ex_date BETWEEN ? AND ?"
     )
-    return pd.read_sql_query(sql, conn, params=symbols + [start, end])
+    return conn.execute(sql, symbols + [start, end]).df()
 
 
 def _dump_st(conn, symbols, start, end):
@@ -228,7 +225,7 @@ def _dump_st(conn, symbols, start, end):
         f"WHERE ts_code IN ({placeholders}) "
         "AND trade_date BETWEEN ? AND ? AND type='ST'"
     )
-    return pd.read_sql_query(sql, conn, params=all_st_symbols + [preload_start, end])
+    return conn.execute(sql, all_st_symbols + [preload_start, end]).df()
 
 
 def _add_years(date_str, offset):
@@ -251,25 +248,25 @@ def _dump_limits(conn, symbols, start, end, extra_start, extra_end):
         f"WHERE ts_code IN ({placeholders}) "
         "AND trade_date BETWEEN ? AND ?"
     )
-    df_main = pd.read_sql_query(sql_main, conn, params=symbols + [start, end])
+    df_main = conn.execute(sql_main, symbols + [start, end]).df()
 
     # Extra 创业板 switching window (20200820-20200825) - use broader symbol set
-    extra_300_symbols_df = pd.read_sql_query(
+    extra_300_symbols_df = conn.execute(
         "SELECT DISTINCT ts_code FROM stk_limit "
         "WHERE (ts_code LIKE '300%' OR ts_code LIKE '301%') "
         "AND trade_date BETWEEN ? AND ?",
-        conn, params=[extra_start, extra_end],
-    )
+        [extra_start, extra_end],
+    ).df()
     extra_syms = extra_300_symbols_df["ts_code"].tolist()
     if extra_syms:
         ep = ",".join("?" * len(extra_syms))
-        df_extra = pd.read_sql_query(
+        df_extra = conn.execute(
             "SELECT trade_date, ts_code, up_limit, down_limit, pre_close "
             "FROM stk_limit "
             f"WHERE ts_code IN ({ep}) "
             "AND trade_date BETWEEN ? AND ?",
-            conn, params=extra_syms + [extra_start, extra_end],
-        )
+            extra_syms + [extra_start, extra_end],
+        ).df()
     else:
         df_extra = pd.DataFrame()
 
@@ -278,34 +275,34 @@ def _dump_limits(conn, symbols, start, end, extra_start, extra_end):
 
 def _dump_components(conn, index_code, start, end):
     """Dump index_weight for the target index."""
-    df = pd.read_sql_query(
+    df = conn.execute(
         "SELECT index_code, con_code, trade_date, weight "
         "FROM index_weight "
         "WHERE index_code=? AND trade_date BETWEEN ? AND ?",
-        conn, params=[index_code, start, end],
-    )
+        [index_code, start, end],
+    ).df()
     return df
 
 
 def _dump_benchmark(conn, index_code, start, end):
     """Dump 000300.SH 指数点位作为基准（hfq_close = close，指数无复权概念）。"""
-    df = pd.read_sql_query(
+    df = conn.execute(
         "SELECT trade_date, close FROM idx_factor_pro "
         "WHERE ts_code=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
-        conn, params=[index_code, start, end],
-    )
+        [index_code, start, end],
+    ).df()
     df["hfq_close"] = df["close"]
     return df[["trade_date", "hfq_close"]]
 
 
 def _dump_trade_cal(conn, start, end):
     """Dump SSE trade calendar."""
-    df = pd.read_sql_query(
+    df = conn.execute(
         "SELECT cal_date, is_open, exchange FROM trade_cal "
         "WHERE exchange='SSE' AND cal_date BETWEEN ? AND ? "
         "ORDER BY cal_date",
-        conn, params=[start, end],
-    )
+        [start, end],
+    ).df()
     return df
 
 
@@ -319,7 +316,7 @@ def _dump_aux_table(conn, table: str, symbols: list[str], start: str, end: str):
         f"WHERE ts_code IN ({placeholders}) "
         "AND trade_date BETWEEN ? AND ?"
     )
-    return pd.read_sql_query(sql, conn, params=symbols + [start, end])
+    return conn.execute(sql, symbols + [start, end]).df()
 
 
 if __name__ == "__main__":

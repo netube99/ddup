@@ -548,7 +548,10 @@ library = load_library()
 factor_df = compute_factors(["mom20", "vol_z", "ep_z"], bars_df, library)
 
 # 前瞻收益（close_hfq 口径，与 CLI 一致）
-fwd_ret = bars_df["close_hfq"].groupby("symbol").pct_change(5).shift(-5)
+# 必须显式 groupby shift：pct_change().shift() 链是扁平位移，在 date-major
+# 面板会跨 symbol 污染（2026-08-07 事故的根因，勿照抄旧写法）
+close_hfq = bars_df["close_hfq"]
+fwd_ret = close_hfq.groupby("symbol").shift(-5) / close_hfq - 1
 
 # IC
 ic, rank_ic = calc_ic(factor_df["mom20"], fwd_ret)     # 每日截面 Pearson / Spearman

@@ -1,13 +1,13 @@
-"""GenericSQLBackend 契约测试：全平铺填表式 SQL 后端。
+"""GenericSQLBackend 契约测试：全平铺填表式 DuckDB 后端。
 
-用临时 sqlite 库验证：ABC 三方法、"表名.字段名" 位置解析、无主表网格
+用临时 DuckDB 库验证：ABC 三方法、"表名.字段名" 位置解析、无主表网格
 （键外并集，OHLC 刻意拆两张表）、列裁剪、表单校验、filters 编译、
 鸭子类型扩展按已填的空装配（未填即不存在）、扩展方法语义。
 """
 
 import logging
-import sqlite3
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -58,23 +58,24 @@ FULL_FORM = {
 
 
 def _build_db(path):
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-    CREATE TABLE quotes_a (ts_code TEXT, trade_date TEXT, open REAL, high REAL,
-                           close REAL, vol REAL, amount REAL,
-                           adj_factor REAL, pre_close REAL, pe_ttm REAL);
-    CREATE TABLE quotes_b (ts_code TEXT, trade_date TEXT, low REAL,
-                           up_limit REAL, down_limit REAL);
-    CREATE TABLE aux (ts_code TEXT, trade_date TEXT, score REAL);
-    CREATE TABLE aux2 (code TEXT, dt TEXT, score2 REAL);
-    CREATE TABLE cal (cal_date TEXT, is_open INTEGER);
-    CREATE TABLE div (ts_code TEXT, ex_date TEXT, stk_div REAL, cash_div REAL, note TEXT);
-    CREATE TABLE st (ts_code TEXT, trade_date TEXT, type TEXT);
-    CREATE TABLE ind (ts_code TEXT, name TEXT);
-    CREATE TABLE listings (ts_code TEXT, list_date TEXT);
-    CREATE TABLE idx (index_code TEXT, con_code TEXT, trade_date TEXT);
-    CREATE TABLE bench (ts_code TEXT, trade_date TEXT, close REAL);
-    CREATE TABLE badj (ts_code TEXT, trade_date TEXT, adj_factor REAL);
+    conn = duckdb.connect(path)
+    conn.execute("""
+    CREATE TABLE quotes_a (ts_code VARCHAR, trade_date VARCHAR, open DOUBLE, high DOUBLE,
+                           close DOUBLE, vol DOUBLE, amount DOUBLE,
+                           adj_factor DOUBLE, pre_close DOUBLE, pe_ttm DOUBLE);
+    CREATE TABLE quotes_b (ts_code VARCHAR, trade_date VARCHAR, low DOUBLE,
+                           up_limit DOUBLE, down_limit DOUBLE);
+    CREATE TABLE aux (ts_code VARCHAR, trade_date VARCHAR, score DOUBLE);
+    CREATE TABLE aux2 (code VARCHAR, dt VARCHAR, score2 DOUBLE);
+    CREATE TABLE cal (cal_date VARCHAR, is_open BIGINT);
+    CREATE TABLE div (ts_code VARCHAR, ex_date VARCHAR, stk_div DOUBLE,
+                      cash_div DOUBLE, note VARCHAR);
+    CREATE TABLE st (ts_code VARCHAR, trade_date VARCHAR, type VARCHAR);
+    CREATE TABLE ind (ts_code VARCHAR, name VARCHAR);
+    CREATE TABLE listings (ts_code VARCHAR, list_date VARCHAR);
+    CREATE TABLE idx (index_code VARCHAR, con_code VARCHAR, trade_date VARCHAR);
+    CREATE TABLE bench (ts_code VARCHAR, trade_date VARCHAR, close DOUBLE);
+    CREATE TABLE badj (ts_code VARCHAR, trade_date VARCHAR, adj_factor DOUBLE);
     """)
     conn.executemany(
         "INSERT INTO quotes_a VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -121,7 +122,7 @@ def _build_db(path):
 
 @pytest.fixture
 def db_path(tmp_path):
-    path = str(tmp_path / "test.db")
+    path = str(tmp_path / "test.duckdb")
     _build_db(path)
     return path
 
@@ -306,9 +307,9 @@ def test_query_bars_unknown_column(backend):
 
 def test_reserved_word_columns(db_path):
     """物理表/列名撞 SQL 保留字（limit/order）：标识符加引号后照常对接。"""
-    conn = sqlite3.connect(db_path)
-    conn.execute('CREATE TABLE ev (ts_code TEXT, trade_date TEXT,'
-                 ' "limit" TEXT, "order" REAL)')
+    conn = duckdb.connect(db_path)
+    conn.execute('CREATE TABLE ev (ts_code VARCHAR, trade_date VARCHAR,'
+                 ' "limit" VARCHAR, "order" DOUBLE)')
     conn.execute("INSERT INTO ev VALUES ('000001.SZ', '20240102', 'U', 3.5)")
     conn.commit()
     conn.close()
@@ -390,15 +391,15 @@ def test_benchmark_no_bars_returns_none(backend):
 def test_view_as_source_table(tmp_path):
     """任何被引用的"表"都可以是 VIEW：复杂拼接逻辑在库里一次性表达，
     表单无需感知。"""
-    path = str(tmp_path / "view.db")
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-    CREATE TABLE daily (ts_code TEXT, trade_date TEXT, open REAL, high REAL,
-                        low REAL, close REAL, vol REAL, amount REAL,
-                        pre_close REAL, up_limit REAL, down_limit REAL);
-    CREATE TABLE adj (ts_code TEXT, trade_date TEXT, adj_factor REAL);
-    CREATE TABLE cal (cal_date TEXT);
-    CREATE TABLE div (ts_code TEXT, ex_date TEXT, stk_div REAL, cash_div REAL);
+    path = str(tmp_path / "view.duckdb")
+    conn = duckdb.connect(path)
+    conn.execute("""
+    CREATE TABLE daily (ts_code VARCHAR, trade_date VARCHAR, open DOUBLE, high DOUBLE,
+                        low DOUBLE, close DOUBLE, vol DOUBLE, amount DOUBLE,
+                        pre_close DOUBLE, up_limit DOUBLE, down_limit DOUBLE);
+    CREATE TABLE adj (ts_code VARCHAR, trade_date VARCHAR, adj_factor DOUBLE);
+    CREATE TABLE cal (cal_date VARCHAR);
+    CREATE TABLE div (ts_code VARCHAR, ex_date VARCHAR, stk_div DOUBLE, cash_div DOUBLE);
     CREATE VIEW v_bars AS
         SELECT d.*, a.adj_factor
         FROM daily d
@@ -442,9 +443,9 @@ def test_query_bars_empty_symbols_returns_empty(backend):
 
 def test_query_bars_duplicate_keys_rejected(tmp_path):
     """面板表 (交易日, 代码) 键重复 → 加载期报错，而非 join 爆炸/静默丢行。"""
-    path = str(tmp_path / "dup.db")
+    path = str(tmp_path / "dup.duckdb")
     _build_db(path)
-    conn = sqlite3.connect(path)
+    conn = duckdb.connect(path)
     conn.execute(
         "INSERT INTO quotes_a VALUES ('000001.SZ','20240102',1,1,1,1,1,1,1,1)"
     )
@@ -459,14 +460,13 @@ def test_query_bars_duplicate_keys_rejected(tmp_path):
 
 
 def test_integer_date_column_rejected(tmp_path):
-    """日期列存 INTEGER → 初始化期报错（SQLite 类型序 INTEGER < TEXT，
-    与文本参数的键比较恒假，面板会静默查空）。"""
-    path = str(tmp_path / "intdate.db")
+    """日期列存 BIGINT → 初始化期报错（键列须为 YYYYMMDD 文本）。"""
+    path = str(tmp_path / "intdate.duckdb")
     _build_db(path)
-    conn = sqlite3.connect(path)
+    conn = duckdb.connect(path)
     conn.execute(
         "CREATE TABLE quotes_int AS SELECT ts_code,"
-        " CAST(trade_date AS INTEGER) AS trade_date, open, high, close, vol,"
+        " CAST(trade_date AS BIGINT) AS trade_date, open, high, close, vol,"
         " amount, adj_factor, pre_close, pe_ttm FROM quotes_a"
     )
     conn.execute("DROP TABLE quotes_a")
@@ -478,17 +478,28 @@ def test_integer_date_column_rejected(tmp_path):
 
 
 def test_integer_symbol_column_rejected(tmp_path):
-    """代码列存 INTEGER → 初始化期报错（symbol IN 文本参数比较恒假）。"""
-    path = str(tmp_path / "intsym.db")
+    """代码列存 BIGINT → 初始化期报错（键列须为 VARCHAR）。"""
+    path = str(tmp_path / "intsym.duckdb")
     _build_db(path)
-    conn = sqlite3.connect(path)
-    conn.execute(
-        "CREATE TABLE ind_int AS SELECT CAST(ts_code AS INTEGER) AS ts_code,"
-        " name FROM ind"
-    )
+    conn = duckdb.connect(path)
+    conn.execute("CREATE TABLE ind_int (ts_code BIGINT, name VARCHAR)")
+    conn.execute("INSERT INTO ind_int VALUES (1, '银行')")
     conn.execute("DROP TABLE ind")
     conn.execute("ALTER TABLE ind_int RENAME TO ind")
     conn.commit()
     conn.close()
-    with pytest.raises(ValueError, match="TEXT"):
+    with pytest.raises(ValueError, match="VARCHAR"):
         GenericSQLBackend(FULL_FORM, path)
+
+
+def test_sqlite_file_rejected(tmp_path):
+    """旧 SQLite 文件 fail-fast：不允许 DuckDB 经 sqlite_scanner 静默打开。"""
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE t (a INTEGER)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ValueError, match="不是 DuckDB 格式"):
+        GenericSQLBackend(MINIMAL_FORM, path)

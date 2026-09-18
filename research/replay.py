@@ -1,13 +1,15 @@
-"""交易回放 — 从 result.db 加载 debug_snapshots，输出决策上下文。
+"""交易回放 — 从结果库加载 debug_snapshots，输出决策上下文。
 
 scripts/replay.py 薄壳的全部逻辑，抽到 research 层可 import 复用
 （整改指导 DUP-08：唯一未薄壳化的脚本）。
 """
 
 import json
-import sqlite3
 import sys
 
+import duckdb
+
+from btcore import database
 from research.cli_common import latest_run_id
 
 # 因子展示时排除的行情/派生列（与决策无关，避免刷屏）
@@ -19,17 +21,18 @@ _FACTOR_EXCLUDE = {
 }
 
 
-def resolve_run_id(conn: sqlite3.Connection, run_id: int | None) -> int:
-    """run_id 解析：显式值优先，缺省取最新 run；旧库无 runs 表回退 run 1。
+def resolve_run_id(conn: duckdb.DuckDBPyConnection, run_id: int | None) -> int:
+    """run_id 解析：显式值优先，缺省取最新 run；无 runs 表/无记录 → ValueError。
 
-    无 run 记录时抛 ValueError（调用方负责转成 stderr + 非零退出）。
+    旧 SQLite 结果库在 connect_result_db 即被拒（不保留兼容），
+    因此不再有"无 runs 表回退 run 1"路径。
     """
     if run_id is not None:
         return run_id
     try:
         rid = latest_run_id(conn)
-    except sqlite3.OperationalError:
-        rid = None  # 旧库无 runs 表，回退 run 1
+    except duckdb.CatalogException:
+        rid = None  # 无 runs 表（非标准结果库）
     if rid is None:
         raise ValueError("结果库中无 run 记录")
     return rid
@@ -81,11 +84,15 @@ def format_day(snap: dict, symbol: str | None = None) -> list[str]:
 
 def run_replay(db_path: str, run_id: int | None = None, *, symbol: str | None = None,
                date: str | None = None, list_symbols: bool = False) -> int:
-    """完整回放输出到 stdout；0 = 成功，1 = 无 run / 无匹配快照。
+    """完整回放输出到 stdout；0 = 成功，1 = 无 run / 无匹配快照 / 库不可读。
 
     与原 scripts/replay.py 的 CLI 输出逐字节一致。
     """
-    conn = sqlite3.connect(db_path)
+    try:
+        conn = database.connect_result_db(db_path, read_only=True)
+    except (duckdb.Error, ValueError) as e:
+        print(f"无法打开结果库 {db_path}: {e}", file=sys.stderr)
+        return 1
     try:
         try:
             rid = resolve_run_id(conn, run_id)

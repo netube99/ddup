@@ -4,11 +4,9 @@
 逐日逐分钱一致，末日 pending_actions 逐键相等——证明实盘路径 ≡ 回测路径。
 """
 
-import sqlite3
-
 import pytest
 
-from btcore import types
+from btcore import database, types
 from btcore.engine import Engine
 from btcore.provider import DataProvider
 from btcore.strategy_loader import load_strategy
@@ -39,16 +37,16 @@ def _run_backtest(tmp_path):
     strategy = load_strategy(EXAMPLE_YAML)
     provider = DataProvider(MockDataBackend())
     engine = Engine(strategy, provider, initial_capital=1_000_000,
-                    db_path=str(tmp_path / "bt.db"))
+                    db_path=str(tmp_path / "bt.duckdb"))
     engine.run(START, END)
     return engine
 
 
 def _ledger_from_backtest(bt_engine, tmp_path):
     """把回测 trade_log 灌进 LedgerStore（BUY/SELL 行按 id 顺序）。"""
-    store = LedgerStore(str(tmp_path / "ledger.db"))
+    store = LedgerStore(str(tmp_path / "ledger.duckdb"))
     store.init_account(START, 1_000_000.0, 1_000_000.0)
-    conn = sqlite3.connect(str(tmp_path / "bt.db"))
+    conn = database.connect_result_db(str(tmp_path / "bt.duckdb"), read_only=True)
     rows = conn.execute(
         "SELECT date, symbol, side, trigger, price, shares, commission,"
         " stamp_tax, transfer_fee FROM trade_log"
@@ -193,7 +191,6 @@ class TestSyncIdempotency:
         appended, skipped = store.append_fills_idempotent(fills, NOW)
         assert (appended, skipped) == (1, 0)
         assert len(store.fills()) == 2
-        store.conn.rollback()
 
     def test_bad_data_reports_error_json_not_crash(self):
         """缺买入记录的卖出 → data_error 而非堆栈崩溃（CLI 层由 cmd_sync 兜底，
@@ -207,7 +204,6 @@ class TestSyncIdempotency:
         provider = DataProvider(MockDataBackend())
         with pytest.raises(ValueError, match="缺买入记录"):
             reconcile(store, provider, START, 990_000.0, {})
-        store.conn.rollback()
 
 
 class TestBacktestParity:
@@ -216,11 +212,10 @@ class TestBacktestParity:
     def test_round_trip_parity(self, tmp_path):
         bt = _run_backtest(tmp_path)
         assert bt.run_id > 0
-        n_trades = len(
-            sqlite3.connect(str(tmp_path / "bt.db")).execute(
-                "SELECT 1 FROM trade_log").fetchall()
-        )
-        assert n_trades > 0, "回测无成交，parity 测试失去意义"
+        n_trades = database.connect_result_db(
+            str(tmp_path / "bt.duckdb"), read_only=True
+        ).execute("SELECT 1 FROM trade_log").fetchall()
+        assert len(n_trades) > 0, "回测无成交，parity 测试失去意义"
 
         store = _ledger_from_backtest(bt, tmp_path)
         strategy = load_strategy(EXAMPLE_YAML)
@@ -243,9 +238,13 @@ class TestBacktestParity:
         assert live_engine.pending_actions == bt.pending_actions
 
         # 3) 衍生 account_daily 与回测逐日一致
-        bt_daily = sqlite3.connect(str(tmp_path / "bt.db")).execute(
+        bt_conn = database.connect_result_db(
+            str(tmp_path / "bt.duckdb"), read_only=True
+        )
+        bt_daily = bt_conn.execute(
             "SELECT date, cash, total_value FROM account_daily ORDER BY date"
         ).fetchall()
+        bt_conn.close()
         live_daily = store.conn.execute(
             "SELECT date, cash, total_value FROM account_daily"
             " WHERE run_id = 1 ORDER BY date"
@@ -314,11 +313,11 @@ class TestSellReasonsProtocol:
     def test_reason_becomes_trade_trigger(self, tmp_path):
         engine = Engine(self._strategy("TREND_BREAK"),
                         DataProvider(MockDataBackend()),
-                        initial_capital=1_000_000, db_path=str(tmp_path / "r.db"))
+                        initial_capital=1_000_000, db_path=str(tmp_path / "r.duckdb"))
         engine.run("20240603", "20240607")
-        conn = sqlite3.connect(str(tmp_path / "r.db"))
+        conn = database.connect_result_db(str(tmp_path / "r.duckdb"), read_only=True)
         triggers = [r[0] for r in conn.execute(
-            "SELECT trigger FROM trade_log WHERE side = 'SELL'")]
+            "SELECT trigger FROM trade_log WHERE side = 'SELL'").fetchall()]
         conn.close()
         assert triggers and all(t == "TREND_BREAK" for t in triggers)
 

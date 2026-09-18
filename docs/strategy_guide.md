@@ -811,20 +811,20 @@ python scripts/run.py strategies/my_strategy/config.yaml --start 20240101 --end 
 
 # 指定结果库 / 覆盖初始资金 / 关闭报告
 python scripts/run.py strategies/my_strategy/config.yaml \
-    --start 20240101 --end 20240630 --out result.db --capital 500000 --no-report
+    --start 20240101 --end 20240630 --out results/run.duckdb --capital 500000 --no-report
 ```
 
 ### 9.2 查看结果
 
 ```bash
 # 从结果库生成单 run HTML 报告（--run-id 缺省取最新）
-python scripts/report.py result.db --out report.html
+python scripts/report.py results/run.duckdb --out report.html
 
 # 多 run 对比（终端表格 + 可选对比 HTML）
-python scripts/compare.py result.db --runs 1,2,3 --html compare.html
+python scripts/compare.py results/run.duckdb --runs 1,2,3 --html compare.html
 
 # 交叉验证（交易合理性 / 异常检测 / 小资金磨损检查）
-python scripts/cross_validate.py result.db --strategy my_strategy --run-id 1
+python scripts/cross_validate.py results/run.duckdb --strategy my_strategy --run-id 1
 ```
 
 ### 9.3 程序化调用
@@ -836,7 +836,7 @@ from btcore.strategy_loader import load_strategy
 
 strategy = load_strategy("strategies/my_strategy/config.yaml")
 provider = DataProvider(backend)
-engine = Engine(strategy, provider, db_path="result.db", debug=False)
+engine = Engine(strategy, provider, db_path="results/run.duckdb", debug=False)
 # Engine(strategy, provider, initial_capital=None, db_path=None,
 #        max_positions=None, debug=False) —— initial_capital/max_positions 覆盖 YAML
 
@@ -873,7 +873,7 @@ result = engine.run("20240101", "20240630")
 配合 `scripts/replay.py` 按 symbol/日期回放完整决策上下文，定位「某天为什么买/卖了某只股票」：
 
 ```bash
-python scripts/replay.py result.db --run-id 1 --symbol 000001.SZ --date 20240315
+python scripts/replay.py results/run.duckdb --run-id 1 --symbol 000001.SZ --date 20240315
 ```
 
 ### 9.5 调试技巧
@@ -992,49 +992,49 @@ from btcore.match.conditions import register_condition_handler, register_buy_con
 # register_buy_condition_handler(type: str, handler) -> None  # 进程级全局
 ```
 
-### 10.7 结果库 SQLite Schema
+### 10.7 结果库 DuckDB Schema
 
-回测结果落盘 SQLite。同一 `db_path` 多次 `engine.run()` 按 `run_id` 增量追加。
+回测结果落盘 DuckDB（BIGINT/VARCHAR/DOUBLE；无 AUTOINCREMENT，`run_id`/`trade_log.id` 走 sequence；事务用 `database.transaction(conn)` 显式管理）。同一 `db_path` 多次 `engine.run()` 按 `run_id` 增量追加。
 
 **runs**（每次回测的元信息）：
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `run_id` | INTEGER PK AUTOINCREMENT | 运行编号 |
-| `created_at` | TEXT | 创建时间戳 |
-| `strategy` | TEXT | 策略类名 |
-| `start_date` / `end_date` | TEXT | 回测区间 (YYYYMMDD) |
-| `initial_capital` | REAL | 初始资金（元） |
-| `config_json` | TEXT | 策略完整配置 JSON |
-| `status` | TEXT | `running` / `completed` / `failed` |
-| `stats_json` | TEXT | 统计指标 JSON |
+| `run_id` | BIGINT PK（sequence 自增） | 运行编号 |
+| `created_at` | VARCHAR | 创建时间戳 |
+| `strategy` | VARCHAR | 策略类名 |
+| `start_date` / `end_date` | VARCHAR | 回测区间 (YYYYMMDD) |
+| `initial_capital` | DOUBLE | 初始资金（元） |
+| `config_json` | VARCHAR | 策略完整配置 JSON |
+| `status` | VARCHAR | `running` / `completed` / `failed` |
+| `stats_json` | VARCHAR | 统计指标 JSON |
 
 **account_daily**（逐日账户快照，PK = (run_id, date)）：
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `run_id` / `date` | INTEGER / TEXT | 关联 runs；交易日 |
-| `cash` | REAL | 可用现金 |
-| `total_value` | REAL | 总资产 |
-| `daily_pnl` / `cumulative_pnl` | REAL | 当日 / 累计盈亏 |
-| `initial_capital` | REAL | 初始资金 |
-| `n_holdings` | INTEGER | 持仓数 |
+| `run_id` / `date` | BIGINT / VARCHAR | 关联 runs；交易日 |
+| `cash` | DOUBLE | 可用现金 |
+| `total_value` | DOUBLE | 总资产 |
+| `daily_pnl` / `cumulative_pnl` | DOUBLE | 当日 / 累计盈亏 |
+| `initial_capital` | DOUBLE | 初始资金 |
+| `n_holdings` | BIGINT | 持仓数 |
 
 **trade_log**（逐笔成交记录）：
 
 | 列 | 类型 | 说明 |
 |---|---|---|
-| `id` | INTEGER PK AUTOINCREMENT | 记录编号 |
+| `id` | BIGINT PK（sequence 自增） | 记录编号 |
 | `run_id` / `date` / `symbol` | — | 关联 runs；成交日期；股票代码 |
-| `side` | TEXT | `BUY` / `SELL` / `DIV`（公司行为） |
-| `trigger` | TEXT | 触发类型（见 §10.4） |
-| `price` | REAL | 成交价（已含滑点） |
-| `shares` | INTEGER | 成交股数 |
-| `turnover` | REAL | 成交金额（未含滑点） |
-| `commission` / `stamp_tax` / `transfer_fee` | REAL | 佣金 / 印花税（仅卖出）/ 过户费 |
-| `slippage_amount` | REAL | 滑点金额 |
-| `net_amount` | REAL | 净现金流 |
-| `reason` | TEXT | 备注 |
+| `side` | VARCHAR | `BUY` / `SELL` / `DIV`（公司行为） |
+| `trigger` | VARCHAR | 触发类型（见 §10.4） |
+| `price` | DOUBLE | 成交价（已含滑点） |
+| `shares` | BIGINT | 成交股数 |
+| `turnover` | DOUBLE | 成交金额（未含滑点） |
+| `commission` / `stamp_tax` / `transfer_fee` | DOUBLE | 佣金 / 印花税（仅卖出）/ 过户费 |
+| `slippage_amount` | DOUBLE | 滑点金额 |
+| `net_amount` | DOUBLE | 净现金流 |
+| `reason` | VARCHAR | 备注 |
 
 **turnover 口径**：回测库 turnover = 滑点前名义成交额（price 为滑点后成交价，
 故 turnover ≠ price × shares）；实盘账本衍生库（research/live.py 回放）turnover =

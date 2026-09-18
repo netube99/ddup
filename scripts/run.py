@@ -2,7 +2,7 @@
 
 用法:
     python scripts/run.py strategies/examples/rolling_ranker/config.yaml \
-        --start 20240101 --end 20240630 [--capital N] [--out result.db] \
+        --start 20240101 --end 20240630 [--capital N] [--out result.duckdb] \
         [--report report.html]
 
 行情数据库由 adapters/tushare.py 的 _DEFAULT_DB_PATH 决定。

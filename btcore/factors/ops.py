@@ -20,6 +20,8 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from btcore.factors.expr import coerce_all_nan_object_columns
+
 _DATE = "trade_date"
 _SYMBOL = "symbol"
 
@@ -373,6 +375,7 @@ def eval_op_expr(df: pd.DataFrame, expr: str) -> pd.Series:
     裸标识符解析为 df 的列（因子引用由调用方按拓扑序先物化为列）。
     """
     validate_op_expr(expr)
+    df = coerce_all_nan_object_columns(df)
 
     def _eval(node: ast.AST):
         if isinstance(node, ast.Expression):

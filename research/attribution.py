@@ -7,8 +7,8 @@
     from research.attribution import brinson_attribute
 
     result = brinson_attribute(
-        "backtest_output/run.db",
-        "/path/to/market.db",
+        "backtest_output/run.duckdb",
+        "/path/to/market.duckdb",
         "20240601", "20240701",
     )
     print(f"配置效应={result['summary']['allocation_effect']:.4%}")
@@ -16,7 +16,7 @@
 
     也可从本地 parquet 文件加载数据（无需外部数据库）：
     result = brinson_attribute_from_files(
-        "backtest_output/run.db",
+        "backtest_output/run.duckdb",
         industry_map="brinson_data/industry_map.parquet",
         sw_returns="brinson_data/sw_returns.parquet",
         benchmark_weights="brinson_data/benchmark_weights.parquet",
@@ -34,11 +34,14 @@
 """
 
 import logging
-import sqlite3
 from collections import defaultdict
 from itertools import groupby
 
+import duckdb
 import pandas as pd
+
+from btcore import database
+from btcore.generic_sql import connect_market_db
 
 logger = logging.getLogger(__name__)
 
@@ -48,28 +51,34 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════
 
 
-def _open_provider_db(db_path: str) -> sqlite3.Connection:
-    uri = f"file:{db_path}?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _open_provider_db(db_path: str) -> duckdb.DuckDBPyConnection:
+    """只读打开行情库：走 connect_market_db（旧格式 fail-fast + 写锁重试）。
+
+    裸 duckdb.connect 会经 sqlite_scanner 静默打开旧 SQLite 文件
+    （docs/backend_guide.md §10.1），必须由 btcore 助手统一拒绝。
+    """
+    return connect_market_db(db_path)
 
 
-def _load_industry_map(conn: sqlite3.Connection) -> dict[str, str]:
-    """读取 index_member_all，返回 {ts_code: l1_name}。"""
+def _load_industry_map(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[dict[str, str], list[str]]:
+    """读取 index_member_all 一次，返回 ({ts_code: l1_name}, L1 行业代码表)。
+
+    单次扫描同时产出行业映射与 L1 代码集合（原实现同表拉两次）。
+    """
     rows = conn.execute(
-        "SELECT ts_code, l1_name FROM index_member_all"
+        "SELECT ts_code, l1_name, l1_code FROM index_member_all"
     ).fetchall()
-    result = {}
-    for r in rows:
-        result[r["ts_code"]] = r["l1_name"]
+    result = {r[0]: r[1] for r in rows}
+    l1_codes = sorted({r[2] for r in rows if r[2]})
     logger.info("industry_map: %d stocks → %d industries",
                 len(result), len(set(result.values())))
-    return result
+    return result, l1_codes
 
 
 def _load_sw_returns(
-    conn: sqlite3.Connection,
+    conn: duckdb.DuckDBPyConnection,
     start: str,
     end: str,
     l1_codes: list[str],
@@ -103,9 +112,9 @@ def _load_sw_returns(
     records = []
     for r in rows:
         records.append({
-            "date": r["trade_date"],
-            "industry": r["name"],
-            "ret": (r["pct_change"] or 0.0) / 100.0,
+            "date": r[0],
+            "industry": r[2],
+            "ret": (r[3] or 0.0) / 100.0,
         })
 
     df = pd.DataFrame(records)
@@ -117,7 +126,7 @@ def _load_sw_returns(
 
 
 def _load_benchmark_weights(
-    conn: sqlite3.Connection,
+    conn: duckdb.DuckDBPyConnection,
     index_code: str,
     start: str,
     end: str,
@@ -142,14 +151,14 @@ def _load_benchmark_weights(
     records = []
     unmapped = set()
     for r in rows:
-        industry = industry_map.get(r["con_code"])
+        industry = industry_map.get(r[0])
         if industry is None:
-            unmapped.add(r["con_code"])
+            unmapped.add(r[0])
             continue
         records.append({
-            "date": r["trade_date"],
+            "date": r[1],
             "industry": industry,
-            "weight": r["weight"] or 0.0,
+            "weight": r[2] or 0.0,
         })
 
     if unmapped:
@@ -576,22 +585,17 @@ def brinson_attribute(
             "exposure_summary": {...}
         }
     """
-    # 打开连接
-    backtest_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    provider_conn = _open_provider_db(provider_db)
+    # 打开连接：结果库经 connect_result_db（旧格式 fail-fast）
+    backtest_conn = database.connect_result_db(db_path, read_only=True)
+    try:
+        provider_conn = _open_provider_db(provider_db)
+    except BaseException:
+        backtest_conn.close()
+        raise
 
     try:
-        # 1. 加载行业映射
-        industry_map = _load_industry_map(provider_conn)
-
-        # L1 行业代码集合
-        l1_codes = sorted(
-            r[0]
-            for r in provider_conn.execute(
-                "SELECT DISTINCT l1_code FROM index_member_all"
-            ).fetchall()
-            if r[0]
-        )
+        # 1. 加载行业映射 + L1 代码（单次扫描）
+        industry_map, l1_codes = _load_industry_map(provider_conn)
 
         # 2. 加载行业指数收益
         sw_returns = _load_sw_returns(provider_conn, start, end, l1_codes)
@@ -609,9 +613,10 @@ def brinson_attribute(
 
         # 4. 读取回测 trade_log（按 run_id 过滤；旧库无该列则不过滤）
         run_cols = {
-            row[1]
+            row[0]
             for row in backtest_conn.execute(
-                "PRAGMA table_info(trade_log)"
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'trade_log'"
             ).fetchall()
         }
         run_filter = ""
@@ -641,12 +646,12 @@ def brinson_attribute(
                             start, end, run_id, trade_start, trade_end,
                         )
 
-        trade_log_df = pd.read_sql_query(
+        trade_log_df = backtest_conn.execute(
             "SELECT id, date, symbol, side, shares FROM trade_log "
             "WHERE date >= ? AND date <= ? AND side IN ('BUY', 'SELL', 'STK_DIV')"
             f"{run_filter} ORDER BY date, id",
-            backtest_conn, params=(trade_start, trade_end, *run_params),
-        )
+            [trade_start, trade_end, *run_params],
+        ).df()
 
         # 5. 加载 bars 数据（只拉实际交易过的股票）
         traded_symbols = sorted(trade_log_df["symbol"].unique())
@@ -686,21 +691,29 @@ def brinson_attribute(
 
 
 def _load_bars_for_symbols(
-    conn: sqlite3.Connection,
+    conn: duckdb.DuckDBPyConnection,
     symbols: list[str],
     start: str,
     end: str,
 ) -> pd.DataFrame:
-    """从 stk_factor_pro 拉取指定股票在日期范围内的 bars。"""
-    placeholders = ",".join("?" * len(symbols))
-    sql = (
-        "SELECT ts_code AS symbol, trade_date, close, pct_chg FROM stk_factor_pro "
-        f"WHERE ts_code IN ({placeholders}) "
-        "AND trade_date >= ? AND trade_date <= ? "
-        "ORDER BY trade_date, ts_code"
-    )
-    params = list(symbols) + [start, end]
-    df = pd.read_sql_query(sql, conn, params=params)
+    """从 stk_factor_pro 拉取指定股票在日期范围内的 bars。
+
+    symbols 走注册关系半连接（与 generic_sql 同模式）：大 universe 时
+    避免上千个 ? 占位符的绑定开销。
+    """
+    if not symbols:
+        return pd.DataFrame()
+    conn.register("_ddup_syms", pd.DataFrame({"symbol": list(symbols)}))
+    try:
+        df = conn.execute(
+            "SELECT ts_code AS symbol, trade_date, close, pct_chg FROM stk_factor_pro "
+            'WHERE ts_code IN (SELECT "symbol" FROM _ddup_syms) '
+            "AND trade_date >= ? AND trade_date <= ? "
+            "ORDER BY trade_date, ts_code",
+            [start, end],
+        ).df()
+    finally:
+        conn.unregister("_ddup_syms")
     if df.empty:
         return df
     df.set_index(["trade_date", "symbol"], inplace=True)
@@ -803,15 +816,14 @@ def brinson_attribute_from_files(
         }
     logger.info("bars (from files): %d rows", len(bars_df))
 
-    # 5. 读取回测 trade_log
-    backtest_conn = sqlite3.connect(f"file:{result_db}?mode=ro", uri=True)
+    # 5. 读取回测 trade_log（结果库旧格式 fail-fast）
+    backtest_conn = database.connect_result_db(result_db, read_only=True)
     try:
-        trade_log_df = pd.read_sql_query(
+        trade_log_df = backtest_conn.execute(
             "SELECT id, date, symbol, side, shares FROM trade_log "
             "WHERE side IN ('BUY', 'SELL', 'STK_DIV') AND run_id = ? ORDER BY date, id",
-            backtest_conn,
-            params=(run_id,),
-        )
+            [run_id],
+        ).df()
     finally:
         backtest_conn.close()
 

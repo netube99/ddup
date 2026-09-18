@@ -1,7 +1,7 @@
 """从回测结果库离线生成单 run HTML 报告。
 
 用法:
-    python scripts/report.py result.db [--run-id N] --out report.html
+    python scripts/report.py result.duckdb [--run-id N] --out report.html
 
 --run-id 缺省取最新 run；老 run 无 stats_json 时现场重算统计指标。
 """

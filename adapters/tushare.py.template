@@ -8,7 +8,7 @@ from btcore.generic_sql import GenericSQLBackend
 
 # 默认行情库路径；可用环境变量 DDUP_MARKET_DB 覆盖（与真实实现同口径）
 _DEFAULT_DB_PATH = os.environ.get(
-    "DDUP_MARKET_DB", "<YOUR_TUSHARE_DB_PATH>"  # 如 "/data/tushare/market.db"
+    "DDUP_MARKET_DB", "<YOUR_TUSHARE_DB_PATH>"  # 如 "/data/tushare/market.duckdb"
 )
 
 

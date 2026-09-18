@@ -14,10 +14,11 @@ trainer 在 scaler 之后填 0（= 训练段均值）。
 """
 
 import logging
-import sqlite3
 
+import duckdb
 import pandas as pd
 
+from btcore import database
 from btcore.ml.runtime import assemble_feature_value, compute_state_features
 from btcore.ml.spec import ModelSpec
 from btcore.types import Holding
@@ -51,12 +52,12 @@ def xs_forward_return(panel: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return pd.DataFrame({"label": label, "fwd_ret": fwd}, index=panel.index)
 
 
-def _resolve_run_id(db: sqlite3.Connection, run_id: int | None) -> int:
+def _resolve_run_id(db: duckdb.DuckDBPyConnection, run_id: int | None) -> int:
     """run_id 缺省解析：优先最新 completed run，无 completed 回退最新 run。"""
     if run_id is not None:
         return run_id
     has_runs = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'runs'"
     ).fetchone()
     if has_runs is None:
         raise ValueError("结果库缺少 runs 表，无法定位 trade_log 所属 run")
@@ -104,7 +105,7 @@ def extract_trade_pairs(result_db_path: str, run_id: int | None = None) -> pd.Da
     引擎 Holding 状态（entry_price 逐日路径），静态聚合 buy_price 无法
     表达加仓重算与期内除权除息 rescale。
     """
-    db = sqlite3.connect(result_db_path)
+    db = database.connect_result_db(result_db_path, read_only=True)
     run_id = _resolve_run_id(db, run_id)
     rows = db.execute(
         "SELECT " + ", ".join(TRADE_LOG_SELECT_COLS)

@@ -2,7 +2,7 @@
 # open = 未决发现（P0/P1 是门禁 FAIL 的来源）；closed = 已修复或已 waive
 # 手工编辑请保持结构；字段：id/severity/rule/file/line/note/opened/resolved/waived
 meta:
-  last_full_audit: '2026-09-13'
+  last_full_audit: '2026-09-18'
 open:
 - id: F-FAC-03
   severity: P3
@@ -251,6 +251,243 @@ open:
     是默认费率下的边界金额（元）。SKILL.md 缺『元』单位易误读；cli_and_research.md:178 带单位稍可辨析。建议改为『默认费率下边界
     ≈33333 元』。
   opened: '2026-09-13'
+- id: F-FD0-03
+  severity: P2
+  rule: adapters/tushare.py extra_fields 是列登记唯一事实源，未登记列运行期拒绝（fail-fast）
+  file: factors/library.yaml
+  line: 527
+  note: accrual_z(527) 引用 net_profit/n_cashflow_act，cfo_quality(535) 同，leverage_change(543)
+    引用 total_liab：三列均未在 adapters/tushare.py extra_fields 登记，实库 PRAGMA table_info(bak_basic)
+    亦无这些列（只有 total_assets/liquid_assets 等）→ 三个因子不可物化（策略引用即 preload 报错），描述里的『⚠ 需 bak_basic
+    表含…列』从未落实，属死定义。
+  opened: '2026-09-16'
+- id: F-FD0-04
+  severity: P2
+  rule: factors/library.yaml:9 顶部通告：本文件所有修正前的 RankIR/分层/衰减数字均失效，需用修复后的 factor_eval
+    重测
+  file: factors/library.yaml
+  line: 9
+  note: 评估标注系统性失效：大量段落仍把作废数字写成『★通过/有效/旗舰』，与同文件修正后结论/顶部通告直接互斥。例：winner_rate_z(172『筹码簇真实有效』)
+    vs 通告 -0.11/-0.09；close_vs_cost50(182『0.41/0.48』) vs -0.04/-0.03；cvw_ma5(766『★0.574/0.282
+    比裸 cvw 强一倍』)与 cvw_chg5/cvw_neutral(774-786) vs -0.06/-0.03；winner_chg20(857『★0.51/0.62』)
+    vs 0.00/0.02；技术指标蒸馏节(261-319)全部 2026-07-27 数字；中性化节(354-373『0.64/0.53/0.54/0.49/0.52』与
+    mom5『0.83』) vs 重测 mom 族 -0.07~-0.15；基本面节(326-348)与 1276 行符号相反；事件/低拥挤段(377-397/1241-1274)同类。第
+    15/16 轮『★ 全存活』与 1285-1291『此前通过判定全部撤销』同页并存，读者无法区分有效/作废（策略层后果见 F-FDX-06）。
+  opened: '2026-09-16'
+- id: F-FD1-03
+  severity: P2
+  rule: 'factors/library.yaml:51 描述『涨停封单金额/流通市值（封板强度，仅封板日有值）』；adapters/tushare.py:181
+    limit_flag: U涨停/D跌停/Z炸板'
+  file: factors/library.yaml
+  line: 49
+  note: limit_list_d 的跌停(D)行 fd_amount/open_times/limit_times 同样有值，where fd_amount>0
+    不区分 U/D → seal_strength/limit_solidity/sealed_days5 把跌停日计为『涨停封板』。DB 实证 2024 全年：D
+    行 5881 行全部 fd_amount>0（如 603863.SH 20240605 limit_times=2 且当日 -10.01%），U 行 17761
+    → 约 25% 的『封板』观测来自跌停；sealed_days5 被 selected/core_lowvol_500 作为评分因子消费，信号含义被静默改写。
+  opened: '2026-09-16'
+- id: F-FD1-04
+  severity: P2
+  rule: factors/library.yaml:58 描述『连板数（仅上榜日有值，原始事件列）』
+  file: factors/library.yaml
+  line: 57
+  note: limit_streak=limit_times 无掩码，而 D(跌停)行 limit_times 为连续跌停天数 → 『2 连板』与『2 连跌停』同值（20240605
+    实例 603863.SH=2，当日 -10.01%）；Z 行全 NULL。U/D 在因子值上不可区分。
+  opened: '2026-09-16'
+- id: F-FD2-06
+  severity: P3
+  rule: AGENTS.md 财报数据对齐契约 + adapters/tushare.py:272-277 注释（stk_holdernumber_agg 按
+    ann_date 对齐）
+  file: factors/library.yaml
+  line: 244
+  note: holder_count 描述『仅定期报告日有值』与数据事实不符：agg 表按 ann_date 对齐；2026 年 ann_date=end_date
+    行中 end_date 为季末仅 110/18716，样本多为 20260731/20260720 等 → 实为月度级公告快照。无前视，但描述低估披露频率、误导口径判断。
+  opened: '2026-09-16'
+- id: F-FD2-07
+  severity: P3
+  rule: docs/factor_library.md §8：where 是后置掩码，表达式先完整求值（不保护 where 之前的滚动窗口）
+  file: factors/library.yaml
+  line: 200
+  note: margin_ma5=ma(rzmre/rzye,5) 滚动前无分母保护：margin_detail 中 rzye=0 共 204 行（其中 145
+    行 rzmre>0 → +inf），rolling mean 窗口含 inf 即整窗 NaN，此后 4 日 margin_ma5 静默 NaN；where
+    rzye>0 只掩当日。当前 204 行均为基金代码（不在 stk_factor_pro 股票池），未实际污染，属潜在缺陷。
+  opened: '2026-09-16'
+- id: F-FD3-04
+  severity: P3
+  rule: factors/library.yaml:431 注释（EDGE-14）对布尔掩码 NaN 行为的方向性声明
+  file: factors/library.yaml
+  line: 431
+  note: 说明写反：ops.py 比较 .astype(float) 把掩码 NaN 变为 0.0，随后 0.0×NaN=NaN（IEEE 语义），warmup
+    首行 NaN 被保留；实测 roc(close_hfq,1)*(roc(close_hfq,1)<0) 首行输出 NaN，与 min(x,0) 的 NaN
+    处理一致，不存在描述所称『首行计为 0 收益』的差异。行为正确、文档错误。
+  opened: '2026-09-16'
+- id: F-FD3-05
+  severity: P2
+  rule: factors/library.yaml:389/392 描述『连板封单量』；adapters/tushare.py:238 kpl_lu_limit_order=连板封单量
+  file: factors/library.yaml
+  line: 391
+  note: kpl_lianban 取 kpl_list.lu_limit_order（当日涨停封单量，20240605 量级 3.6e7~9.9e8），kpl_list
+    表无任何连板数字段（连板数在 limit_list_d.limit_times）→ 因子名承诺『连板数』，实际给的是封单量原始值，『连板封单量』把两个概念混写。
+  opened: '2026-09-16'
+- id: F-FD3-08
+  severity: P2
+  rule: factors/library.yaml:465 描述『近5日主力净流入天数（0-5）』；docs/audit_checklist.md FA-OP-02（比较式
+    NaN 语义）
+  file: factors/library.yaml
+  line: 464
+  note: ops 比较把 NaN 折为 False→0，源列缺失日被静默计为『非流入』而非未知；实测 sum(dc_net_rate>0,3) 对 [1,NaN,-2]
+    输出 1（窗口内 1 正 1 负 1 缺失）。moneyflow_dc 仅 2023-09-11 起，此前回测该因子对全部个股恒 0（无截面变异、无告警），描述未标覆盖起点与缺失语义。
+  opened: '2026-09-16'
+- id: F-FD3-09
+  severity: P3
+  rule: docs/factor_library.md §10.1 ascending 语义（方向标注须与收益方向自洽）
+  file: factors/library.yaml
+  line: 441
+  note: ret_skew20 自述『高偏度→低未来收益』却标『降序排名』（应升序）；amihud_illiq(404) 自述『低流动性溢价（升序）』而低流动性溢价通常指高
+    illiq 高收益（应降序）。与 vol_z/downside_vol20 的自洽写法对照可见不一致。
+  opened: '2026-09-16'
+- id: F-FD4-05
+  severity: P2
+  rule: 库内冗余登记惯例（factors/library.yaml:785-792：close_vs_cost_avg 自述与既有因子 corr 0.97
+    二选一）；:265 已登记 pct_b
+  file: factors/library.yaml
+  line: 580
+  note: bb_position=(close-boll_lower)/(boll_upper-boll_lower+0.0001) 与 pct_b 是同一定义：实测
+    24027 行 |差| max 8.2e-4（p99 3e-4）。差异仅 pct_b 有 where 掩码无 epsilon、bb_position 无 where
+    加 1e-4（退化带 upper==lower 时产出极端值）。未标注等价关系 → ML/多因子同时声明即同一特征/信号双计。
+  opened: '2026-09-16'
+- id: F-FD4-06
+  severity: P2
+  rule: factors/library.yaml:729-733 自述『截面排名 ≡ mom5/mom20』；:37 mom_z 已存在
+  file: factors/library.yaml
+  line: 741
+  note: alpha_z5=zscore(alpha_mom5) 恒等于 zscore(mom5)；alpha_z20(743) 恒等于 mom_z(37)——zscore
+    对逐日截面常数平移不变，alpha_mom* 减 idx_ret 后『市场相对口径更稳健』的保留价值在 z 变换后完全消失；factor_specs 同时引用即同一信号双倍权重。
+  opened: '2026-09-16'
+- id: F-FD4-07
+  severity: P2
+  rule: docs/ml_guide.md §1 训练与回测同源（同一定义/同一物化链）；docs/factor_library.md §9.3 benchmark
+    推导规则
+  file: scripts/ml_train.py
+  line: 133
+  note: 引擎在 config.benchmark 缺省时从 filter_rules.index_universe 推导基准（btcore/engine.py:346-353），ml_train
+    只读 config.benchmark、不做同一推导 → 含 idx_ret 的特征因子（alpha_mom5/20、alpha_z5/20、idio_vol20、beta20、mkt_corr20）在『单指数
+    index_universe 且未显式写 benchmark』的策略中：引擎回测可跑，ml_train 的 build_panel→derive_idx_ret
+    直接 ValueError（btcore/factors/plan.py:117-121）。训练/回测同源契约在基准解析环节不成立。
+  opened: '2026-09-16'
+- id: F-FD4-08
+  severity: P3
+  rule: docs/audit_checklist.md FA-OP-02（比较式 NaN→False 的静默语义）
+  file: factors/library.yaml
+  line: 610
+  note: mom_diverge=(roc_3>0)!=(roc_10>0)：比较式对 NaN 返回 False，单边 NaN（新股 roc_10 窗口未满而
+    roc_3 已可算）被编码为 1=转向信号；ML 特征无 NaN 掩码 → 新股前 10 个交易日为虚假分歧。
+  opened: '2026-09-16'
+- id: F-FD4-09
+  severity: P3
+  rule: docs/audit_checklist.md FA-OP-02（零分母约定）
+  file: factors/library.yaml
+  line: 640
+  note: volume_impulse=volume_ratio/delay(volume_ratio,5)-1 无零保护：实库 2024 年 volume_ratio==0
+    有 36 行，若落分母位则输出 ±inf 进入面板/ML 特征；turnover_chg(643) 同构造但 2024 年 turnover_rate 零值
+    0 行，未触发。
+  opened: '2026-09-16'
+- id: F-FD5-02
+  severity: P2
+  rule: factors/library.yaml:816-817 自述『rep_amount 单位万元，circ_mv 单位万元，比值无量纲』
+  file: factors/library.yaml
+  line: 813
+  note: repurchase.amount 实为元：DB 600821.SH 20260612 vol=4,003,000 股 / amount=25,652,800
+    → 隐含价 6.41 元/股；circ_mv 为万元 → rep_amount/circ_mv 比描述值大 1e4（实测值 4.05~231.8，真占比 4e-4~2.3e-2）。截面排序不受常数缩放影响，但『比值无量纲』承诺使按绝对值设阈值的消费方错
+    1e4 倍；w_rep_intensity(1092) 同源。
+  opened: '2026-09-16'
+- id: F-FD5-03
+  severity: P2
+  rule: AGENTS.md 财报/公告数据按公告日对齐成日频列的契约；adapters/tushare.py:271 repurchase date=ann_date
+  file: factors/library.yaml
+  line: 812
+  note: rep_amount 以 ann_date 直接落成 trade_date：ann_date 为非交易日时该行只有 rep_amount、circ_mv
+    无 bar → where 掩码后 NaN；下一交易日行又无 rep_amount → 公告永不可见（不是『其余日期 NaN』的延迟语义）。DB：13.1%（8108/61685）的
+    ann_date 非 SSE 交易日；probe 688326.SH 20260718（周六）公告在全窗无 rep_intensity，对照 20260715
+    得 136.65。既有 pension_float_daily 会滚动到下一交易日，此处未做。
+  opened: '2026-09-16'
+- id: F-FD5-04
+  severity: P2
+  rule: factors/library.yaml:952-954 描述『距涨停价空间（0=涨停收盘）』；AGENTS.md 五要素边界情况
+  file: factors/library.yaml
+  line: 950
+  note: 新股首日 stk_limit.up_limit 为哨兵 999999.999/99999.999（2024-2025 共 910 行），dist_to_limit
+    达 27699.8/4829.9，where 只护 close>0 → 截面极大离群值进入 zscore/中性化/ML；且各板块涨跌停带宽不同（主板 10%/ST
+    5%/创业科创 20%/北交 30%），20250110 dist_to_limit 与板块带宽 Spearman=0.751——因子主要排序『板块带宽』而非距涨停远近，描述未提示。
+  opened: '2026-09-16'
+- id: F-FD5-06
+  severity: P2
+  rule: AGENTS.md 五要素边界『空名单是预期行为』；factors/library.yaml:960-961 描述『下跌市自动空仓』
+  file: factors/library.yaml
+  line: 958
+  note: cvw_mkt_gate=cvw_ma5*(sum(idx_ret,20)>0) 在下跌日整列恒 0（全截面无区分度），并非『空仓』；策略模板 sort_values(ascending=False).head(top_k)
+    对并列 0 仍买满 k 只，且与真实 cvw_ma5≈0 的值混叠。若意图门控关闭应改用 where 使整列 NaN 后 dropna。
+  opened: '2026-09-16'
+- id: F-FD6-04
+  severity: P2
+  rule: factors/library.yaml:1441-1442 描述『仅披露日附近非零，是事件型信号（加仓确认），非状态型』
+  file: factors/library.yaml
+  line: 1441
+  note: carry_expand 把 pen_chg_sum 逐日前向携带：001221.SZ ann=20260810 的 -407200 连续携带 271
+    个交易日（20260810~20270913），002568.SZ 同；pen_add_ev 实为最长约 400 自然日的陈旧状态信号；pen_combo_n『当期在榜』在养老实际退出后同样可保留
+    400 天（脚本 docstring『退出后信号失效』与实现不符）。
+  opened: '2026-09-16'
+- id: F-FDX-01
+  severity: P3
+  rule: AGENTS.md 接口/数据变更须同批更新 docs；docs/factor_library.md:975 自述零引用判定口径
+  file: docs/factor_library.md
+  line: 966
+  note: §18 写『现有 126 个因子…86 个零引用』，实际库 217 个因子；按文档口径重跑实际零引用 157 个，清单漏列 78 个（cvw_ma5/winner_chg20/re_attack_*/pen_*/ind_rank_*
+    等），清单内 9 个已被引用（winner_rate_z/margin_change/vol10 见 strategies/exploring/ml_lowcrowd/models/alpha_xs.meta.json；close_vs_cost50
+    见 core_five_500 config 等）。ARCHITECTURE.md:19/174 同错。
+  opened: '2026-09-16'
+- id: F-FDX-03
+  severity: P2
+  rule: AGENTS.md 软回退 vs Fail-Fast（不产生静默错误结果）；docs/audit_checklist.md:164 声称全 NaN
+    由 validate_materialization 兜底
+  file: btcore/factors/plan.py
+  line: 326
+  note: validate_materialization 只遍历 collapse 因子（engine.py:551 同），非坍缩因子全 NaN 零告警（实测传入全
+    NaN 列返回 []）。库内事件/新数据因子（dc_* 2023-09 起、limit_list_d 2019-11 起、pen_*/rep_*/lhb_*/margin_*
+    等）均无数据起点元数据。实证：selected/core_lowvol_500 用 sealed_days5 且 runs 表窗口自 20180101，而
+    limit_list_d 首日 20191128 → 2018 年该因子输出恒 0（比较式 NaN→False，非 NaN），前约 23 个月静默失效；策略侧
+    eval_factor_specs 对全 NaN 因子 rank fillna(0)（btcore/strategy_tools.py:97）→ 单因子策略退化为索引序
+    top-k。
+  opened: '2026-09-16'
+- id: F-FDX-04
+  severity: P3
+  rule: docs/factor_library.md:637『完全重复去重…mom60 与 mom_60d…后者重写为对前者的引用』+ audit_checklist.md:220『去重后只剩一份列』
+  file: factors/library.yaml
+  line: 225
+  note: 库内 (expr,where) 完全重复组为 0；实际有 17 组纯名字别名（mom60←mom_60d、roc_5/10/20←mom5/10/20、close_vs_ma20←bias20、dc_big_money←dc_elg_rate、limit_streak←limit_times、lhb_inflow←lhb_net_rate、inst_buy_pct←inst_buy_rate、kpl_lianban←kpl_lu_limit_order、holder_count←holder_num、strength_raw←strength、pen_*
+    四组）。cse.rewrite 实证别名各自保留为独立节点（各自物化一列），文档『只剩一份列』不成立；factor_specs 同时列别名与原名为同一信号双倍权重，loader
+    无别名/重名检测。
+  opened: '2026-09-16'
+- id: F-FDX-05
+  severity: P3
+  rule: docs/audit_checklist.md:164 D-EXT-01『因子用 sum(x>0,5) 计数时 NaN 与 0 不等价（ops sum
+    遇 NaN 整窗 NaN）』
+  file: btcore/factors/ops.py
+  line: 403
+  note: 代码行为与 checklist 相反：比较运算先按 pandas 语义把 NaN 折成 False，再 .astype(float)→0，源列全 NaN
+    时 sum(cond,5) 窗口满后恒 0（实测 unique=[NaN(前 n-1 行), 0.]）。受影响：sum 族 sealed_days5/div_pay3y/mf_streak5/elg_streak5/mf_big_small_div
+    与 mean 族 pct_above_ma20/pct_sealed/adv_dec_ratio/limit_up_pct/new_high_ratio20/limit_down_pct/nh_nl_diff（分母把停牌/新股/窗口未满行计为
+    False）。另 FA-OP-02 引用的 _xs_log 在 ops.py 不存在（log 直挂 np.log，log(0)=-inf 非 NaN）。
+  opened: '2026-09-16'
+- id: F-FDX-06
+  severity: P2
+  rule: factors/library.yaml:9 通告与 1285-1291『此前通过判定全部撤销』（策略配置不得依据作废数字）
+  file: strategies/selected/trend_guard_bw_300/config.yaml
+  line: 19
+  note: 在产策略按作废数字配置评分：① trend_guard_bw_300 config.yaml:19-20 引用 cci_z RankIC IR=0.52、mf_divergence
+    IR=-0.65（修正前蒸馏数字），该策略 cci_z/mf_divergence/macd_z/chip_support 合计 0.5 权重（:33-42），而修复后重测这些族为
+    -0.08~-0.11 或 ~0；② core_lowvol_500:37,40 用 rev_yoy_z/npr_z（库描述仍写『2025H1 无效』，与策略结论二者必有一错）；③
+    dv_tg_barbell:37 用 chip_support（同族 close_vs_cost50 已被撤销）。
+  opened: '2026-09-16'
 closed:
 - id: F-FAC-01
   severity: P1
@@ -392,3 +629,675 @@ closed:
     RED→GREEN。
   opened: '2026-09-13'
   resolved: '2026-09-13'
+- id: F-FD0-01
+  severity: P1
+  rule: docs/factor_library.md §9.2：pct_chg = (close - pre_close) / pre_close（小数口径，非百分数）
+  file: factors/library.yaml
+  line: 514
+  note: limit_up_pct 表达式 mean(pct_chg >= 9.8) 阈值量纲错：pct_chg 是小数，9.8 是百分数，比较恒 False。DB
+    实证 20240930（3185 只涨幅≥9.8%）：SQL AVG((close/pre_close-1)>=9.8)=0.000179；compute_breadth('limit_up_pct')
+    实测 0.000179，而同日的 limit_down_pct（用小数阈值 -0.095）工作正常（20241009=0.546）。第十四轮注释却记为『+0.061
+    弱正』——对恒零因子下了结论。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD0-02
+  severity: P1
+  rule: docs/factor_library.md §12：坍缩算子始终在全市场面板上逐日聚合，候选池大小不影响其值
+  file: factors/library.yaml
+  line: 63
+  note: pct_sealed=mean(fd_amount>0) 的广度面板请求列仅 fd_amount → btcore/generic_sql.py:189-192
+    的网格=各被引用表 (trade_date,symbol) 键外并集，网格退化为 limit_list_d 事件行，全市场分母被静默丢弃（引擎 _preload_breadth
+    同样按 breadth_columns 请求，engine.py:606-609）。实测 20240923：compute_breadth('pct_sealed')=0.780822（=57/73
+    事件行内占比），真实全市场封板占比=57/5590=0.010197；同一函数追加 close 请求后即得 0.010197——因子值取决于同批请求的其它列。第十四轮『pct_sealed
+    corr +0.139』择时结论建立在错误口径上。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD1-01
+  severity: P1
+  rule: docs/audit_checklist.md D-EXT-02 量纲核对（量纲错不报错、全链路静默错）；adapters/tushare.py:23
+    amount 注释为千元
+  file: factors/library.yaml
+  line: 164
+  note: mf_divergence=(buy_lg_amount-sell_lg_amount)/amount：moneyflow 金额列单位为万元，amount
+    为千元，资金流项被系统性压低 10 倍。DB 实证 000001.SZ 20240605：moneyflow 四档买单合计 111415.6（万元）= stk_factor_pro.amount
+    1114156.0（千元）÷10。探针（两日面板 n=5090）：现值与 -roc(close_hfq,5) 相关 0.9944，正确量纲版 0.6236，Spearman(现值,正确值)=0.6576
+    → 截面排序被改变，『资金流与价格背离』实质退化为 5 日反转；该因子被 strategies/selected/trend_guard_bw_300（weight
+    0.15）等消费。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD1-02
+  severity: P2
+  rule: docs/audit_checklist.md D-EXT-02 量纲核对；adapters/tushare.py:23 amount 千元
+  file: factors/library.yaml
+  line: 143
+  note: 'lg_net_rate/elg_net_rate/md_net_rate/total_net_rate/lg_net_ma5/elg_net_ma5（143/146/149/152/155/158）同源：moneyflow
+    万元 ÷ amount 千元 = 真实占比×0.1。截面排名不受常数缩放影响，但任何绝对阈值（如 where: lg_net_rate > 0.05）静默错
+    10 倍；lg_net_z 经 zscore 抵消、数值正确。'
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD2-01
+  severity: P1
+  rule: AGENTS.md 设计契约·价格体系：因子计算、排名使用后复权（*_hfq），不可混用；docs/factor_library.md §9.2
+  file: factors/library.yaml
+  line: 266
+  note: pct_b/cci_z/macd_golden/macd_z/kdj_golden/pdi_mdi/mfi_z/close_vs_bbi/ema_bullish（266-306）消费
+    adapters/tushare.py:75-137 注册的 *_bfq（不复权）列，而同表 *_hfq 变体齐全且有值（boll_upper/lower_hfq、cci_hfq、macd_*_hfq、kdj_*_hfq、dmi_*_hfq、mfi_hfq、bbi_hfq、ema_hfq_*，2018
+    起全量）。除权日实测 000429.SZ 20260810：pct_b_bfq=-0.1933 vs pct_b_hfq=+0.0680（符号相反）；macd_dif_bfq=-0.032
+    vs hfq=+0.23。261 行注释自述 bfq 口径，属已知契约违背（9 因子中 7 个被策略/ML 消费）。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD2-02
+  severity: P1
+  rule: 因子描述『净买入压力占比（bak_daily 口径）』（占比需同量纲）；docs/backend_guide.md vol 单位为手
+  file: factors/library.yaml
+  line: 257
+  note: net_buy_pressure=(bk_buying-bk_selling)/amount = 手 ÷ 千元，异量纲比。DB 实证 000001.SZ
+    20260916：buying=383663、selling=565963、vol=949626（手），amount=1106652.94（千元）→ 比值
+    -0.1648 手/千元；跨截面被价格水平污染（高价股比值偏小），不是任何『占比』。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD3-03
+  severity: P1
+  rule: 因子描述声明『20日收益偏度 / 超额峰度（矩展开近似）』；docs/audit_checklist.md FA-OP-02（分母/NaN 语义）
+  file: factors/library.yaml
+  line: 444
+  note: ret_kurt20/ret_skew20 分母保护项 1e-4 与 std^4/std^3 量级失配：DB 实测日收益 std 0.0165-0.0291
+    → std^4=9.1e-8~7.2e-7，1e-4 大 139~1100 倍，对绝大多数个股近似常数 → ret_kurt20≈m4/1e-4-3（由四阶矩/波动尺度主导）而非峰度；ret_skew20
+    同型（std^3 仅占 1e-4 的 2%~20%，偏度被常数压缩）。对比 sharpe_20 的 1e-4（分母 std 量级 1e-2）合理，可见幂次后未同步缩放
+    epsilon。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD4-01
+  severity: P1
+  rule: factors/library.yaml:702-704 自述『与 dc_net_rate 区别：net_rate 看净流入，本因子看买盘总量强度（不分卖盘对冲）』；adapters/tushare.py:201-204
+    登记为『买入占比』
+  file: factors/library.yaml
+  line: 700
+  note: moneyflow_dc 的 buy_elg/lg/md/sm_amount_rate 实为分档净流入率（四档对消），不是买入占比：DB 20240603
+    000001.SZ net_amount_rate=-6.47=elg(-4.0)+lg(-2.47)，md+sm=+6.47；两日 11452 行中 elg+lg≡net（|差|≤0.01）。故
+    dc_big_buy_rate ≡ dc_net_rate（zscore 版即 hot_money:78），『买盘总量强度』的区分声明为假；dc_sm_buy_z(687)/dc_elg_sm_div(693)
+    同错，且注释推荐『优先取本因子』→ 组合会双计同一净流入信号。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD4-03
+  severity: P1
+  rule: docs/factor_library.md §6.1 roc『基准值为 0 处得 NaN』；docs/audit_checklist.md FA-OP-02（NaN/分母语义）
+  file: factors/library.yaml
+  line: 606
+  note: roc_decay=roc_3/(roc_10+0.0001)-1 的 epsilon 对负/零分母无效且制造极端值：实测（2023-2024，50
+    股 24027 行）roc_10==0 共 134 行（0.56%，最小报价单位下的 10 日往返，如 000001.SZ 20240627 vs 20240711
+    close_hfq 相同），这些行 roc_decay ∈ [-751,+1236.7]，全样本 |roc_decay|>10 占 2.7%；roc_10∈(-1e-4,0)
+    时还会分母变号。该因子被 docs/devlog/ml_signal_design.md:65 标为核心特征，应显式 NaN/where 而非 epsilon。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD4-04
+  severity: P2
+  rule: docs/backend_guide.md:292 net_mf_amount（万元）；amount 实库为千元
+  file: factors/library.yaml
+  line: 596
+  note: mf_raw=net_mf_amount/(amount+0.0001) 分子分母量纲差 10×（000001.SZ 20240603：-38491.51/1456086.02=-0.0264，同单位应为
+    -0.2644）；截面排名不受常数缩放影响，但水平值与阈值解读偏小 10 倍，mf_chg 继承。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD5-01
+  severity: P1
+  rule: docs/audit_checklist.md D-EXT-02 量纲核对；因子描述『融券偿还额/融券余额』
+  file: factors/library.yaml
+  line: 1015
+  note: short_repay=rqchl/rqye 把股÷元：tushare margin_detail 中 rqye 为金额(元)，rqchl/rqmcl/rqyl
+    为股数。DB 20250110 截面 n=2280：rqye/rqyl 与 close 逐行相等（偏差<4e-5），故 rqchl/rqye≡(rqchl/rqyl)/close，量纲
+    1/元，截面排序被 1/price 污染（Spearman 0.118）；short_open(1097)=rqmcl/rqye 同缺陷（0.199）。修正：rqchl/rqyl、rqmcl/rqyl。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FDX-02
+  severity: P1
+  rule: docs/factor_library.md:533-537：此前用 pct_change().shift() 链，扁平 shift 在 (trade_date,symbol)
+    面板跨 symbol 污染…2026-08-07 之前的评估数字全部作废
+  file: docs/factor_library.md
+  line: 551
+  note: §11.2 Python API 示例仍为修复前的反模式：fwd_ret = bars_df['close_hfq'].groupby('symbol').pct_change(5).shift(-5)。groupby.pct_change
+    返回原序（date-major）Series，链式 .shift(-5) 是扁平位移（d5 的 A 行取得 d6 的 C 行值），与 CLI/正确写法（research/factor_eval.py
+    的显式 groupby shift）完全不等价；且上一行自称『与 CLI 一致』。照抄示例会原样重现导致全库存量评估数字作废的污染 bug。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD1-05
+  severity: P2
+  rule: 'docs/factor_library.md §10.1 ascending: true=小值排名靠前；§11.4 陷阱三（ascending 语义写反）'
+  file: factors/library.yaml
+  line: 101
+  note: rev_5d=-roc(close_hfq,5)：expr 高值=过去 5 日输家。描述『买跌卖涨，升序排名』三处互斥：升序（值小优先）选出的是过去涨幅最大者（买涨）；要执行『买跌』须降序（取
+    -roc 最负）。策略按字面配置会反向，同型见 rev10_z(229) 与 F-FD2-05。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD2-05
+  severity: P3
+  rule: docs/factor_library.md §11.4 陷阱三（ascending 与 IC 符号）
+  file: factors/library.yaml
+  line: 230
+  note: rev10_z=zscore(-roc(close_hfq,10)) 高值=过去 10 日输家；description 同时写『反转』与『升序』互斥（买跌应降序）。与
+    F-FD1-05 同型。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD3-01
+  severity: P1
+  rule: AGENTS.md 软回退 vs Fail-Fast（明确声明的依赖缺失→加载/preload 报错）；factors/library.yaml:1168『pledge_detail/stk_holdernumber
+    同理解锁——holder_count/pledge_risk 恢复可用』
+  file: factors/library.yaml
+  line: 395
+  note: DB 实况：pledge_detail 0 行、pledge_detail_agg 0 行（其它事件表已更新至 20260916），tushare_db/database/etl.py
+    REGISTRY 无 pledge_detail 拉取项 → pledge_p_total_ratio/pledge_h_total_ratio 恒 NaN，pledge_risk
+    全程全 NaN 且无任何报错；而 379/396 行注释与 1168 行『恢复可用』仍记 RankIC -0.03『方向正确』，与数据实况矛盾。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD3-02
+  severity: P1
+  rule: adapters/tushare.py:234-236 列登记『机构席位净买入』；factors/library.yaml:384 描述『机构席位净买入』
+  file: factors/library.yaml
+  line: 383
+  note: DB top_inst 129347 行 = 129347 个 distinct (ts_code,trade_date)，PK(trade_date,ts_code)
+    折叠（INSERT OR REPLACE 每股每日只留单席位行），与 tushare top_inst 的逐席位多行语义不符；全表 exalter='机构专用'
+    仅 15116/129347=11.7%。inst_net_buy/inst_buy_rate 实为『单一任意席位值』而非机构席位合计，因子语义静默错误（inst_net_buy_z/inst_buy_pct
+    均为低信号保留区，但描述错误）。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD6-01
+  severity: P1
+  rule: adapters/tushare.py:254『pen_age 距披露日自然日数（新鲜度）』+ factors/library.yaml:1434『400
+    自然日归零』
+  file: factors/library.yaml
+  line: 1431
+  note: DB pen_age 实为 YYYYMMDD 整数差而非自然日数（tushare_db/scripts/_derived_tables.py:77
+    用整数日历值相减）：618295 行中 347747 行（56.2%）>400，max 18903 → pen_decay_pct=pen_ratio*(1-pen_age/400)
+    对 56% 的行为负（极端 -46.26 倍），跨月跳变（001221.SZ 20261231 pen_age=421 vs 真实自然日 143）；where
+    只挡 pen_ratio>0，负值全部放行。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD6-02
+  severity: P1
+  rule: 因子描述『养老组合合计持股占总股本比(%)』；AGENTS.md 财报对齐 + 不产生静默错误结果
+  file: factors/library.yaml
+  line: 1419
+  note: refresh_pension_daily.py 的事件聚合仅 GROUP BY (ts_code,ann_date) 丢弃 end_date：同一次公告同时携带上年年报与一季报两条同持有人记录时
+    SUM 双计。实例 000089.SZ ann=20260424（end_date=20251231 与 20260331）：pen_ratio_sum=2.3006=2×1.1503，pen_chg_sum=-614900
+    为跨期混合；全库 311 个事件组/209 只股票，前向携带约 400 自然日 → pen_held_pct/pen_float_pct/pen_decay_pct/pen_add_ev
+    全部受影响。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD6-03
+  severity: P1
+  rule: factors/library.yaml:1173 描述『股东增减持比例截面标准化（>0 增持，<0 减持）』——列必须保方向
+  file: factors/library.yaml
+  line: 1170
+  note: stk_holdertrade.change_vol/change_ratio 均为无符号数量（MIN=0，负值 0 行），方向在独立列 in_de；VIEW
+    stk_holdertrade_agg 未使用 in_de → insider_chg_ratio 恒 ≥0，『<0 减持』不可达。实例 600267.SH
+    20230520 change_ratio=47.10 来自纯减持（DE）却为大正值，zscore 后与增持同向排名。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-FD0-05
+  severity: P1
+  rule: AGENTS.md 设计契约：不产生静默错误结果 / 崩溃；docs/factor_library.md §4 纯表达式路径应对任何合法面板产出 NaN
+  file: btcore/factors/expr.py
+  line: 90
+  note: 事件表在请求窗口内零行时 GenericSQLBackend 返回 object dtype 全 NaN 列（空结果集 dtype 推断），pandas.eval
+    对这类列抛 TypeError/RecursionError 而非产出 NaN：实测 pledge_detail 空表下 compute_factors(['pledge_risk'])
+    抛 RecursionError（2026-09-16 探针）；任何纯表达式因子引用窗口内无数据的事件列都会崩溃（如 lhb_*/inst_* 在无上榜窗口）。修复：求值路径统一
+    coerce_all_nan_object_columns 把 object 全 NaN 列转 float64（expr.evaluate_expr 与 ops.eval_op_expr
+    两路径），回归测试 test_all_nan_object_columns_do_not_crash。
+  opened: '2026-09-16'
+  resolved: '2026-09-16'
+- id: F-CORE-01
+  severity: P1
+  rule: docs/cli_and_research.md §2.9「账本即回测结果库：runs/trade_log/account_daily/holdings
+    衍生表与回测同 schema（report.py/cross_validate.py/replay.py 直接消费）」+ research/live.py:28
+    LIVE_RUN_ID=1 契约
+  file: research/live.py
+  line: 229
+  note: rewrite_derived 把衍生行固定写 run_id=1，但缺 runs 行时经 database.write_run 走 sequence
+    分配。DuckDB sequence 的 nextval 不随事务回滚（实测 rollback 后 next id=2）：首次 rewrite 事务回滚/进程崩溃/同库其它写入后，runs
+    行 run_id≠1 而 account_daily/trade_log 仍在 run_id=1；每次 signal 再追加一个孤儿 runs 行（实测 runs=(2),(2,3)）。report/attribution（run_id
+    缺省 1）按 runs.run_id 取数，看不到账本数据。已修：write_run 支持显式 run_id，rewrite_derived 传 LIVE_RUN_ID，并在
+    run_id=1 被非账本 run 占用时 fail-fast。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-02
+  severity: P1
+  rule: docs/cli_and_research.md §2.9 sync.yaml 格式（date 为 statement 级，fills 条目不含 date）
+  file: scripts/live.py
+  line: 105
+  note: cmd_sync 直接把 fills 交给 append_fills_idempotent，而该方法用 f.get("date") 作成交日 → 文档格式（fills
+    不带 date）的成交全部落到 date=""；light_replay/fills_by_date 按日期分组永不应用：实测带 SELL fill 的 sync
+    必然报"持仓不一致"并回滚（每日 sync 带成交时完全不可用），ADJUST 类则靠 sync_auto 现金调整兜底但仍以空日期落库。已修：append_fills_idempotent
+    增加 default_date，cmd_sync 传 statement 级 date。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-03
+  severity: P1
+  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
+    会静默打开旧库，必须 fail-fast）」
+  file: scripts/sweep.py
+  line: 101
+  note: sweep 三处裸 duckdb.connect（修复前 98/113/138 行）不走 assert_duckdb_file。实测 duckdb.connect
+    可对含 runs/sweep_results 表的旧 SQLite 文件正常 select（sqlite_scanner 静默接管），父进程聚合会消费旧库并在其上写
+    sweep_results。已修：启动先 database.assert_duckdb_file，三处改 database.connect_result_db。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-06
+  severity: P1
+  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错」（research/attribution.py
+    已由其它审查改走 connect_market_db/connect_result_db）
+  file: scripts/dump_fixtures.py
+  line: 65
+  note: 超出本子代理可改文件范围，仅记录待路由：仍存在不经 assert_duckdb_file 的裸连接——scripts/dump_fixtures.py:65（只读行情）、scripts/refresh_gold_db.py:167/233（黄金库，233
+    为读写）、scripts/dump_brinson_data.py:48/89（只读行情/结果库）、scripts/live_e2e_check.py:36/50（只读回测/行情库）。与
+    F-CORE-03 同类风险：旧 SQLite 文件会被 sqlite_scanner 静默打开。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-01
+  severity: P0
+  rule: AGENTS.md 命令段 refresh_gold_db：「海外序列按"严格早于中国交易日"对齐」； docs/backend_guide.md:56-57
+    同一契约（无前视对齐）
+  file: scripts/refresh_gold_db.py
+  line: 171
+  note: '`_asof_strict` 内部 sort_values(merge_asof) 后执行 `merged.index = dates.index`
+    只重贴标签、未恢复调用方行序：返回结果恒为日期升序，而 build() 以 `panel.reset_index(drop=True)`（上游 DuckDB
+    扫描为 trade_date 降序）按行 拼接 → 全部宏观列（xau_usd/usdcnh/us_real_y5/y10/y30/us_nom_y10/sge_close/
+    m1_yoy/m2_yoy）与行情行错位。实证：data/gold_market.duckdb（2026-09-18 17:19 由缺陷版生成）同一 trade_date
+    的不同 ETF 宏观值不同（全局单序列 不可能）——2114 个交易日中 1643 个存在 xau_usd/usdcnh 等不一致；如 20180103 159934.SZ
+    xau_usd=4174.44 而 159937.SZ=4164.32（后者是 20180102 的值）。修复：base 增加 `_pos` 位置列，merge_asof
+    后按 `_pos` 复原行序（scripts/refresh_gold_db.py:153-172）；单元测试 test_asof_strict_preserves_caller_row_order
+    / same_date_rows_share_value + 200 轮乱序差分 vs 暴力参考实现全等。现存 gold_market.duckdb 需重跑
+    `python scripts/refresh_gold_db.py` 重建（需 tushare token/网络，本次未执行）。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-02
+  severity: P1
+  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期 显式报错（DuckDB 的 sqlite_scanner
+    会静默打开旧库，必须 fail-fast）」 + btcore/database.connect_result_db 结果库唯一连接入口契约
+  file: scripts/dump_brinson_data.py
+  line: 48
+  note: 修复前 :48 行情库与 :89 结果库均为裸 `duckdb.connect(..., read_only=True)`， 未过 assert_duckdb_file。probe
+    证实 duckdb 1.5.5 对该 SQLite 文件 connect(read_only=True) 成功并 `SELECT table_name` 正常返回（sqlite_scanner
+    静默打开），旧 market.db/backtest.db 会被导出为错误 parquet，后续 brinson_attribute_from_files
+    基于旧数据归因。修复：:48 改 btcore.generic_sql.connect_market_db；:89 改 btcore.database.connect_result_db(read_only=True)（与
+    F-RPT-05 同一根因， 该条由研究层子代理移交 scripts/ 所有者，本条为承接修复）。测试 test_dump_brinson_rejects_sqlite_provider
+    / rejects_sqlite_result_db + 正向回归 test_dump_brinson_valid_duckdb_provider_exports_parquets。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-03
+  severity: P1
+  rule: docs/backend_guide.md §10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）+ AGENTS.md「明确声明的依赖缺失直接报错，不产生静默错误结果」
+  file: scripts/dump_fixtures.py
+  line: 65
+  note: 修复前 dump_fixtures.py:65 与 refresh_gold_db.py:167 均裸 `duckdb.connect(market_db,
+    read_only=True)`：probe 证实旧 SQLite 行情库被 静默打开（information_schema.tables 返回 SQLite
+    表），fixtures 与 gold_market.duckdb 会从不受支持的旧格式库静默生成。修复：两处改走 btcore.generic_sql.connect_market_db（魔数校验
+    + 缺文件 FileNotFoundError + 写锁重试）。测试 test_dump_fixtures_rejects_sqlite_market /
+    test_refresh_gold_rejects_sqlite_market。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-01
+  severity: P1
+  rule: docs/backend_guide.md §10.1 旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
+    会静默打开旧库，必须 fail-fast）；btcore/database.assert_duckdb_file
+  file: research/attribution.py
+  line: 54
+  note: 修复前 _open_provider_db 用裸 duckdb.connect(db_path, read_only=True) 打开行情库，绕过
+    connect_market_db 的 assert_duckdb_file + 写锁重试。实测 duckdb 1.5.5 对旧 SQLite 文件 connect(read_only=True)
+    成功且 SELECT 正常返回（/tmp probe：rows=[(1,)]），即行情库为旧 SQLite 时归因会静默读到旧数据（无任何告警）。修复：改走
+    connect_market_db（缺失文件 FileNotFoundError，旧格式 ValueError，锁冲突重试）。测试 test_attribution_provider_rejects_sqlite
+    / test_attribution_provider_missing_file_raises_filenotfound / test_brinson_attribute_rejects_sqlite_provider。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-02
+  severity: P1
+  rule: docs/backend_guide.md §10.1 旧格式拒绝；btcore.connect_result_db 是结果库唯一连接入口（含 assert_duckdb_file）
+  file: research/attribution.py
+  line: 583
+  note: brinson_attribute（:583）与 brinson_attribute_from_files（:815）修复前均用裸 duckdb.connect(result_db,
+    read_only=True)：旧 SQLite 结果库被 sqlite_scanner 静默打开（probe 证实查询成功），trade_log 读取结果不可预期。修复：两处改
+    database.connect_result_db(read_only=True)；并补 backtest 连接在 provider 打开失败时的关闭路径（原实现
+    provider 失败会泄漏 backtest_conn）。同批把模块 docstring 的 run.db/market.db 示例改为 .duckdb。测试
+    test_brinson_attribute_rejects_sqlite_result_db / test_brinson_attribute_from_files_rejects_sqlite_result_db，另加正向全链路回归
+    test_brinson_attribute_full_path_on_valid_duckdb（合成 DuckDB 行情+结果库，summary/industry_detail
+    正常）。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-03
+  severity: P1
+  rule: AGENTS.md 架构分层：研究层纯读入口只读打开（connect_result_db）；DuckDB 单写者模型下同文件连接配置必须一致（btcore/database.py:110/132）；'不产生静默错误结果'
+  file: research/report.py
+  line: 75
+  note: 修复前 load_runs 先 database.init_backtest_db(db_path)（读写）再 connect_result_db(read_only=True)。读写连接会执行
+    SCHEMA_SQL 与 DELETE FROM holdings（database.py:141），即纯读报告入口在每次生成时清空 holdings 瞬态快照；且同进程内已有只读连接时必然
+    ConnectionException（probe：load_runs with ro open 直接崩溃），跨进程有其他读者时 IOException Conflicting
+    lock（probe 证实），而纯只读连接可正常共存。修复：load_runs/l 只走 connect_result_db(read_only=True)，不再初始化
+    schema。缺失库不再被静默创建为空文件（probe 修复前 missing file created? True）。测试 test_load_runs_coexists_with_open_readonly_and_keeps_holdings
+    / test_load_runs_missing_db_does_not_create_file。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-04
+  severity: P1
+  rule: 同 F-RPT-03（读路径不得开读写连接/不得写删）；scripts/cross_validate.py 退出码契约：加载失败返回 1
+  file: research/cross_validate.py
+  line: 43
+  note: 修复前 load_backtest 用 database.init_backtest_db(db_path)（读写）做纯读分析：同进程只读连接冲突
+    ConnectionException；对不存在的库会创建空库文件后抛 ValueError('No runs found')（probe：missing
+    file created? True）；read_run_data 抛错时连接泄漏（三处手工 close 之外无 try/finally）。修复：改 connect_result_db(read_only=True)，并用
+    try/finally 保证关闭；缺失库现在直接 duckdb IOException（CLI 捕获后 exit 1，不再产生垃圾文件）。测试 test_load_backtest_coexists_with_open_readonly_connection
+    / test_load_backtest_missing_db_does_not_create_file。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-05
+  severity: P1
+  rule: docs/backend_guide.md §10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）
+  file: scripts/dump_brinson_data.py
+  line: 48
+  note: 同一漏洞在 scripts/dump_brinson_data.py:48（行情库）与 :89（结果库）：裸 duckdb.connect(...,
+    read_only=True)。旧 SQLite 行情/结果库会被静默打开并导出错误 parquet，后续 brinson_attribute_from_files
+    基于错误数据归因。本子代理文件白名单外（修订：只改 research/*），未修改——移交 scripts/ 所有者把 :48 改 btcore.generic_sql.connect_market_db、:89
+    改 btcore.database.connect_result_db。修复方式与 F-RPT-01/02 完全一致。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-HYG-01
+  severity: P1
+  rule: btcore/database.py:110 connect_result_db 契约（read_only 供纯读取入口：报告/回放/账本读取） +
+    btcore/database.py:15 assert_duckdb_file 旧格式 fail-fast + docs/backend_guide.md:422「旧格式拒绝」
+  file: research/report.py
+  line: 72
+  note: 读路径仍以写连接/裸 connect 打开 DuckDB 文件，绕过上述两条契约： (1) research/report.py:72 `database.init_backtest_db(db_path).close()`——
+    init_backtest_db 会执行 SCHEMA_SQL 与 `DELETE FROM holdings` （btcore/database.py:139-141），即
+    report/compare 会清掉引擎 PERF-06 终态持仓快照并强制写锁；同进程已有只读连接时旧路径还会 ConnectionException。research/cross_validate.py:41
+    同样用 init_backtest_db 做纯读 load_backtest。 (2) research/attribution.py:52 / :575
+    / :803 直接 `duckdb.connect(...)`， 未过 assert_duckdb_file——旧 SQLite 文件会被 sqlite_scanner
+    静默打开 （attribution.py 其余路径已 read_only=True，问题只在未做魔数校验）。 研究层审查 F-RPT-01/02（裸 connect）与
+    F-RPT-03/04（init_backtest_db 读路径）已独立覆盖同一根因；本条为全局残留审计的交叉确认，若 F-RPT 已登记，建议合并处置/waive
+    本条以免双阻塞。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-HYG-02
+  severity: P3
+  rule: DuckDB 全量迁移事实（AGENTS.md：结果库/行情库统一 DuckDB；docs/backend_guide.md:422） ——源码文档不得再称数据源为
+    SQLite
+  file: btcore/backend.py
+  line: 7
+  note: backend 契约 docstring 仍写「A) 填表法（SQLite 数据库，数据在表里）」。 DuckDB 迁移后填表法对应 GenericSQLBackend
+    + DuckDB，措辞应改为 「DuckDB 数据库」；同类示例已更新（docs/backend_guide.md:16 已写 DuckDB）。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-HYG-03
+  severity: P3
+  rule: 结果库/行情库扩展名与格式统一为 DuckDB（AGENTS.md 命令段 `*.duckdb`）
+  file: research/attribution.py
+  line: 11
+  note: 模块 docstring 用法示例仍引用旧扩展名：第 10 行 `"backtest_output/run.db"`、 第 11 行 `"/path/to/market.db"`、第
+    19 行 from_files 示例 `"run.db"`。 旧 SQLite 结果库已删除且新文件统一 .duckdb，示例路径会误导用户去 连接会被 assert_duckdb_file
+    拒绝的格式。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-HYG-04
+  severity: P3
+  rule: docs/audit_checklist.md:357 CLI-LINT-01「核对 docstring 与实际检查数一致」 + AGENTS.md「接口变更必须同批更新
+    docs/」
+  file: docs/cli_and_research.md
+  line: 321
+  note: 本次为残留防回归在 scripts/check_anticorrupt.py 新增 rule 14 （check_no_sqlite_residue：源码层禁
+    sqlite3 import / SQLite API）， 检查项由 13 → 14，以下「13 项」文档表述过期需同步： docs/cli_and_research.md:321、ARCHITECTURE.md:207、
+    docs/audit_checklist.md:80 与 :357（后者还写「docstring 13 条 1-19 行」）、 tests/test_anticorrupt_linter.py:10
+    的测试 docstring（该测试文件不属本 子代理修改范围，仅记录）。linter 自身 docstring 已含 rule 14。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-13
+  severity: P3
+  rule: docs/backend_guide.md §1「A) 填表法：数据在 DuckDB 库中（表或 VIEW）」
+  file: btcore/backend.py
+  line: 7
+  note: 超出本子代理可改文件范围，仅记录：模块 docstring 仍写「填表法（SQLite 数据库，数据在表里）」，迁移后数据源为 DuckDB 库，文档漂移。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-04
+  severity: P2
+  rule: docs/audit_checklist.md CLI-SWP-01「每组=标准 run+sweep_results 表」
+  file: scripts/sweep.py
+  line: 101
+  note: 聚合段 RO 连接在 latest_run_id/execute 抛异常时不会 close（101-104 无 try/finally）。实测父进程持有同文件任一连接（RO
+    或 RW）时，子进程 duckdb.connect 因 OS flock 报 conflicting lock，该组合及后续所有组合的 run.py 写库全部
+    FAIL；异常分支只 print ERROR，泄漏持续到进程退出。建议 with/try-finally 收口。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-05
+  severity: P2
+  rule: docs/cli_and_research.md §2.6「（sweep）终端按 收益/Sharpe/MDD 列打印汇总表」
+  file: scripts/sweep.py
+  line: 141
+  note: '全部参数组合失败（或 --out 文件从未生成）时，收尾 connect_result_db(read_only=True) 抛未捕获 IOException:
+    database does not exist——实测 main() 直接 traceback，无汇总输出与可控退出。建议文件不存在时跳过汇总并给出可操作提示。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-07
+  severity: P2
+  rule: docs/cli_and_research.md §2.9 init「建账：现金 + 可选已有持仓（…以 OPENING 条目入账）」
+  file: scripts/live.py
+  line: 64
+  note: init_account 内部 commit（research/live.py:121），之后 positions 逐条 append（DuckDB
+    自动提交）。任一 position 校验失败（如 shares 非整数字符串、price 非法）时，账本已带 initial_capital/initial_cash
+    落库但 OPENING 持仓残缺，且 is_initialized 拒绝再次 init，只能手工修库。建议先整体校验 positions 再落库（或整段事务化）。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-08
+  severity: P3
+  rule: btcore/database.py write_trades docstring「批量写入当日成交（executemany）」——引擎既有批量写入范式
+  file: research/live.py
+  line: 252
+  note: rewrite_derived 仍逐条 write_trade（252-253）、ledger_holdings 逐条 INSERT（258-264），database.write_holdings
+    亦逐条 INSERT（database.py:190）。长账本/多持仓时写入放大；同库 write_trades 批量路径未用于实盘重写。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-09
+  severity: P3
+  rule: docs/cli_and_research.md §2.9「账本即回测结果库…（report.py/cross_validate.py/replay.py
+    直接消费）」
+  file: research/live.py
+  line: 230
+  note: rewrite_derived 仅在 runs 行缺失时插入（end_date=当次回放末日），后续 signal 不更新 runs.end_date/stats_json；signal
+    推进到新日期后 report/compare 展示的区间仍是首次 signal 的旧末日（stats_json NULL 还会触发现场重算口径差异）。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-10
+  severity: P3
+  rule: btcore/database.py:241 docstring 自身「executemany，单事务内向量化优于逐行 execute」
+  file: btcore/database.py
+  line: 241
+  note: DuckDB executemany 仍是逐行 Python 绑定执行，并非列式向量化；真正的批量快路径是 register DataFrame +
+    INSERT ... SELECT（或 append）。描述会误导后续优化判断，纯文档漂移，无行为差异。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-11
+  severity: P3
+  rule: btcore/database.py connect_result_db docstring「read_only 供纯读取入口（报告/回放/账本读取）」
+  file: btcore/database.py
+  line: 113
+  note: 'path=":memory:" 时 assert_duckdb_file 放行，duckdb.connect(read_only=True) 抛
+    CatalogException「Cannot launch in-memory database in read-only mode!」——读取入口对 :memory:
+    无共享语义，应给域内错误。已逐条走查 engine/report/cross_validate/sweep/live/labels/ml_train，生产路径无调用方传
+    :memory:，仅观察。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-CORE-12
+  severity: P3
+  rule: docs/cli_and_research.md §2.9 CLI 子命令语义（store/provider 生命周期）
+  file: scripts/live.py
+  line: 95
+  note: cmd_sync/cmd_signal 先开 LedgerStore（RW 连接）再 make_provider()；make_provider 抛错时
+    store 未进入 try/finally，连接泄漏到进程退出（DuckDB 随进程释放，影响小）。cmd_status 同模式但无 provider。建议
+    provider 先建或 store 移入 try。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-04
+  severity: P2
+  rule: AGENTS.md「软回退 vs Fail-Fast：不产生静默错误结果」+ DuckDB register 关系按位置投影（INSERT INTO
+    ... SELECT * 不做列名匹配）
+  file: scripts/refresh_gold_db.py
+  line: 280
+  note: register + `INSERT INTO gold_panel SELECT * FROM _panel_df` 依赖 DataFrame 列顺序与
+    DDL 完全一致。核对现状：panel 选择列（:233-238）与 DDL （:249-257，22 列）、cal（SELECT exchange,cal_date,is_open,pretrade_date
+    vs DDL 同名序）、basic（6 列同名序）当前均一致，无现存错列。但未来在 SELECT/DDL 中任一位置插入同类型新列即静默错列（PRIMARY
+    KEY 不拦同型 值），建议改成 `INSERT INTO t (col1, col2, ...) SELECT col1, col2, ...` 显式列名。潜伏缺陷，不阻塞。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-05
+  severity: P2
+  rule: btcore/generic_sql.py:80-102 connect_market_db 契约（锁冲突短重试后给出 可操作报错）
+  file: btcore/generic_sql.py
+  line: 89
+  note: '`except duckdb.Error` 把所有打开失败一律重试 3 次（默认 2s×2）并按 「上游维护持写锁」措辞报错。实测：损坏/截断的
+    DuckDB 文件（偏移 8 有 DUCK 魔数但长度不足）抛 IOException「Could not read enough bytes from file
+    ... attempted to read 4020 bytes from location 76」，被重试 3 次后 误诊为锁冲突；同进程已有写连接时抛
+    ConnectionException「Can''t open a connection to same database file with a different
+    configuration」亦被 归为锁。跨进程真锁冲突（IO Error: Could not set lock ... Conflicting lock）分类正确。建议按异常消息/类型区分
+    lock vs corrupt，避免损坏库 反复重试与误导性处置建议。非静默错误，记 P2。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-06
+  severity: P2
+  rule: docs/backend_guide.md §2.2「初始化期全量校验：表单引用的所有表和列做 落库校验」+ docs/backend_guide.md:126「表名/列名自动加双引号」（DuckDB
+    标识符大小写不敏感绑定）
+  file: btcore/generic_sql.py
+  line: 620
+  note: '`_check_schema` 用 information_schema.tables/columns 的字符串 IN 比较， 大小写敏感；而 DuckDB
+    标识符绑定大小写不敏感（probe：CREATE TABLE "Mixed"("TS_CODE"...) 后 `SELECT open FROM mixed`
+    正常）。因此物理表 Mixed/列 TS_CODE 配表单小写 ts_code 时，查询本可工作却被初始化期拒绝 「表单引用的列在库中不存在: Mixed.ts_code」。VIEW
+    已被 information_schema.tables 正确收录（table_type=''VIEW''），空表跳过类型 探针，均无问题。属误拒（fail-fast
+    而非静默），记 P2；可 IN 前统一 lower() 比较修复。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-07
+  severity: P2
+  rule: btcore/generic_sql.py:217-251 query_bars 单条 SQL 键外并集（让 DuckDB 做 投影/谓词下推与向量化哈希连接，取代
+    pandas 侧 join）
+  file: btcore/generic_sql.py
+  line: 251
+  note: EXPLAIN（3 表 × 1500 万行合成库）显示：各表 SEQ_SCAN 只有日期过滤下推， symbols 过滤作为 `PANDAS_SCAN
+    _ddup_symbols → HASH_JOIN(SEMI)` 叠在两次 FULL HASH_JOIN 之上——DuckDB 未把 `symbol IN
+    (SELECT ...)` 下推进 coalesce 键两侧的扫描。实测全年窗口 n=50 半连接 exec 0.95s vs 把 `s IN (_syms)`
+    写进每张表子查询 0.28s（3.4x）；n=500/5000 时日期过滤 主导差距收窄。另 `.df()` 物化后 pandas duplicated 复检：全市场
+    14.66M 行结果 df 转换 9.1s。均为性能观察，无正确性问题；小 universe （index_universe）大区间回测时可考虑按表内联 symbols
+    过滤。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-08
+  severity: P3
+  rule: docs/backend_guide.md §10.1 重复键检查（提示前 3 条示例）；AGENTS.md 不产生静默错误结果
+  file: btcore/generic_sql.py
+  line: 259
+  note: SQL FULL OUTER JOIN ... USING 对 NULL 键不匹配：两张表各有同一 (NULL symbol, 同 trade_date)
+    行时输出两行 symbol=NULL；pandas duplicated() 视 NaN 相等 → 报「表 unknown 存在重复的 (交易日, 代码)
+    键， 示例 [[...nan],[...nan]]」。旧逐表 pandas outer join 会把 NULL 键行对齐 成一行、不报错。两版对 NULL
+    键语义本就不一致，新行为 fail-fast 不算 静默错误，但 culprit=unknown 的报错信息对数据问题有误导。记 P3。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-09
+  severity: P3
+  rule: btcore/generic_sql.py:269-279 `_find_duplicate_table` 仅失败路径触发（诊断辅助）
+  file: btcore/generic_sql.py
+  line: 276
+  note: 失败诊断逐表 `GROUP BY ksym,kdate HAVING COUNT(*)>1`，不带本次查询的 日期/symbol 过滤：表内重复键若全部落在请求窗口之外，仍会被指名为
+    culprit（且只返回第一张命中的表，可能不是窗口内真正重复的表）。仅影响 报错信息准确性，不影响数据结果。建议把 start/end/symbols 传入诊断
+    查询（或按请求窗口重算）。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-10
+  severity: P3
+  rule: docs/audit_checklist.md CLI-LINT 类（docstring/提示与实际一致）；AGENTS.md 迁移后统一 DuckDB
+    措辞
+  file: scripts/dump_fixtures.py
+  line: 26
+  note: '`if not DB_PATH: raise SystemExit("错误: 请在 adapters/tushare.py 中设置 _DEFAULT_DB_PATH")`
+    是死分支：get_default_db_path() 恒返回非空字符串 （环境变量或默认路径）；提示文案仍指向旧变量名 _DEFAULT_DB_PATH。
+    迁移后应删除死分支或改为「DDUP_MARKET_DB 环境变量可覆盖」提示。P3。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-11
+  severity: P3
+  rule: AGENTS.md 数据不损坏；DuckDB 单库重写应可恢复（refresh_gold_db 重复执行幂等）
+  file: scripts/refresh_gold_db.py
+  line: 248
+  note: build() 对 out_db 先 `DROP TABLE IF EXISTS gold_panel/trade_cal/etf_basic/ dividend/meta`
+    再逐表 INSERT：正常路径重复执行幂等，但 DDL 之后任一 失败（INSERT 类型不符/磁盘满/进程中断）会留下空库，上一版可用的 gold_market.duckdb
+    已不可恢复。建议写临时文件 + 成功后 os.replace 原子 替换，或先 DROP 到独立 schema。非本轮修复范围，记 P3。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-06
+  severity: P3
+  rule: btcore/generic_sql.py:245-251 大 universe 注册 _ddup_symbols 临时关系做半连接（避免上千个 ?
+    参数）
+  file: research/attribution.py
+  line: 703
+  note: 观察项（非阻塞）：_load_bars_for_symbols 用逐符号 IN (?,?,...) 占位符列表。实测 6000 符号 × 40 日（24
+    万行）占位符 0.265s vs 注册关系 0.226s（差值 ~0.04s，可忽略），故不构成性能问题，仅记录模式与 generic_sql 不一致；未来
+    traded_symbols 极端增长时可对齐 registered-relation 写法。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-07
+  severity: P3
+  rule: docs/backend_guide.md §10.1 数据加载下推（可 SQL 侧聚合，不重复全表拉取）
+  file: research/attribution.py
+  line: 66
+  note: 观察项：index_member_all 全表被两次拉取——_load_industry_map(:66) 取 (ts_code,l1_name)，brinson_attribute(:598)
+    再 SELECT DISTINCT l1_code。两查询可合并为单次 GROUP BY；当前表量级（~6000 股）下开销可忽略，记录为后续优化。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-08
+  severity: P3
+  rule: docs/audit_checklist.md RS-RPT-01（股票名加载失败静默降级）；连接生命周期须显式关闭
+  file: research/report.py
+  line: 50
+  note: 观察项（迁移前后一致）：_load_stock_names 在 connect_market_db 成功后任一查询抛错时被 except Exception
+    吞掉且不关闭 conn（连接泄漏到进程结束），同时 _STOCK_NAMES_LOADED=True 永久负缓存；仅影响股票名显示，不影响数值结果。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-09
+  severity: P3
+  rule: docs/cli_and_research.md §2.7：--run-id 缺省取最新 run；无匹配快照打印错误并退出码 1
+  file: research/replay.py
+  line: 25
+  note: 文档漂移：resolve_run_id docstring/注释写『旧库无 runs 表回退 run 1』，实际 except CatalogException
+    后 rid=None 直接 ValueError('结果库中无 run 记录')（:34-37）。DuckDB 迁移后旧 SQLite 在 connect_result_db
+    即被拒，该回退分支已成死代码；docstring 应改为『无 runs 表/无 run 记录 → 报错退出 1』。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-RPT-10
+  severity: P3
+  rule: docs/cli_and_research.md §2.7 replay：无匹配快照打印错误并以退出码 1 退出（可操作报错）
+  file: research/replay.py
+  line: 90
+  note: '观察项：结果库文件不存在时 connect_result_db(read_only=True) 抛裸 duckdb IOException（''Cannot
+    open ... in read-only mode: database does not exist''），scripts/replay.py 未捕获 →
+    traceback；退出码仍为 1，无静默成功。与 report/compare CLI 的缺库行为一致，记录为 UX 改进项（可捕获 duckdb.Error
+    打印 stderr 后 return 1）。测试 test_replay_missing_file_raises_loudly 锁定现状。'
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-PERF-01
+  severity: P3
+  rule: btcore/database.py:229 write_trades 文档约定：批量写入用 executemany，单事务内向量化优于逐行 execute
+  file: research/live.py
+  line: 240
+  note: rewrite_derived 逐条 `database.write_trade` 插入（research/live.py:240-241）， 而引擎侧已走
+    write_trades（btcore/engine.py:727）。实测 DuckDB 1.5.5 在显式事务内 5000 行 loop execute
+    vs executemany 仅 1.1x（3.03s vs 2.68s， /tmp/opencode 微基准），账本年限增长后才线性放大；属一致性顺手修，
+    不构成本轮性能阻塞。保持现状也可接受。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+- id: F-MKT-12
+  severity: P3
+  rule: docs/backend_guide.md §3.1 query_bars 返回契约（MultiIndex (trade_date, symbol)、值语义）；btcore/generic_sql.py:217-251
+    FULL OUTER JOIN 替代 pandas join 的语义等价性要求
+  file: btcore/generic_sql.py
+  line: 253
+  note: 差分验证（随机 4 表夹具 80 轮：不同键列名/部分覆盖/列裁剪/空 universe/ 日期边界，新旧算法逐值比对）：结果值 100% 一致，外并集
+    NaN、网格裁剪、 排序、重复键 fail-fast 语义等价。唯一差异是 dtype 来源：DuckDB .df() 返回 pandas 扩展类型（BIGINT→Int64Dtype、BOOLEAN→BooleanDtype、
+    VARCHAR→StringDtype(na_value=nan)），旧逐表 pandas join 为 int64/object/float64。实测 ops
+    消费路径 to_numpy() 数值列自动出 float64（含 NA）、引擎 576 测试全绿，未发现行为破坏；记录供后续 自定义后端/策略直接判别 dtype
+    时参考。
+  opened: '2026-09-18'
+  resolved: '2026-09-18'
+  waived: 观察项：新旧取数 dtype 差异（Int64/StringDtype）经 ops/引擎全链路验证无行为破坏，保持现状

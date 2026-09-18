@@ -8,13 +8,13 @@ spec/dataset/labels 等纯逻辑用例照常运行。
 import hashlib
 import json
 import logging
-import sqlite3
 import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from btcore import database
 from btcore.engine import Engine
 from btcore.ml import runtime as ml_runtime
 from btcore.ml.spec import ModelSpec
@@ -504,14 +504,16 @@ class TestTradePairRounds:
 
     def test_missing_runs_table_fails_fast(self, tmp_path):
         """无 runs 表的库无法定位 run：明确报错而非静默混入全部交易。"""
+        import duckdb
+
         from btcore.ml.labels import extract_trade_pairs
 
-        p = tmp_path / "legacy.db"
-        conn = sqlite3.connect(p)
+        p = tmp_path / "legacy.duckdb"
+        conn = duckdb.connect(str(p))
         conn.execute(
-            "CREATE TABLE trade_log (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " date TEXT, symbol TEXT, side TEXT, trigger TEXT, price REAL,"
-            " shares INTEGER, net_amount REAL)"
+            "CREATE TABLE trade_log (id BIGINT, date VARCHAR, symbol VARCHAR,"
+            " side VARCHAR, trigger VARCHAR, price DOUBLE,"
+            " shares BIGINT, net_amount DOUBLE)"
         )
         conn.close()
         with pytest.raises(ValueError, match="runs"):
@@ -833,9 +835,10 @@ class TestEngineIntegration:
         assert "ml_m" in engine.bars_df.columns
         assert engine.bars_df["ml_m"].between(0, 1, inclusive="both").all()
 
-        conn = sqlite3.connect(db)
+        conn = database.connect_result_db(db, read_only=True)
         n = conn.execute("SELECT COUNT(*) FROM ml_predictions").fetchone()[0]
-        models = {r[0] for r in conn.execute("SELECT DISTINCT model FROM ml_predictions")}
+        models = {r[0] for r in conn.execute(
+            "SELECT DISTINCT model FROM ml_predictions").fetchall()}
         conn.close()
         assert n > 0 and models == {"m"}
 
@@ -872,7 +875,7 @@ class TestEngineIntegration:
         engine = Engine(strat, DataProvider(MockDataBackend()), db_path=db)
         engine.run("20240603", "20240614")
 
-        conn = sqlite3.connect(db)
+        conn = database.connect_result_db(db, read_only=True)
         exits = conn.execute(
             "SELECT date, symbol, price FROM trade_log WHERE trigger='ML_EXIT'"
         ).fetchall()
@@ -893,7 +896,7 @@ class TestEngineIntegration:
         engine = Engine(strat, DataProvider(MockDataBackend()), db_path=db)
         engine.run("20240603", "20240607")
 
-        conn = sqlite3.connect(db)
+        conn = database.connect_result_db(db, read_only=True)
         buys = conn.execute(
             "SELECT date, symbol FROM trade_log WHERE side='BUY' ORDER BY date"
         ).fetchall()
@@ -994,9 +997,11 @@ class TestTrainingPipeline:
         )
         samples = labels.build_guard_samples(panel, pairs, spec, lookahead=0)
 
-        conn = sqlite3.connect(db)
+        conn = database.connect_result_db(db, read_only=True)
         snaps = {}
-        for d, js in conn.execute("SELECT date, snapshot_json FROM debug_snapshots"):
+        for d, js in conn.execute(
+            "SELECT date, snapshot_json FROM debug_snapshots"
+        ).fetchall():
             h = json.loads(js)["holdings_detail"].get(sym)
             if h:
                 snaps[d] = h["holding_days"]

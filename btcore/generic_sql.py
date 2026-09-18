@@ -1,4 +1,4 @@
-"""填表式 SQLite 后端 — 声明你的数据位置，零 SQL 接入 ddup。
+"""填表式 SQL（DuckDB）后端 — 声明你的数据位置，零 SQL 接入 ddup。
 
 用户只回答一个问题：每份数据在自己库里的 "表名.字段名" 是什么。
 没有主表/辅助表之分——OHLC 分存四张表也直接各填各的；引擎需要的
@@ -59,14 +59,66 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
+import os
+import time
 from datetime import date, timedelta
 
+import duckdb
 import pandas as pd
 
 from btcore.backend import DataBackend
+from btcore.database import assert_duckdb_file
 
 logger = logging.getLogger(__name__)
+
+# DuckDB 单写者：上游维护进程持写锁时只读连接会失败，短重试后用可操作的
+# 错误信息终止（与上游 .market.lock 约定并存，但不跨仓 import）
+_LOCK_RETRY_ATTEMPTS = 3
+_LOCK_RETRY_SECONDS = 2.0
+
+
+def _is_lock_conflict(exc: Exception) -> bool:
+    """跨进程写锁冲突（上游维护中）才值得重试；损坏/配置冲突立即报错。"""
+    msg = str(exc).lower()
+    return "conflicting lock" in msg or "could not set lock" in msg
+
+
+def connect_market_db(db_path: str) -> duckdb.DuckDBPyConnection:
+    """只读打开行情库；写锁冲突（上游维护中）短重试后给出可操作报错。
+
+    仅对跨进程锁冲突重试：损坏文件、同进程连接配置冲突等立即报错，
+    避免把不可恢复错误误诊为"稍后重试"。
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"行情数据库不存在: {db_path}")
+    assert_duckdb_file(db_path, "行情库")
+    last_exc: Exception | None = None
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            return duckdb.connect(db_path, read_only=True)
+        except duckdb.Error as exc:
+            last_exc = exc
+            if not _is_lock_conflict(exc):
+                raise RuntimeError(
+                    f"无法只读打开行情库 {db_path}: {exc}"
+                ) from exc
+            if attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    "只读打开 %s 失败（%s），%.0fs 后重试 %d/%d",
+                    db_path, exc, _LOCK_RETRY_SECONDS,
+                    attempt + 1, _LOCK_RETRY_ATTEMPTS - 1,
+                )
+                time.sleep(_LOCK_RETRY_SECONDS)
+    raise RuntimeError(
+        f"无法只读打开行情库 {db_path}: {last_exc}。"
+        "DuckDB 单写者模型下，上游维护/转换进程持写锁时读取会失败；"
+        "请等待上游维护完成（或让上游先 CHECKPOINT 释放）后重试"
+    ) from last_exc
+
+
+def _empty_panel() -> pd.DataFrame:
+    idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
+    return pd.DataFrame(index=idx)
 
 
 def _q(name: str) -> str:
@@ -114,7 +166,7 @@ _RESERVED_FIELDS = {
 
 
 class GenericSQLBackend(DataBackend):
-    """通用 SQLite 后端：填表声明数据位置，行为与手写 SQL 后端一致。"""
+    """通用 SQL（DuckDB）后端：填表声明数据位置，行为与手写 SQL 后端一致。"""
 
     def __init__(self, form: dict, db_path: str):
         self._c = _compile_form(form)
@@ -123,8 +175,7 @@ class GenericSQLBackend(DataBackend):
         for meth, sec in _EXTRAS.items():
             if sec in self._c["sections"] and getattr(type(self), meth, None) is None:
                 setattr(self, meth, getattr(self, f"_impl_{meth}"))
-        self._conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = connect_market_db(db_path)
         self._check_schema()
         self._div_idx: dict[str, dict] | None = None
         # PERF-08：可选分红查询窗口（ex_date BETWEEN start AND end，YYYYMMDD）；
@@ -166,31 +217,99 @@ class GenericSQLBackend(DataBackend):
             )
         if symbols is not None and not symbols:
             # 空列表 ≠ None（全市场）：显式空 universe 返回空面板
-            idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
-            return pd.DataFrame(index=idx)
-        frames = []
-        for table, cols in c["panel"].items():
-            need = {canon: phys for canon, phys in cols.items() if canon in wanted}
-            if not need:
-                continue  # 列裁剪：该表无字段被请求，整表跳过
-            f = self._query_table(table, need, symbols, start, end)
-            if f.index.has_duplicates:
-                # 重复键会让 outer join 多对多爆炸、策略层 to_dict 静默丢行：
-                # 必须在回源处 fail-fast（AGENTS.md 不产生静默错误结果）
-                sample = f.index[f.index.duplicated()][:3].tolist()
+            return _empty_panel()
+        # 列裁剪：该表无字段被请求则整表跳过
+        tables = [
+            (table, {canon: phys for canon, phys in cols.items() if canon in wanted})
+            for table, cols in c["panel"].items()
+        ]
+        tables = [(t, cols) for t, cols in tables if cols]
+        if not tables:
+            return _empty_panel()
+
+        # 单条 SQL 键外并集：每张表投影为 (symbol, trade_date, 被请求列) 子查询，
+        # 链式 FULL OUTER JOIN USING 让 DuckDB 做投影/谓词下推与向量化哈希连接，
+        # 取代此前逐表拉取 + pandas 侧 join（宽表跨表拼接的内存放大）。
+        # symbols 过滤内联进各表子查询：实测小 universe + 大区间可让日期/代码
+        # 过滤一起下推到扫描（外层半连接形式慢 3 倍+）
+        registered = False
+        if symbols is not None:
+            self._conn.register(
+                "_ddup_symbols", pd.DataFrame({"symbol": list(symbols)})
+            )
+            registered = True
+        try:
+            selects = ['"symbol"', '"trade_date"']
+            joins = []
+            sym_filter = ' WHERE "symbol" IN (SELECT "symbol" FROM _ddup_symbols)'
+            for i, (table, cols) in enumerate(tables):
+                ksym, kdate = self._keys(table)
+                proj = [
+                    f'{_q(ksym)} AS "symbol"', f'{_q(kdate)} AS "trade_date"',
+                ]
+                # 恒别名到 canonical：物理列大小写与表单不一致时输出列名仍统一
+                proj += [
+                    f"{_q(phys)} AS {_q(canon)}"
+                    for canon, phys in cols.items()
+                ]
+                alias = f"t{i}"
+                selects += [f'{alias}.{_q(canon)}' for canon in cols]
+                sub = f"(SELECT {', '.join(proj)} FROM {_q(table)}"
+                if symbols is not None:
+                    sub += sym_filter
+                sub += f") AS {alias}"
+                if not joins:
+                    joins.append(sub)
+                else:
+                    joins.append(
+                        f'FULL OUTER JOIN {sub} USING ("symbol", "trade_date")'
+                    )
+            sql = f"SELECT {', '.join(selects)} FROM {joins[0]}"
+            if len(joins) > 1:
+                sql += " " + " ".join(joins[1:])
+            sql += ' WHERE "trade_date" >= ? AND "trade_date" <= ?'
+            df = self._conn.execute(sql, [start, end]).df()
+        finally:
+            if registered:
+                self._conn.unregister("_ddup_symbols")
+        # 重复键会让 join 多对多爆炸、策略层 to_dict 静默丢行：
+        # 必须在回源处 fail-fast（AGENTS.md 不产生静默错误结果）
+        dup_mask = df.duplicated(subset=["trade_date", "symbol"], keep=False)
+        if dup_mask.any():
+            sample = df.loc[dup_mask, ["trade_date", "symbol"]].head(3).values.tolist()
+            culprit = self._find_duplicate_table(tables, start, end, symbols)
+            if culprit == "unknown":
                 raise ValueError(
-                    f"表 {table} 存在重复的 (交易日, 代码) 键，示例 {sample}："
-                    "请检查源表数据或 tables 节的键列名声明"
+                    f"请求窗口内查询结果出现重复的 (交易日, 代码) 键，示例 {sample}："
+                    "各源表在窗口内无重复行，请检查键列 NULL 行（NULL 键在 "
+                    "FULL OUTER JOIN 中不匹配，两侧同名键会各自成行）"
                 )
-            frames.append(f)
-        if not frames:
-            idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
-            return pd.DataFrame(index=idx)
-        # 无主表：所有被引用表的 (交易日, 代码) 键外并集拼成网格
-        df = frames[0]
-        for f in frames[1:]:
-            df = df.join(f, how="outer")
-        return df.sort_index()
+            raise ValueError(
+                f"表 {culprit} 存在重复的 (交易日, 代码) 键，示例 {sample}："
+                "请检查源表数据或 tables 节的键列名声明"
+            )
+        return df.set_index(["trade_date", "symbol"]).sort_index()
+
+    def _find_duplicate_table(self, tables: list[tuple[str, dict]],
+                              start: str, end: str,
+                              symbols: list[str] | None) -> str:
+        """重复键诊断（仅失败路径）：按本次请求窗口逐表 HAVING 定位重复源表。"""
+        for table, _cols in tables:
+            ksym, kdate = self._keys(table)
+            where = f"WHERE {_q(kdate)} >= ? AND {_q(kdate)} <= ?"
+            params: list = [start, end]
+            if symbols is not None:
+                ph = ",".join("?" * len(symbols))
+                where += f" AND {_q(ksym)} IN ({ph})"
+                params += list(symbols)
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT {_q(ksym)}, {_q(kdate)}"
+                f" FROM {_q(table)} {where} GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1)",
+                params,
+            ).fetchone()
+            if row and row[0]:
+                return table
+        return "unknown"
 
     def get_calendar(self, start: str, end: str) -> list[str]:
         sec = self._c["sections"]["calendar"]
@@ -220,19 +339,26 @@ class GenericSQLBackend(DataBackend):
             table = sec["table"]
             # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
             # 事件级归并）；通用后端无这两列时退化到值级归并
-            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({_q(table)})")}
+            cols = {
+                r[0] for r in self._conn.execute(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE lower(table_name) = lower(?)", [table],
+                ).fetchall()
+            }
             has_event_cols = "end_date" in cols and "ann_date" in cols
             sel_extra = ", end_date AS endd, ann_date AS annd" if has_event_cols else ""
-            # ORDER BY ann_date DESC：ann_date 为 NULL 的行（老分红/阶段公告缺失）
-            # 在 SQLite 中排序最小，排最后——同组取一/取最新时优先有公告日的行
-            order_by = " ORDER BY ann_date DESC" if has_event_cols else ""
-            rows = self._conn.execute(
+            # ORDER BY ann_date DESC NULLS LAST：ann_date 为 NULL 的行（老分红/
+            # 阶段公告缺失）排最后——同组取一/取最新时优先有公告日的行
+            order_by = " ORDER BY ann_date DESC NULLS LAST" if has_event_cols else ""
+            cur = self._conn.execute(
                 f"SELECT {_q(sym)} AS sym, {_q(sec['stk_div'])} AS stk,"
                 f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
                 f"{sel_extra}"
                 f" FROM {_q(table)}{where}{order_by}",
                 (*fparams, *bounds_params),
-            ).fetchall()
+            )
+            names = [d[0] for d in cur.description]
+            rows = [dict(zip(names, r)) for r in cur.fetchall()]
             if has_event_cols:
                 self._div_idx = self._build_div_idx_event(rows)
             else:
@@ -312,13 +438,13 @@ class GenericSQLBackend(DataBackend):
         if not code:
             raise ValueError("未填 benchmark_code（默认基准代码），调用需显式传 code")
         csym, cdate = self._keys(sec["close_table"])
-        df = pd.read_sql_query(
+        df = self._conn.execute(
             f"SELECT {_q(cdate)} AS trade_date, {_q(sec['close'])} AS close"
             f" FROM {_q(sec['close_table'])}"
             f" WHERE {_q(csym)}=? AND {_q(cdate)}>=? AND {_q(cdate)}<=?"
             f" ORDER BY {_q(cdate)}",
-            self._conn, params=[code, start, end],
-        )
+            [code, start, end],
+        ).df()
         if df.empty:
             return None
         if sec["adj_table"] is None:
@@ -327,13 +453,13 @@ class GenericSQLBackend(DataBackend):
             merged["hfq_close"] = merged["close"]
         else:
             asym, adate = self._keys(sec["adj_table"])
-            adj = pd.read_sql_query(
+            adj = self._conn.execute(
                 f"SELECT {_q(adate)} AS trade_date, {_q(sec['adj'])} AS adj_factor"
                 f" FROM {_q(sec['adj_table'])}"
                 f" WHERE {_q(asym)}=? AND {_q(adate)}>=? AND {_q(adate)}<=?"
                 f" ORDER BY {_q(adate)}",
-                self._conn, params=[code, start, end],
-            )
+                [code, start, end],
+            ).df()
             merged = df.merge(adj, on="trade_date", how="left")
             if len(adj) == 0:
                 # adj 表查空时 merged["adj_factor"] 全 NaN；退化为未复权 close
@@ -453,36 +579,6 @@ class GenericSQLBackend(DataBackend):
             frag.append(f"({sql})")
         return " AND ".join(frag), params
 
-    def _query_table(
-        self,
-        table: str,
-        need: dict[str, str],
-        symbols: list[str] | None,
-        start: str,
-        end: str,
-    ) -> pd.DataFrame:
-        """加载单张表中被请求的列，返回 MultiIndex (trade_date, symbol)。"""
-        ksym, kdate = (_q(k) for k in self._keys(table))
-        select = [f"{ksym} AS symbol", f"{kdate} AS trade_date"]
-        select += [
-            _q(phys) if phys == canon else f"{_q(phys)} AS {_q(canon)}"
-            for canon, phys in need.items()
-        ]
-        if symbols is not None:
-            ph = ",".join("?" * len(symbols))
-            where = f"{ksym} IN ({ph}) AND "
-            params: list = list(symbols)
-        else:
-            where, params = "", []
-        params += [start, end]
-        df = pd.read_sql_query(
-            f"SELECT {', '.join(select)} FROM {_q(table)}"
-            f" WHERE {where}{kdate} >= ? AND {kdate} <= ?",
-            self._conn, params=params,
-        )
-        # read_sql_query 即使 0 行也返回完整列，直接 set_index
-        return df.set_index(["trade_date", "symbol"])
-
     def _check_schema(self):
         """表单引用的表与列全部落库校验（物理表或 VIEW 均可），
         初始化期暴露拼写错误，报错定位到表单条目。"""
@@ -550,36 +646,46 @@ class GenericSQLBackend(DataBackend):
             for col in fcols:
                 ref(table, col, f"filters[{table!r}]")
 
-        ph = ",".join("?" * len(refs))
+        tables = sorted(refs)
+        # DuckDB 标识符大小写不敏感（保留大小写）：校验同样按 lower() 比较，
+        # 避免物理 MixedCase 表/列被误拒（查询本身可正常工作）
+        lowers = [t.lower() for t in tables]
+        ph = ",".join("?" * len(lowers))
         rows = self._conn.execute(
-            "SELECT name FROM sqlite_master"
-            f" WHERE type IN ('table', 'view') AND name IN ({ph})",
-            sorted(refs),
+            "SELECT table_name FROM information_schema.tables"
+            f" WHERE lower(table_name) IN ({ph})",
+            lowers,
         ).fetchall()
-        missing_tables = set(refs) - {r[0] for r in rows}
+        have_tables = {r[0].lower() for r in rows}
+        missing_tables = {t for t in tables if t.lower() not in have_tables}
         if missing_tables:
             raise ValueError(f"表单引用的表在库中不存在: {sorted(missing_tables)}")
+        have_all: dict[str, set[str]] = {}
+        col_rows = self._conn.execute(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            f" WHERE lower(table_name) IN ({ph})",
+            lowers,
+        ).fetchall()
+        for tbl, col in col_rows:
+            have_all.setdefault(tbl.lower(), set()).add(col.lower())
         bad_cols = []
         for table, cols in refs.items():
-            have = {
-                r[0] for r in self._conn.execute(
-                    # pragma 只收字符串字面量：单引号双写转义
-                    f"SELECT name FROM pragma_table_info('{table.replace("'", "''")}')"
-                )
-            }
+            have = have_all.get(table.lower(), set())
             for col, desc in cols.items():
-                if col not in have:
+                if col.lower() not in have:
                     bad_cols.append(f"{table}.{col}（{desc}）")
         if bad_cols:
             raise ValueError(f"表单引用的列在库中不存在: {bad_cols}")
         self._check_key_types()
 
     def _check_key_types(self):
-        """抽样验证键列存储类型：日期列须为 YYYYMMDD 文本，代码列须为 TEXT。
+        """抽样验证键列存储类型：日期/代码列均须为 VARCHAR。
 
-        SQLite 类型序 INTEGER < TEXT：键列存成 INTEGER 时与文本参数的比较恒假，
-        面板会静默查空（每日"无行情数据"但回测照常跑完）。每列取首个非 NULL
-        样本探一次；空表无样本可验，跳过（数据缺失在运行期以显式告警呈现）。
+        DuckDB 列存类型与查询参数不做静默隐式转换：键列若是 DATE/TIMESTAMP
+        或 BIGINT，字符串参数比较会在查询期报错或产生非预期结果；日期列还
+        必须是 YYYYMMDD 文本，否则 (交易日, 代码) 对齐整体失真。每列取首个
+        非 NULL 样本探一次；空表无样本可验，跳过（数据缺失在运行期以显式
+        告警呈现）。
         """
         c = self._c
         probes: list[tuple[str, str, str]] = []  # (表, 列, "date" | "text")
@@ -639,16 +745,16 @@ class GenericSQLBackend(DataBackend):
                 continue
             dtype, value = row
             if kind == "date":
-                ok = (dtype == "text" and isinstance(value, str)
+                ok = (dtype == "VARCHAR" and isinstance(value, str)
                       and len(value) == 8 and value.isdigit())
-                expect = "YYYYMMDD 文本（8 位数字）"
+                expect = "YYYYMMDD 文本（VARCHAR，8 位数字）"
             else:
-                ok = dtype == "text"
-                expect = "TEXT"
+                ok = dtype == "VARCHAR"
+                expect = "VARCHAR"
             if not ok:
                 raise ValueError(
                     f"表 {table} 的列 {col} 应为{expect}，实测类型 {dtype} 值 {value!r}："
-                    "SQLite 中 INTEGER < TEXT，类型不匹配的键比较恒假，查询会静默查空"
+                    "键列类型不匹配会使 (交易日, 代码) 对齐失真或查询报错"
                 )
 
 

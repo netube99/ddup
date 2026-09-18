@@ -9,7 +9,7 @@
     # TREND_BREAK + 净亏损，训练持仓预警模型
     .venv/bin/python scripts/ml_train.py strategies/my_strategy/config.yaml \
         --model tb_guard --start 20220101 --end 20250630 \
-        --db results/baseline.db --lookahead 3
+        --db results/baseline.duckdb --lookahead 3
 
 scope 由 state_features 自动推导，与引擎一致。模型的意图（分数如何
 消费、阈值多少）不在训练侧——由策略 YAML / 代码自行定义。

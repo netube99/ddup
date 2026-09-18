@@ -4,8 +4,8 @@ ddup 引擎通过 `DataBackend` 抽象层（`btcore/backend.py`）消费数据�
 
 | 方式 | 适用场景 | 工作量 |
 |------|---------|--------|
-| **A) 填表法** | 数据在 SQLite 库中（表或 VIEW） | 子类化 `GenericSQLBackend`，填一个 Python dict，零 SQL |
-| **B) 手写实现** | 非 SQLite 数据源（内存、API、parquet、CSV 等） | 子类化 `DataBackend`，实现 3 个抽象方法 |
+| **A) 填表法** | 数据在 DuckDB 库中（表或 VIEW） | 子类化 `GenericSQLBackend`，填一个 Python dict，零 SQL |
+| **B) 手写实现** | 非 DuckDB 数据源（内存、API、parquet、CSV 等） | 子类化 `DataBackend`，实现 3 个抽象方法 |
 
 推荐填表法。§1–§2、§4–§10 讲填表法，§3 讲手写实现。
 
@@ -13,7 +13,7 @@ ddup 引擎通过 `DataBackend` 抽象层（`btcore/backend.py`）消费数据�
 
 ## 1. 快速开始
 
-推荐搭配 [tushare_db](https://github.com/netube99/tushare_db) 维护的 SQLite 库使用，引擎开发过程已原生适配其表组织形式；匹配其他第三方库可能出现预期之外的问题。
+推荐搭配 [tushare_db](https://github.com/netube99/tushare_db) 维护的 DuckDB 库使用，引擎开发过程已原生适配其表组织形式；匹配其他第三方库可能出现预期之外的问题。
 
 > tushare.pro 积分要求：账户 **2000 积分**可凑齐引擎必需数据；`stock_st` 接口要求 **3000 积分**，缺少该表引擎无法正确筛选 ST 股。
 
@@ -22,7 +22,7 @@ ddup 引擎通过 `DataBackend` 抽象层（`btcore/backend.py`）消费数据�
 cp adapters/tushare.py.template adapters/my_backend.py
 
 # 2. 编辑 my_backend.py，改三处：
-#    - _DEFAULT_DB_PATH → 你的 SQLite 库路径
+#    - _DEFAULT_DB_PATH → 你的 DuckDB 库路径（如 market.duckdb）
 #    - TUSHARE_FORM 里每个 "表名.字段名" → 你库里的实际位置
 #    - 可选：添加 extra_fields、增删辅助能力
 
@@ -36,6 +36,25 @@ print(b.get_calendar('20240101', '20240131'))
 
 - 完整填好的示例：`adapters/tushare.py`（基于 tushare_db 的 `stk_factor_pro` 等表）。
 - 可复制的空模板：`adapters/tushare.py.template`（按 tushare 原生 `daily` 体系映射，类名 `TushareBackend`）。
+
+### 1.1 运行时选择后端（多后端项目）
+
+CLI 缺省使用 `adapters.tushare:TushareBackend`；用环境变量 `DDUP_BACKEND`
+可在不改代码的情况下切换到其他后端（格式 `module:Class`）：
+
+```bash
+# 黄金策略后端（data/gold_market.duckdb，构建脚本 scripts/refresh_gold_db.py）
+DDUP_BACKEND=adapters.tushare_gold:TushareGoldBackend \
+  python scripts/run.py strategies/exploring/gold_mid_term/config.yaml \
+  --start 20190101 --end 20260914 --out results/gold.duckdb
+```
+
+适用场景：同一项目里有多个数据域（股票 / ETF / 期货），一个后端对应
+一个 DuckDB 库，策略按需切换。`run.py` / `factor_eval.py` / `sweep.py` /
+`live.py` 等所有经 `research/cli_common.make_provider()` 的入口都遵守该变量。
+
+参考实现：`adapters/tushare_gold.py`（黄金 ETF + 宏观对齐列，海外序列按
+"严格早于中国交易日" 对齐，无前视）。
 
 ---
 
@@ -113,7 +132,7 @@ MY_FORM = {
 
 ## 3. 备选方案：手写实现 `DataBackend`
 
-数据不在 SQLite（内存、CSV、parquet、HTTP API 等）或库结构不适合填表时，直接实现 `DataBackend` ABC。
+数据不在 DuckDB（内存、CSV、parquet、HTTP API 等）或库结构不适合填表时，直接实现 `DataBackend` ABC。
 
 ### 3.1 必须实现的抽象方法（3 个）
 
@@ -304,7 +323,7 @@ FROM financials;
 
 ### 7.4 完全自定义数据源
 
-任何有 `(代码, 日期)` 键的数据都可对接（社交媒体情绪、新闻舆情、替代数据厂商因子等），导入 SQLite 后填映射即可：
+任何有 `(代码, 日期)` 键的数据都可对接（社交媒体情绪、新闻舆情、替代数据厂商因子等），导入 DuckDB 后填映射即可：
 
 ```python
 "extra_fields": {
@@ -398,6 +417,7 @@ FROM financials;
 
 与软回退相反，以下问题在 `GenericSQLBackend` 加载期直接 `ValueError`，不会静默跑出错误结果：
 
-- **键列类型探针**：日期键列须为 `YYYYMMDD` 文本、代码键列须为 `TEXT`（首次连接时逐表抽样验证）。SQLite 类型序 `INTEGER < TEXT`，键列存成整数时与文本参数的比较恒假，查询会静默返回空面板——回测会在“无行情数据”下照常跑完。
-- **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 outer join 多对多爆炸、策略层 `to_dict` 静默丢行。
+- **键列类型探针**：日期键列须为 `YYYYMMDD` 文本、代码键列须为 `VARCHAR`（首次连接时逐表抽样验证）。键列存成 `BIGINT`/`DATE` 会使（交易日, 代码）对齐失真或查询报错，初始化期直接拒绝。
+- **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 FULL OUTER JOIN 多对多爆炸、策略层 `to_dict` 静默丢行。
+- **旧格式拒绝**：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner 会静默打开旧库，必须 fail-fast）。
 - **空 universe 语义**：`query_bars` 的 `symbols=[]` 返回空面板，`None` 才表示全市场（引擎 preload 用 None；勿用空列表表达“全市场”）。

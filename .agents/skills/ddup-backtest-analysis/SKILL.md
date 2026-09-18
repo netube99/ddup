@@ -7,7 +7,7 @@ description: ddup 回测结果深度分析：结果库 schema（trade_log/runs/s
 
 禁止只看 total_return/sharpe 下结论。每个候选策略必须钻到交易明细。API 细节见 `docs/cli_and_research.md`。
 
-## 结果库 schema（多 run SQLite，btcore/database.py）
+## 结果库 schema（多 run DuckDB，btcore/database.py；BIGINT/VARCHAR/DOUBLE，sequence 自增）
 
 - `runs(run_id, strategy, start_date, end_date, initial_capital, config_json, status, stats_json, created_at)`——status: running/completed/failed；stats_json 含全部统计
 - `trade_log(id, run_id, date, symbol, side, trigger, price, shares, turnover, commission, stamp_tax, transfer_fee, slippage_amount, net_amount, reason)`
@@ -37,7 +37,7 @@ trigger 全集：MANUAL（select 名单）、TARGET（target_value 调仓）、C
 ## 1. cross_validate.py（每个 run 必做）
 
 ```bash
-python scripts/cross_validate.py results/r3.db [--run-id N]   # 退出码=问题数，0=通过
+python scripts/cross_validate.py results/r3.duckdb [--run-id N]   # 退出码=问题数，0=通过
 ```
 九项检查：trigger 分布（集外仅 INFO）、买卖比>3 或 <0.3、同日同票买卖冲突、**交易磨损/资金比超分档阈值**（≤5万 3%、≤50万 1%、>50万 0.5%，另加最低佣金×2+印花税底；≤5万降级 INFO）、小单过多（≥10万资金且>50% 买入触发最低佣金，边界 = min_commission/commission_rate，默认费率 ≈33333）、日均成交>10 笔、持仓超 max_positions、负现金、卖出按 trigger 分类统计（INFO）。
 
@@ -64,12 +64,12 @@ FROM trade_log WHERE side='SELL' AND run_id=? GROUP BY trigger;
 run.py **没有 --debug 开关**，快照只能代码路径写：
 
 ```python
-engine = Engine(strategy, provider, debug=True, db_path="results/debug.db")
+engine = Engine(strategy, provider, debug=True, db_path="results/debug.duckdb")
 engine.run("20240101", "20240630")
 ```
 ```bash
-python scripts/replay.py results/debug.db --symbol 000001.SZ --date 20240605
-python scripts/replay.py results/debug.db --date 20240315 --list-symbols
+python scripts/replay.py results/debug.duckdb --symbol 000001.SZ --date 20240605
+python scripts/replay.py results/debug.duckdb --date 20240315 --list-symbols
 ```
 缺省 run_id 取最新 run；库中无 run 记录（**含旧库无 runs 表**）一律报错并以退出码 1 退出。
 快照含当日账户状态、pending buy/sell/buy_conditions、每持仓明细+最多 5 个因子列。逐日回答"那天为什么买/卖这只"。
@@ -78,7 +78,7 @@ python scripts/replay.py results/debug.db --date 20240315 --list-symbols
 
 ```python
 from research.attribution import brinson_attribute
-r = brinson_attribute("results/r3.db", provider_db,   # 行情库路径：用后端的默认库路径 API 获取
+r = brinson_attribute("results/r3.duckdb", provider_db,   # 行情库路径：用后端的默认库路径 API 获取
                       "20240101", "20250630", index_code="000300.SH", run_id=None)  # None=最新 run
 # r["summary"]: total_excess_return 分解为 allocation/selection/interaction_effect + unexplained
 # r["industry_detail"]: 每行业 active_weight、各效应、total_contribution
@@ -110,7 +110,7 @@ pytest 绿不算证据。引擎所有计算默认不可信时的核验路径：
 
 - **确定性验证先行**：同配置跑两次 debug，trade_log/account_daily/debug_snapshots 逐字段零差异——否则一切 diff 无意义
 - **锚点导出**：`Engine(..., debug=True)` → debug_snapshots 表（每日 pending/bars/holdings/account 内部状态）+ trade_log + account_daily
-- **影子重算**：手写 pandas+sqlite3 从行情库原始表独立重算（**禁止 import btcore**，按 factors/library.yaml + docs 公式实现——文档与实现漂移本身就是核查对象），与引擎锚点逐字段 diff
+- **影子重算**：手写 pandas+duckdb 从行情库原始表独立重算（**禁止 import btcore**，按 factors/library.yaml + docs 公式实现——文档与实现漂移本身就是核查对象），与引擎锚点逐字段 diff
 - **三方闭环**：stats_json ↔ trade_log 重建 ↔ account_daily 重建完全一致
 - **核心原则**：成交的票必须通过全部过滤器（一笔违规买入即 bug）；成交价=裸价±滑点、因子=复权口径
 - 完整 7 层 40 项清单见 `docs/audit_checklist.md`；核验后数字变化 → 走 §6 归因
