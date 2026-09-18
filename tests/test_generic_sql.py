@@ -339,6 +339,15 @@ def test_get_dividends(backend):
     assert backend.get_dividends_on_date("20240102") == {}
 
 
+def test_dividends_outside_window_fall_back_to_query(backend):
+    """窗口剪枝只是性能优化：窗口外单日查询必须回表，语义与全量一致。"""
+    backend.set_dividend_bounds("20240102", "20240102")
+    assert backend.get_dividends_on_date("20240102") == {}  # 窗口内，索引为空
+    div = backend.get_dividends_on_date("20240103")  # 窗口外，回表
+    assert div == {"000001.SZ": {"stk_div": 0.5, "cash_div": 1.0},
+                   "600000.SH": {"stk_div": 0.0, "cash_div": 0.3}}
+
+
 # ── 扩展方法 ──
 
 

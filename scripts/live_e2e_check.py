@@ -6,7 +6,7 @@
   - 中途插入一次错报持仓 → 必须回滚拒绝，随后正确 statement 必须通过
   - 中途建账（OPENING 播种）与全程回放等价
 
-用法: python scripts/live_e2e_check.py [--bt-db 回测库] [--ledger 账本] [--yaml 策略]
+用法: python scripts/live_e2e_check.py --bt-db 回测库 [--ledger 账本] [--yaml 策略]
 依赖真实行情库（adapters.tushare._DEFAULT_DB_PATH）；需先跑出含成交的回测。
 """
 import argparse
@@ -14,6 +14,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -21,9 +23,12 @@ from btcore import database
 from btcore.generic_sql import connect_market_db
 from research.cli_common import latest_run_id
 
+_HERE = Path(__file__).resolve().parent
 _p = argparse.ArgumentParser()
-_p.add_argument("--bt-db", default="results/live_migration/smoke_bt2.duckdb")
-_p.add_argument("--ledger", default="live/e2e_check.duckdb")
+_p.add_argument("--bt-db", required=True,
+                help="含成交的回测结果库（scripts/run.py --out 产物）")
+_p.add_argument("--ledger", default=os.path.join(
+    tempfile.gettempdir(), "ddup_live_e2e.duckdb"))
 _p.add_argument("--yaml", default="strategies/selected/dv_lowvol_300/config.yaml")
 _p.add_argument("--start", default=None, help="建账日（缺省=回测首个交易日）")
 _args = _p.parse_args()
@@ -32,7 +37,16 @@ BT = _args.bt_db
 LEDGER = _args.ledger
 MARKET = None
 YAML = _args.yaml
-PY = ".venv/bin/python"
+PY = sys.executable
+LB = str(Path(LEDGER).with_name("test_b.duckdb"))
+
+if not os.path.isfile(BT):
+    print(f"错误: 回测结果库不存在: {BT}（先跑一次含成交的回测并 --out）",
+          file=sys.stderr)
+    sys.exit(2)
+if not os.path.isfile(YAML):
+    print(f"错误: 策略 YAML 不存在: {YAML}", file=sys.stderr)
+    sys.exit(2)
 
 conn = database.connect_result_db(BT, read_only=True)
 # 最新 run 解析口径统一走 runs 表（此前查 trade_log，空 trade_log 的 run 会错位）
@@ -95,7 +109,7 @@ def account_state(d):
 
 
 def cli(*args):
-    p = subprocess.run([PY, "scripts/live.py", *args], capture_output=True,
+    p = subprocess.run([PY, str(_HERE / "live.py"), *args], capture_output=True,
                        text=True, cwd=".")
     try:
         return json.loads(p.stdout)
@@ -122,8 +136,8 @@ def fills_from(trades, date):
 def main():
     if os.path.exists(LEDGER):
         os.remove(LEDGER)
-    if os.path.exists("live/test_b.duckdb"):
-        os.remove("live/test_b.duckdb")
+    if os.path.exists(LB):
+        os.remove(LB)
 
     # ── 模拟窗口 = 回测 run 自身的交易日（account_daily 逐日记录）──
     # 旧版写死 20260105,20260204 已过期；从回测库动态取，不再依赖过期日期
@@ -224,8 +238,8 @@ def main():
           f" cash={r['last_day']['cash']:.2f}"
           f" holdings={len(r['holdings'])}")
 
-    # ── 5) 中途建账（OPENING 播种）等价性：B 在 0108 建账 vs A 回放 ──
-    lb = "live/test_b.duckdb"
+    # ── 5) 中途建账（OPENING 播种）等价性：B 在中间日建账 vs A 回放 ──
+    lb = LB
     d = days[3]
     cash, holdings, entry = account_state(d)
     pos_file = "/tmp/live_e2e_positions.yaml"

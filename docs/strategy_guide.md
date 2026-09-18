@@ -332,7 +332,8 @@ class MyStrategy(Strategy):
 |---|---|---|---|
 | `initial_capital` | `float` | `1000000` | 初始资金（元） |
 | `max_positions` | `int` | `20` | 最大持仓数。所有买入路径达到上限后只记 INFO 日志、不拦截——策略应自行管理持仓数量 |
-| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = 0.01 元）。必须是非负整数，否则 `ValueError` |
+| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = `tick_size` 元）。必须是非负整数，否则 `ValueError` |
+| `tick_size` | `float` | `0.01` | 品种最小变动价位（元），∈(0,1]。A 股股票 0.01；场内 ETF/黄金 ETF 0.001（**ETF 策略必须显式声明**，否则滑点放大 10 倍）。滑点价与舍入均按该网格 |
 | `condition_slippage_ticks` | `int \| None` | `None` | 条件单（含条件买入）独立滑点 tick 数；`None` 时沿用 `slippage_ticks`。必须是非负整数或 None，否则 `ValueError` |
 | `execution_price` | `str` | `"open"` | 手动订单成交价字段：`"open"`（次日开盘）或 `"close"`（次日收盘），其他值 `ValueError` |
 | `commission_rate` | `float` | `0.00015` | 佣金费率（万 1.5） |
@@ -856,6 +857,10 @@ result = engine.run("20240101", "20240630")
 | 交易磨损 | `trading_friction` — 双边磨损率、年化拖累、成本占盈利比、无摩擦对照收益 | 交易成本对收益的侵蚀 |
 | 持仓复杂度 | `management_complexity` — 单日最大成交笔数、有成交天数占比、单票平均市值 | 手动跟单的可执行性 |
 | 卖出来源 | `sell_source` — 按卖出 trigger（MANUAL / TARGET / 条件单类型）分组的笔数与盈亏 | 退出行为构成 |
+
+日频口径：首日收益相对 `initial_capital` 计入（波动率/日胜率/最大回撤峰值均以初始资金为基准）；
+`benchmark_compare.strategy_total_return` 与顶层 `total_return` 同基准。请求区间内无任何
+行情数据时 run 明确失败（`status=failed`），不落 `completed`。
 
 同一 `db_path` 多次 `run()` 按 `run_id` 增量追加；run 中抛异常时该 run 的 `status` 改写为 `failed`。
 

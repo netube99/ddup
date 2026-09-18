@@ -57,7 +57,7 @@ FROM trade_log WHERE side='SELL' AND run_id=? GROUP BY trigger;
 
 ## 3. statistics 高级键（runs.stats_json 或 Engine.run() 返回）
 
-`trading_friction`（total_cost/annualized_cost_drag 年化磨损拖累）、`sell_source`（卖出来源归因）、`symbol_contribution`（个股贡献）、`round_trip.summary.avg_holding_days`、`benchmark_compare`（alpha/beta/information_ratio/tracking_error）、`management_complexity.max_trades_per_day`、`cost_breakdown`、`total_dividend_received`（已实现分红）/ `total_dividend_accrued`（+期末未平仓 lot 未实现分红，全口径）、`max_dd_unrecovered`（回撤未修复时 True，此时 `max_drawdown_recovery_days` 保留旧值含谷值日）。报告与 compare.py 的 11 行指标即源于此。
+`trading_friction`（total_cost/annualized_cost_drag 年化磨损拖累）、`sell_source`（卖出来源归因）、`symbol_contribution`（个股贡献）、`round_trip.summary.avg_holding_days`、`benchmark_compare`（alpha/beta/information_ratio/tracking_error）、`management_complexity.max_trades_per_day`、`cost_breakdown`、`total_dividend_received`（已实现分红）/ `total_dividend_accrued`（+期末未平仓 lot 未实现分红，全口径）、`max_dd_unrecovered`（回撤未修复时 True，此时 `max_drawdown_recovery_days` 保留旧值含谷值日；report 对未修复回撤标注「未修复（距结束 N 日）」）。报告与 compare.py 的 11 行指标即源于此。
 
 ## 4. debug 回放（SQL 发现异常但无法解释时）
 

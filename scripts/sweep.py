@@ -39,6 +39,12 @@ def main():
     base_path = config["base"]
     params_def = config["params"]
 
+    # base 是扫描的必需输入：缺失时 fail-fast（--dry-run 也预检），
+    # 避免逐组重复 FileNotFoundError traceback
+    if not Path(base_path).exists():
+        print(f"错误: base 策略配置不存在: {base_path}", file=sys.stderr)
+        return 1
+
     combinations = expand_params(params_def)
     print(f"参数组合数: {len(combinations)}")
 
@@ -164,4 +170,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

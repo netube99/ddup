@@ -49,10 +49,16 @@ def test_selected_exploring_present():
 
 @pytest.mark.parametrize("path", [str(p) for p in _selected_exploring_configs()])
 def test_selected_exploring_config_loads(path):
-    """selected/exploring 策略 config 同样全量 load_strategy（含 ML models 节）。"""
+    """selected/exploring 策略 config 同样全量 load_strategy（含 ML models 节）。
+
+    无因子策略（账本回放驱动等）FACTOR_SPECS 为空，FACTOR_NODES 保持 None
+    （Engine._build_factor_plan 对空 specs 直接跳过）；有 spec 必须是 dict。
+    """
     strategy = load_strategy(path)
     assert strategy is not None
-    assert isinstance(getattr(strategy, "FACTOR_NODES", None), dict)
+    assert not strategy.FACTOR_SPECS or isinstance(
+        getattr(strategy, "FACTOR_NODES", None), dict
+    )
 
 
 def test_gate_triggered_logic():

@@ -44,7 +44,10 @@ def calculate_statistics(
         out=np.ones(len(total_values) - 1),
         where=total_values[:-1] > 0,
     ) - 1.0
-    daily_returns = np.insert(daily_returns, 0, 0.0)
+    # 首日收益相对 initial_capital（账户首行即含首日盈亏）：排除会系统性
+    # 低估短区间波动/胜率，并让 max_drawdown 漏掉建仓日回撤
+    first_ret = (total_values[0] / initial_capital - 1.0) if initial_capital > 0 else 0.0
+    daily_returns = np.insert(daily_returns, 0, first_ret)
 
     n_days = len(total_values)
     avg_total_value = np.mean(total_values)
@@ -66,7 +69,7 @@ def calculate_statistics(
     result["monthly_returns"] = _compute_period_returns(dates, total_values, "M")
     result["yearly_returns"] = _compute_period_returns(dates, total_values, "Y")
 
-    rets = daily_returns[1:] if len(daily_returns) > 1 else np.array([])
+    rets = daily_returns
     volatility = np.std(rets, ddof=1) if len(rets) > 1 else 0.0
     annualized_vol = volatility * np.sqrt(annual_days)
     result["annualized_volatility"] = annualized_vol
@@ -82,13 +85,18 @@ def calculate_statistics(
         (mean_excess / downside_vol * np.sqrt(annual_days)) if downside_vol > 0 else 0.0
     )
 
-    peak = total_values[0]
+    # 回撤峰值从 initial_capital 起算：首日相对初始资金的亏损也是回撤
+    dd_values = (
+        np.concatenate(([initial_capital], total_values))
+        if initial_capital > 0 else total_values
+    )
+    peak = dd_values[0]
     max_dd = 0.0
     max_dd_start = 0
     max_dd_end = 0
     current_start = 0
     dd_recovery_days = 0
-    for i, v in enumerate(total_values):
+    for i, v in enumerate(dd_values):
         if v > peak:
             peak = v
             current_start = i
@@ -99,8 +107,8 @@ def calculate_statistics(
             max_dd_end = i
     max_dd_unrecovered = False
     if max_dd_end > max_dd_start:
-        peak_val = total_values[max_dd_start]
-        after_dd = total_values[max_dd_end:]
+        peak_val = dd_values[max_dd_start]
+        after_dd = dd_values[max_dd_end:]
         recovered = after_dd >= peak_val
         if np.any(recovered):
             dd_recovery_days = int(np.argmax(recovered))
@@ -667,16 +675,16 @@ def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
     rf_daily = risk_free_rate / annual_days if annual_days > 0 else 0.0
 
     # TEST-07：len<2 时 np.var/np.std(ddof=1) 触发 "Degrees of freedom <= 0"
-    # RuntimeWarning（2 日窗口仅 1 个收益样本）；长度守卫输出 NaN 而非告警。
-    # 数值语义与原路径一致（nan > 0 为 False → beta/ir 仍走 0.0 分支）。
-    bench_var = float(np.var(bench_rets, ddof=1)) if len(bench_rets) > 1 else float("nan")
+    # RuntimeWarning（2 日窗口仅 1 个收益样本）；样本不足统一回退 0.0
+    # （与 beta/ir 出口一致），避免 NaN 进入 stats_json 与报告
+    bench_var = float(np.var(bench_rets, ddof=1)) if len(bench_rets) > 1 else 0.0
     if bench_var > 0:
         beta = float(np.cov(strat_rets, bench_rets, ddof=1)[0, 1] / bench_var)
     else:
         beta = 0.0
 
     excess = strat_rets - bench_rets
-    excess_std = float(np.std(excess, ddof=1)) if len(excess) > 1 else float("nan")
+    excess_std = float(np.std(excess, ddof=1)) if len(excess) > 1 else 0.0
     tracking_error = excess_std * np.sqrt(annual_days)
     ir = (
         float(np.mean(excess) / excess_std * np.sqrt(annual_days))
@@ -689,7 +697,13 @@ def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
     alpha_annualized = alpha * annual_days
 
     bench_total_return = bench_vals[-1] / bench_vals[0] - 1.0 if bench_vals[0] > 0 else 0.0
-    strat_total_return = strat_vals[-1] / strat_vals[0] - 1.0 if strat_vals[0] > 0 else 0.0
+    # 策略收益率基数统一用 initial_capital（与 total_return 同口径）：
+    # 首日收盘基数会让同一 run 出现两个策略总收益且首日盈亏被漏掉
+    _init = (
+        float(adf.loc[common_dates, "initial_capital"].iloc[0])
+        if "initial_capital" in adf.columns else strat_vals[0]
+    )
+    strat_total_return = strat_vals[-1] / _init - 1.0 if _init > 0 else 0.0
 
     # 基准年化收益
     n_years = (len(bench_vals) - 1) / annual_days if annual_days > 0 else 0

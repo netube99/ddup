@@ -128,6 +128,18 @@ def cmd_sync(args) -> int:
     try:
         store = LedgerStore(args.db)
         provider = cli_common.make_provider()
+        # 派生回放只遍历开市日：非开市 statement date 的 fill/ADJUST 永不生效
+        # （append-only 死行）且每次 sync 按差额重复追加 → 归一到 <=date 最近开市日
+        statement_date = date
+        if date not in provider.get_calendar(date, date):
+            settle = provider.prev_trading_day(date)
+            if settle is None:
+                print(
+                    f"date {date} 之前找不到交易日（行情数据未更新？）",
+                    file=sys.stderr,
+                )
+                return 2
+            date = settle
         if date < store.start_date:
             print(f"date {date} 早于账本起始日 {store.start_date}", file=sys.stderr)
             return 2
@@ -169,6 +181,8 @@ def cmd_sync(args) -> int:
         store.conn.commit()
         _print_json({
             "ok": True, "date": date,
+            "trade_date": date,
+            "statement_date": statement_date,
             "fills_applied": appended,
             "fills_skipped_dup": skipped,
             "cash_derived": round(report.cash_derived, 2),

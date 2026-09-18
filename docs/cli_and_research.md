@@ -287,7 +287,7 @@ python scripts/live.py status live/main.duckdb
 | 子命令 | 语义 |
 |------|------|
 | `init` | 建账：现金 + 可选已有持仓（`positions.yaml` 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账；`entry_date/entry_price` 用于 holding_days 与 trailing 锚点重建，缺省空仓开局） |
-| `sync` | 每日对账：追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST` 条目（超 100 元告警）。数据落后时也可用（估值用旧价不影响股数/现金对账） |
+| `sync` | 每日对账：追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST` 条目（超 100 元告警）。数据落后时也可用（估值用旧价不影响股数/现金对账）。statement date 非开市日时自动归一到 ≤date 最近开市日（fill/ADJUST 只落交易日，同一 statement 重跑幂等） |
 | `signal` | 全量回放 → 明日操作单（JSON）：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（券商条件单：每只持仓的 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌、T+1 锁定）。同时重写衍生表 |
 | `status` | 当前状态：最近一日 account_daily、持仓快照（`ledger_holdings`）、最近 10 条成交 |
 

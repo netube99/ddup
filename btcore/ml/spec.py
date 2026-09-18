@@ -12,8 +12,8 @@
 特征契约（feature_order = factors + raw + state_features）以 meta 为准：
 meta 由训练侧 export 写入，加载期 artifact/meta/特征缺失一律 fail-fast。
 
-首次训练时 meta 尚不存在——训练脚本以 require_meta=False 从 YAML
-内联 features 引导（bootstrap），导出 meta 后引擎路径才可用。
+首次训练时 meta 与 artifact 均不存在——训练脚本以 require_meta=False 从 YAML
+内联 features 引导（bootstrap），训练导出生成 onnx + meta 后引擎路径才可用。
 
 YAML 形态：
     models:
@@ -108,8 +108,19 @@ class ModelSpec:
         if not p.is_absolute() and strategy_dir:
             p = Path(strategy_dir) / p
         p = p.resolve()
-        if not p.exists():
-            raise ValueError(f"models.{name} artifact 不存在: {p}")
+        # 首训引导（require_meta=False + YAML 内联 features）允许 artifact
+        # 尚不存在——export_model 会创建目录并写文件；引擎路径仍要求已存在
+        yaml_features = d.get("features") or {}
+        _inline = bool(
+            yaml_features.get("factors")
+            or yaml_features.get("raw")
+            or yaml_features.get("state")
+        )
+        if not p.exists() and (require_meta or not _inline):
+            raise ValueError(
+                f"models.{name} artifact 不存在: {p}"
+                "（引擎加载要求 .onnx 已存在；首次训练可在 YAML 内联 features 后直接运行）"
+            )
         if p.suffix != ".onnx":
             raise ValueError(f"models.{name} artifact 必须是 .onnx 文件: {p}")
 

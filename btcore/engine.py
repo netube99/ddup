@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from collections import Counter
+from functools import partial
 
 import pandas as pd
 
@@ -29,7 +30,8 @@ _SELECT_KEYS = frozenset({
 # make_costs_fn + Strategy 侧 conditions）；EDGE-05 未知键 typo 告警的比对集。
 # 策略自定义键不在其中且与已知键编辑距离远，不会误报。
 _ENGINE_CONFIG_KEYS = frozenset({
-    "slippage_ticks", "condition_slippage_ticks", "order_volume_ratio",
+    "slippage_ticks", "condition_slippage_ticks", "tick_size",
+    "order_volume_ratio",
     "execution_price", "initial_capital", "max_positions", "benchmark",
     "quiet_skips", "ml_log",
     "commission_rate", "min_commission", "stamp_tax_rate",
@@ -73,6 +75,15 @@ def _validate_engine_config(config: dict) -> None:
         raise ValueError(
             "condition_slippage_ticks 必须是非负整数或 None: "
             f"{condition_slippage_ticks!r}"
+        )
+    tick_size = config.get("tick_size", 0.01)
+    if (not isinstance(tick_size, (int, float))
+            or isinstance(tick_size, bool)
+            or not math.isfinite(tick_size)
+            or tick_size <= 0 or tick_size > 1):
+        raise ValueError(
+            f"tick_size 必须是 (0,1] 内的数值（品种最小变动价位，股票 0.01、"
+            f"ETF 0.001）: {tick_size!r}"
         )
     order_volume_ratio = config.get("order_volume_ratio")
     if order_volume_ratio is not None and (
@@ -342,6 +353,10 @@ class Engine:
         slippage_ticks = config.get("slippage_ticks", 2)
         condition_slippage_ticks = config.get("condition_slippage_ticks")
         self.condition_slippage_ticks = condition_slippage_ticks
+        # 品种最小变动价位（股票 0.01 / 场内 ETF 0.001）：绑定进滑点函数，
+        # 撮合层滑点与价格舍入都落在 tick 网格上
+        self.tick_size = float(config.get("tick_size", 0.01))
+        self._slip_fn = partial(apply_slippage, tick_size=self.tick_size)
         self.costs_fn = make_costs_fn(config)
         bench_code = config.get("benchmark")
         if bench_code is None:
@@ -450,6 +465,13 @@ class Engine:
             account_daily_df, trade_log_df, _ = database.read_run_data(
                 conn, self.run_id
             )
+            # 整段区间零行情 = 明确失败（部分日期缺失仍按 E-LOOP-02 逐日跳过）：
+            # 落 completed 会让 ML 标签/批量脚本选中空 run
+            if account_daily_df.empty:
+                raise ValueError(
+                    f"回测区间内无任何行情数据（{start} ~ {end}）: "
+                    "account_daily 为空。请检查数据覆盖范围或区间设置"
+                )
             bench_fn = getattr(self.provider.backend, "get_benchmark_bars", None)
             benchmark = (
                 bench_fn(self.benchmark, start, end)
@@ -653,14 +675,14 @@ class Engine:
                     manual_buy_trades = match.manual.rebalance_to_targets(
                         self.account, bars_dict, targets,
                         self.max_positions,
-                        memo_limits, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, self._slip_fn,
                         quiet=self.quiet_skips,
                     )
                 else:
                     manual_sell_trades = match.manual.manual_sell(
                         self.account, bars_dict,
                         self.pending_actions.get("sell", []),
-                        memo_limits, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, self._slip_fn,
                         shares_map=self.pending_actions.get("sell_shares"),
                         trigger="MANUAL",
                         reasons_map=self.pending_actions.get("sell_reasons"),
@@ -671,7 +693,7 @@ class Engine:
                         self.account, bars_dict,
                         self.pending_actions.get("buy", []),
                         self.max_positions,
-                        memo_limits, self.costs_fn, apply_slippage,
+                        memo_limits, self.costs_fn, self._slip_fn,
                         weights_map=self.pending_actions.get("buy_weights"),
                         quiet=self.quiet_skips,
                     )

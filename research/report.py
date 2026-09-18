@@ -119,7 +119,7 @@ def _ratio(v) -> str:
 
 
 def _int(v) -> str:
-    return f"{int(v)}"
+    return v if isinstance(v, str) else f"{int(v)}"
 
 
 def _esc(s) -> str:
@@ -427,7 +427,15 @@ def _single_run_body(result: dict, title: str, meta_line: str) -> str:
     parts = [f"<h1>{_esc(title)}</h1>", f'<p class="meta">{_esc(meta_line)}</p>']
 
     parts.append("<h2>核心指标</h2>")
-    parts.append(_metric_table(_CORE_SPEC, statistics))
+    # max_dd_unrecovered 时 stats 的 recovery_days 是「谷值→区间末」旧值契约，
+    # 直接显示会被读成修复速度——报告层标注为未修复
+    core_stats = statistics
+    if statistics.get("max_dd_unrecovered"):
+        core_stats = dict(statistics)
+        core_stats["max_drawdown_recovery_days"] = (
+            f"未修复（距结束 {int(statistics['max_drawdown_recovery_days'])} 日）"
+        )
+    parts.append(_metric_table(_CORE_SPEC, core_stats))
 
     # 净值曲线：策略 + 基准（如有）
     bm_code = result.get("benchmark_code")

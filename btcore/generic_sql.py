@@ -190,6 +190,8 @@ class GenericSQLBackend(DataBackend):
         未调用时行为与现状完全一致。引擎在 prepare() 开头调用，应传入回测
         [start, end] 区间。若 _div_idx 已构建，本调用不重建索引（窗口应
         在任何 get_dividends_on_date 之前设置）。
+        窗口只是性能剪枝：窗口外日期的 get_dividends_on_date 会回表查询，
+        语义与全量加载一致。
         """
         self._div_bounds = (start, end)
 
@@ -323,46 +325,60 @@ class GenericSQLBackend(DataBackend):
         ).fetchall()
         return [r[0] for r in rows]
 
+    def _fetch_dividend_rows(
+        self, bounds: tuple[str, str] | None
+    ) -> tuple[list[dict], bool]:
+        """按 ex_date 窗口拉取分红行（None=全表），返回 (rows, has_event_cols)。"""
+        sec = self._c["sections"]["dividends"]
+        sym, _ = self._keys(sec["table"])
+        frag, fparams = self._filter_sql(sec["table"])
+        where_parts = [frag] if frag else []
+        bounds_params: list = []
+        if bounds is not None:
+            where_parts.append(f"{_q(sec['ex_date'])} BETWEEN ? AND ?")
+            bounds_params = [bounds[0], bounds[1]]
+        where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        table = sec["table"]
+        # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
+        # 事件级归并）；通用后端无这两列时退化到值级归并
+        cols = {
+            r[0] for r in self._conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE lower(table_name) = lower(?)", [table],
+            ).fetchall()
+        }
+        has_event_cols = "end_date" in cols and "ann_date" in cols
+        sel_extra = ", end_date AS endd, ann_date AS annd" if has_event_cols else ""
+        # ORDER BY ann_date DESC NULLS LAST：ann_date 为 NULL 的行（老分红/
+        # 阶段公告缺失）排最后——同组取一/取最新时优先有公告日的行
+        order_by = " ORDER BY ann_date DESC NULLS LAST" if has_event_cols else ""
+        cur = self._conn.execute(
+            f"SELECT {_q(sym)} AS sym, {_q(sec['stk_div'])} AS stk,"
+            f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
+            f"{sel_extra}"
+            f" FROM {_q(table)}{where}{order_by}",
+            (*fparams, *bounds_params),
+        )
+        names = [d[0] for d in cur.description]
+        return [dict(zip(names, r)) for r in cur.fetchall()], has_event_cols
+
+    def _build_dividend_index(self, bounds: tuple[str, str] | None) -> dict:
+        rows, has_event_cols = self._fetch_dividend_rows(bounds)
+        if has_event_cols:
+            return self._build_div_idx_event(rows)
+        return self._build_div_idx_value(rows)
+
     def get_dividends_on_date(self, date_str: str) -> dict:
+        in_window = self._div_bounds is None or (
+            self._div_bounds[0] <= date_str <= self._div_bounds[1]
+        )
+        if not in_window:
+            # PERF-08 的窗口只是性能剪枝，不得改变查询语义：窗口外单日回表
+            # （live 操作单查询回放末日之后的 next_day 除权事件）
+            day_idx = self._build_dividend_index((date_str, date_str))
+            return day_idx.get(date_str, {})
         if self._div_idx is None:
-            sec = self._c["sections"]["dividends"]
-            sym, _ = self._keys(sec["table"])
-            frag, fparams = self._filter_sql(sec["table"])
-            # PERF-08：有窗口时按 ex_date 剪枝（ex_date 列名来自表单
-            # dividend_ex_date 配置，经 _q() 引用真实物理列名）
-            where_parts = [frag] if frag else []
-            bounds_params: list = []
-            if self._div_bounds is not None:
-                where_parts.append(f"{_q(sec['ex_date'])} BETWEEN ? AND ?")
-                bounds_params = [self._div_bounds[0], self._div_bounds[1]]
-            where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
-            table = sec["table"]
-            # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
-            # 事件级归并）；通用后端无这两列时退化到值级归并
-            cols = {
-                r[0] for r in self._conn.execute(
-                    "SELECT column_name FROM information_schema.columns"
-                    " WHERE lower(table_name) = lower(?)", [table],
-                ).fetchall()
-            }
-            has_event_cols = "end_date" in cols and "ann_date" in cols
-            sel_extra = ", end_date AS endd, ann_date AS annd" if has_event_cols else ""
-            # ORDER BY ann_date DESC NULLS LAST：ann_date 为 NULL 的行（老分红/
-            # 阶段公告缺失）排最后——同组取一/取最新时优先有公告日的行
-            order_by = " ORDER BY ann_date DESC NULLS LAST" if has_event_cols else ""
-            cur = self._conn.execute(
-                f"SELECT {_q(sym)} AS sym, {_q(sec['stk_div'])} AS stk,"
-                f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
-                f"{sel_extra}"
-                f" FROM {_q(table)}{where}{order_by}",
-                (*fparams, *bounds_params),
-            )
-            names = [d[0] for d in cur.description]
-            rows = [dict(zip(names, r)) for r in cur.fetchall()]
-            if has_event_cols:
-                self._div_idx = self._build_div_idx_event(rows)
-            else:
-                self._div_idx = self._build_div_idx_value(rows)
+            self._div_idx = self._build_dividend_index(self._div_bounds)
         return self._div_idx.get(date_str, {})
 
     @staticmethod

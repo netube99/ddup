@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 import pytest
 
@@ -252,3 +254,45 @@ def test_open_position_cost_basis_includes_fees():
     assert op["cost_basis"] == pytest.approx(10007.1, abs=0.01)
     # 浮盈 = 1000×11 - 含费成本 10007.1
     assert op["pnl"] == pytest.approx(11000.0 - 10007.1, abs=0.01)
+
+
+# ── 首日收益/回撤基准（initial_capital）与 benchmark_compare 口径 ──
+
+
+def test_first_day_return_and_drawdown_from_initial_capital():
+    """首日相对 initial_capital 的收益计入日频统计；回撤峰值从初始资金起算。"""
+    adf = make_account_daily([990_000.0, 985_000.0, 995_000.0],
+                             n_holdings=[1, 1, 1])
+    stats = calculate_statistics(adf, make_trades([]))
+    assert stats["total_return"] == pytest.approx(-0.005)
+    # 首日 -1%：峰值是 initial_capital 而非首日收盘，最大回撤 1.5%
+    assert stats["max_drawdown"] == pytest.approx(0.015)
+    assert (stats["profit_days"], stats["loss_days"]) == (1, 2)
+    assert stats["win_rate"] == pytest.approx(1 / 3)
+    assert stats["max_dd_unrecovered"] is True
+
+
+def _benchmark(values):
+    dates = [f"202406{3 + i:02d}" for i in range(len(values))]
+    return pd.DataFrame({"date": dates, "close": values})
+
+
+def test_benchmark_strategy_return_matches_total_return():
+    """benchmark_compare.strategy_total_return 与 total_return 同口径。"""
+    adf = make_account_daily([1_003_000.0, 1_010_000.0, 1_020_000.0, 1_030_000.0])
+    stats = calculate_statistics(
+        adf, make_trades([]), _benchmark([1000.0, 1010.0, 1005.0, 1020.0])
+    )
+    assert stats["benchmark_compare"]["strategy_total_return"] == pytest.approx(
+        stats["total_return"]
+    )
+    assert stats["total_return"] == pytest.approx(0.03)
+
+
+def test_short_window_tracking_error_zero_not_nan():
+    """2 日窗口样本不足：tracking_error 回退 0.0（与 beta/ir 一致），禁止 NaN。"""
+    adf = make_account_daily([1_000_000.0, 1_010_000.0])
+    stats = calculate_statistics(adf, make_trades([]), _benchmark([1000.0, 990.0]))
+    te = stats["benchmark_compare"]["tracking_error"]
+    assert math.isfinite(te)
+    assert te == 0.0

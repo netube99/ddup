@@ -10,7 +10,8 @@ CLI 选择：DDUP_BACKEND=adapters.tushare_gold:TushareGoldBackend
 数据契约（详见 docs/backend_guide.md）：
   - gold_panel 的宏观列（us_real_y10 / usdcnh / xau_usd / sge_close / m*_yoy）
     由 scripts/refresh_gold_db.py 按"严格早于中国交易日"对齐，无前视；
-  - up_limit / down_limit 为 pre_close ± 10% 的合成 ETF 涨跌停价；
+  - up_limit / down_limit 为 pre_close ± 10% 按 ETF 0.001 最小变动价位
+    HALF_UP 合成的涨跌停价；
   - 黄金 ETF 无分红，dividend 为空表（满足填表法必需空）。
 """
 

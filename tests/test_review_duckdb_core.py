@@ -191,6 +191,44 @@ class TestSyncFillDateDefault:
         finally:
             store.close()
 
+    def test_cmd_sync_nontrading_date_normalizes_to_prev_trading_day(
+            self, tmp_path, monkeypatch, capsys):
+        """周六 statement 归一到上一开市日：ADJUST 可回放且重跑幂等。"""
+        import json
+
+        import scripts.live as live_cli
+
+        db = self._ledger(tmp_path)
+        path = tmp_path / "weekend_sync.yaml"
+        path.write_text(yaml.dump({
+            "date": "20240608",  # 周六（非开市日）
+            "cash": 990_098.0,
+            "holdings": [{"symbol": "000001.SZ", "shares": 1000}],
+            "fills": [],
+        }))
+        monkeypatch.setattr(live_cli.cli_common, "make_provider", _make_provider)
+
+        outs = []
+        for _ in range(2):
+            capsys.readouterr()
+            rc = live_cli.cmd_sync(argparse.Namespace(db=db, file=str(path)))
+            assert rc == 0
+            out = capsys.readouterr().out
+            outs.append(json.loads(out[out.index("{"):out.rindex("}") + 1]))
+
+        store = LedgerStore(db)
+        try:
+            adjust = [f for f in store.fills() if f["side"] == "ADJUST"]
+            assert len(adjust) == 1
+            assert adjust[0]["date"] == "20240607"
+            assert all(f["date"] != "20240608" for f in store.fills())
+        finally:
+            store.close()
+        assert outs[0]["cash_adjust"] != 0.0
+        assert outs[1]["cash_adjust"] == 0.0  # 重跑同一 statement 幂等
+        assert outs[0]["statement_date"] == "20240608"
+        assert outs[0]["trade_date"] == "20240607"
+
 
 class TestSweepLegacyFormat:
     """sweep 输出库同样走 assert_duckdb_file 拒止。"""

@@ -82,8 +82,9 @@ conditions:
   holding scope 模型不物化列（分数在决策时点注入持仓 bar），引用即报错
 - `conditions.model_exit` 引用的模型必须在 `models` 节已声明
 
-注意：模型首次训练前 `artifact` 路径也必须已存在（训练导出会覆盖它），
-首次训练前先放一个占位文件：`touch ml_model/alpha_xs.onnx`。
+注意：首次训练时 `artifact` 可以不预先存在——YAML 内联 `features` 提供
+特征契约，训练导出会创建目录并写 `.onnx` 与 `.meta.json`。引擎加载路径
+（`require_meta=True`）仍要求 artifact 与 meta 均已存在。
 
 ### 2.3 训练
 
@@ -174,7 +175,7 @@ trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
 
 | 键 | 类型 | 必需 | 说明 |
 |----|------|------|------|
-| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），必须已存在；训练输出也写这里 |
+| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），训练输出写这里（首次训练可不存在） |
 | `meta` | str | 否 | meta 路径，缺省 = artifact 同名 `.meta.json` |
 | `features` | dict | 训练引导 | 见下表；meta 存在时以 meta 为准，YAML 内联值必须一致或省略 |
 | `role` | str | 否 | **已废弃**：仅告警忽略。scope 由 state_features 推导，阈值写在策略侧 |
@@ -318,8 +319,9 @@ strategies/my_strategy/
 ## 7. 常见问题
 
 **Q: 加载报「artifact 不存在」？**
-A: `artifact` 路径必须已存在，包括首次训练前。先 `touch` 一个占位文件
-（训练导出会覆盖），再跑训练。
+A: 模型尚未训练且 YAML 未内联 `features`。首次训练请在 `models.<name>` 内联
+`features` 后直接运行 `scripts/ml_train.py`（导出创建 artifact 与 meta）；
+模型已训练时检查 `artifact` 路径拼写是否正确。
 
 **Q: 加载报「缺少 meta 文件」？**
 A: 模型还没训练。在 YAML 内联 `features` 做引导，跑

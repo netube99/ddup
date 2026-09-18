@@ -58,7 +58,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 4. YAML config 引擎键（默认值）
 
-`initial_capital`=1000000、`max_positions`=20（超限仅 INFO 不拦截）、`slippage_ticks`=2（非负 int）、`condition_slippage_ticks`=None（沿用前者）、`execution_price`="open"（open/close）、`commission_rate`=0.00015、`min_commission`=5.0、`stamp_tax_rate`=0.0005（仅卖）、`transfer_fee_rate`=0.00001、`benchmark`=None（自动推导：单指数→该指数，否则 000300.SH；空串=无基准）、`order_volume_ratio`=None（单笔≤vol 手×ratio；须 ∈(0,1]，超 1 或非正 → ValueError）、`quiet_skips`=False、`ml_log`。自定义键（top_k/rebalance_interval 等）引擎不消费，config.get() 自读。顶层键：strategy(module:Class)/config/factor_specs/filter_rules/conditions/factor_library(自定义因子库路径)/models。
+`initial_capital`=1000000、`max_positions`=20（超限仅 INFO 不拦截）、`slippage_ticks`=2（非负 int）、`condition_slippage_ticks`=None（沿用前者）、`tick_size`=0.01（品种最小变动价位，∈(0,1]；A 股股票 0.01、场内 ETF 0.001——ETF 策略必须显式声明，否则滑点放大 10 倍）、`execution_price`="open"（open/close）、`commission_rate`=0.00015、`min_commission`=5.0、`stamp_tax_rate`=0.0005（仅卖）、`transfer_fee_rate`=0.00001、`benchmark`=None（自动推导：单指数→该指数，否则 000300.SH；空串=无基准）、`order_volume_ratio`=None（单笔≤vol 手×ratio；须 ∈(0,1]，超 1 或非正 → ValueError）、`quiet_skips`=False、`ml_log`。自定义键（top_k/rebalance_interval 等）引擎不消费，config.get() 自读。顶层键：strategy(module:Class)/config/factor_specs/filter_rules/conditions/factor_library(自定义因子库路径)/models。
 程序化构造（免 YAML）：`build_strategy(cls, config, factor_specs=, filter_rules=, factor_library=, models=)` 与 YAML 加载行为等价（`btcore/strategy_loader.py`；conditions 直接写入 config 键；factor_library 可传路径或预加载 dict）。
 
 ## 5. 条件单系统

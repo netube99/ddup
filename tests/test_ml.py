@@ -85,8 +85,7 @@ class TestModelSpec:
             ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
 
     def test_bootstrap_from_yaml_inline_features(self, tmp_path):
-        art = tmp_path / "a.onnx"
-        art.write_bytes(b"x")
+        """首训引导：artifact 可尚不存在（训练导出时创建）。"""
         spec = ModelSpec.from_dict(
             "a",
             {"artifact": "a.onnx",
@@ -96,6 +95,30 @@ class TestModelSpec:
         )
         assert spec.scope == "holding"
         assert spec.state_features == ["hold_days"]
+        assert spec.artifact == str(tmp_path / "a.onnx")
+
+    def test_bootstrap_without_inline_features_still_requires_artifact(self, tmp_path):
+        with pytest.raises(ValueError, match="artifact 不存在"):
+            ModelSpec.from_dict("a", {"artifact": "nope.onnx"}, str(tmp_path),
+                                require_meta=False)
+
+    def test_engine_path_rejects_missing_artifact_with_inline_features(self, tmp_path):
+        """引擎路径（require_meta=True）不允许用内联 features 绕过存在性检查。"""
+        with pytest.raises(ValueError, match="artifact 不存在"):
+            ModelSpec.from_dict(
+                "a",
+                {"artifact": "nope.onnx", "features": {"factors": ["mom20"]}},
+                str(tmp_path),
+            )
+
+    def test_bootstrap_suffix_validated_without_artifact(self, tmp_path):
+        with pytest.raises(ValueError, match="必须是 .onnx"):
+            ModelSpec.from_dict(
+                "a",
+                {"artifact": "nope.txt", "features": {"factors": ["mom20"]}},
+                str(tmp_path),
+                require_meta=False,
+            )
 
     def test_bad_meta_version(self, tmp_path):
         art = tmp_path / "a.onnx"

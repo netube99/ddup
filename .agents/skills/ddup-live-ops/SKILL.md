@@ -19,7 +19,7 @@ sync.yaml 格式：`date/cash/holdings[{symbol,shares}]/fills[{symbol,side,price
 ## 子命令
 
 - `init`：`live.py init live/main.duckdb --date 20260731 --cash 40000 [--positions p.yaml]` 建账——positions 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账（entry_date/entry_price 用于 holding_days 与 trailing 锚点重建）；缺省空仓开局
-- `sync`：每日对账——追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST`（<0.01 忽略；>100 元 warning，可能是出入金/漏录费用）
+- `sync`：每日对账——追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST`（<0.01 忽略；>100 元 warning，可能是出入金/漏录费用）；statement date 非开市日时自动归一到 ≤date 最近开市日（fill/ADJUST 只落交易日，重跑幂等）
 - `signal`：全量回放 → 明日操作单 JSON：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（每只持仓 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌、T+1 锁定）；衍生表（runs/trade_log/account_daily/holdings）整体重写，**与回测结果库同 schema**——report/cross_validate/replay 直接可用
 - `status`：最近一日 account_daily、持仓快照（ledger_holdings）、最近 10 条成交
 
@@ -27,7 +27,7 @@ sync.yaml 格式：`date/cash/holdings[{symbol,shares}]/fills[{symbol,side,price
 
 - `ledger_fills` append-only 唯一真相源；**持仓/现金永远衍生，不可手改**
 - 公司行为（DIV/STK_DIV）回放时从分红表自动衍生，**不要手工录入**
-- fills 幂等：完全重复的成交自动跳过（append_fills_idempotent），重跑同一 statement 安全
+- fills 幂等：完全重复的成交自动跳过（append_fills_idempotent，含同批重复与 side 大小写），重跑同一 statement 安全；非开市 statement date 会归一到上一开市日再落账
 - reason 字段 = 回测 trigger：TREND_BREAK（盘前评估离场）、条件单触发如实记（TRAILING_TP 等）、手动操作 MANUAL——冷却期记账与 ML 标签都消费它
 
 ## 故障排查

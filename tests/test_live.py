@@ -173,6 +173,20 @@ class TestReconcile:
         assert report.ok
         assert report.cash_delta == pytest.approx(-998.0)
 
+    def test_non_trading_date_fill_not_replayed(self):
+        """账本回放只遍历开市日：非开市 fill 是死行（CLI sync 已归一化日期）。
+
+        回归护栏：提示任何直接写账本的调用方必须落到交易日，否则对账永远不收敛。
+        """
+        store = LedgerStore(":memory:")
+        store.init_account(START, 1_000_000.0, 1_000_000.0)
+        store.append_fill("20240608", "000001.SZ", "BUY", price=10.0,
+                          shares=100, created_at=NOW)  # 周六
+        store.conn.commit()
+        provider = DataProvider(MockDataBackend())
+        report = reconcile(store, provider, "20240611", 1_000_000.0, {})
+        assert report.holding_diffs == {}
+
 
 class TestSyncIdempotency:
     """sync 幂等：重复 statement 不双重入账（agent 重跑安全）。"""
@@ -191,6 +205,24 @@ class TestSyncIdempotency:
         appended, skipped = store.append_fills_idempotent(fills, NOW)
         assert (appended, skipped) == (1, 0)
         assert len(store.fills()) == 2
+
+    def test_lowercase_side_is_idempotent(self):
+        """side 大小写归一化后判重（入库统一 upper），重跑不得双写。"""
+        store = LedgerStore(":memory:")
+        store.init_account(START, 1_000_000.0, 1_000_000.0)
+        fills = [_fill(START, "000001.SZ", "buy", price=10.0, shares=1000,
+                       commission=2.0)]
+        assert store.append_fills_idempotent(fills, NOW) == (1, 0)
+        assert store.append_fills_idempotent(fills, NOW) == (0, 1)
+        assert [f["side"] for f in store.fills()] == ["BUY"]
+
+    def test_duplicate_fill_within_one_batch_skipped(self):
+        """同一 statement 内完全重复的两条 fill 只入一条。"""
+        store = LedgerStore(":memory:")
+        store.init_account(START, 1_000_000.0, 1_000_000.0)
+        f = _fill(START, "000001.SZ", "buy", price=10.0, shares=1000)
+        assert store.append_fills_idempotent([f, dict(f)], NOW) == (1, 1)
+        assert len(store.fills()) == 1
 
     def test_bad_data_reports_error_json_not_crash(self):
         """缺买入记录的卖出 → data_error 而非堆栈崩溃（CLI 层由 cmd_sync 兜底，

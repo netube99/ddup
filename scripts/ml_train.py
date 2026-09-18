@@ -15,7 +15,7 @@ scope 由 state_features 自动推导，与引擎一致。模型的意图（分�
 消费、阈值多少）不在训练侧——由策略 YAML / 代码自行定义。
 
 特征契约：策略 YAML models.<name> 的 meta（已训练过）或内联 features
-（首次训练引导）：
+（首次训练引导，artifact 可尚不存在）：
     models:
       alpha_xs:
         artifact: ml_model/alpha_xs.onnx
@@ -93,6 +93,7 @@ def main() -> int:
         return 1
     if args.post_transform:
         spec.post_transform = args.post_transform
+    print(f"artifact 输出: {spec.artifact}")
 
     is_holding = spec.scope == SCOPE_HOLDING
     if is_holding and not args.db:

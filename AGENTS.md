@@ -295,14 +295,16 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 576 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+- 708 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
-  GenericSQLBackend 表单校验、
+  GenericSQLBackend 表单校验、滑点 tick 口径（股票 0.01 / ETF 0.001）、
   ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、
-  训练面板与引擎物化一致性、时间切分 embargo、评估指标）、
-  统计指标（交易磨损/管理复杂度）、HTML 报告与多 run 对比、stats_json 落盘迁移、
+  训练面板与引擎物化一致性、时间切分 embargo、评估指标、首训免占位引导）、
+  统计指标（交易磨损/管理复杂度、首日收益与初始资金回撤基准）、HTML 报告与多 run 对比、
+  stats_json 落盘迁移、
   debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证、
-  实盘账本（成交应用/对账/操作单/回测往返一致性 parity）、select 协议 sell_reasons 键、
+  实盘账本（成交应用/对账/操作单/回测往返一致性 parity、非开市日 sync 归一化/批量幂等）、
+  select 协议 sell_reasons 键、黄金库刷新（cn_m 窗口/ETF 0.001 档位限价）、
   审查门禁（findings 验收/backlog 归并/收敛判据）
 
 ---

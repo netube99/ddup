@@ -211,6 +211,30 @@ def _make_engine(strategy):
     return Engine(strategy, provider, db_path=":memory:")
 
 
+class _NoBarsBackend(MockDataBackend):
+    """日历有开市日但行情全空：模拟数据未覆盖的请求区间。"""
+
+    def query_bars(self, symbols, start, end, columns=None):
+        return super().query_bars(symbols, start, end, columns).iloc[0:0]
+
+
+def test_empty_range_fails_fast_not_completed(tmp_path):
+    """整段区间零行情 = 明确失败：不得落 completed（ML 标签/批量脚本会误选）。"""
+    db = str(tmp_path / "empty.duckdb")
+    provider = DataProvider(_NoBarsBackend())
+    engine = Engine(_DuckStrategy(), provider, initial_capital=1_000_000,
+                    db_path=db)
+    with pytest.raises(ValueError, match="无任何行情数据"):
+        engine.run("20240603", "20240607")
+
+    conn = connect_result_db(db, read_only=True)
+    try:
+        assert conn.execute("SELECT status FROM runs").fetchone()[0] == "failed"
+        assert conn.execute("SELECT COUNT(*) FROM account_daily").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_buy_duplicate_symbols_raise():
     """buy 名单重复 symbol → 决策时点 ValueError（双重扣款 + 持仓覆盖的前置拦截）。"""
     engine = _make_engine(_DuckStrategy(
@@ -340,6 +364,43 @@ def test_slippage_ticks_valid_accepted():
     assert eng._slippage_ticks == 0
     eng2 = _cfg_engine({})
     assert eng2._slippage_ticks == 2
+
+
+def test_tick_size_default_stock_and_etf_override():
+    """默认 tick=0.01（股票）；ETF 策略声明 0.001 后滑点落在毫厘网格。"""
+    assert _cfg_engine({}).tick_size == 0.01
+    etf = _cfg_engine({"tick_size": 0.001, "slippage_ticks": 2})
+    assert etf.tick_size == 0.001
+    assert etf._slip_fn(9.101, 2, 1) == pytest.approx(9.103)
+    stock = _cfg_engine({"slippage_ticks": 2})
+    assert stock._slip_fn(9.101, 2, 1) == pytest.approx(9.12)
+
+
+def test_tick_size_invalid_raises():
+    for bad in (0, -0.001, 1.5, "0.001", True, float("nan")):
+        with pytest.raises(ValueError, match="tick_size"):
+            _cfg_engine({"tick_size": bad})
+
+
+def test_engine_run_applies_etf_tick_size_to_fills(tmp_path):
+    """config.tick_size 进入真实撮合：ETF tick 下成交价落 0.001 网格。"""
+    strat = _DuckStrategy({"buy": ["000001.SZ"], "sell": []})
+    strat.config = {"tick_size": 0.001, "slippage_ticks": 2}
+    provider = DataProvider(MockDataBackend())
+    db = str(tmp_path / "etf_tick.duckdb")
+    engine = Engine(strat, provider, initial_capital=1_000_000, db_path=db)
+    engine.run("20240603", "20240607")
+    conn = connect_result_db(db, read_only=True)
+    try:
+        trade_date, price = conn.execute(
+            "SELECT date, price FROM trade_log WHERE side='BUY' ORDER BY id LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    bar = MockDataBackend().query_bars(["000001.SZ"], trade_date, trade_date)
+    open_px = float(bar.loc[(trade_date, "000001.SZ"), "open"])
+    assert price == pytest.approx(round(open_px + 2 * 0.001, 3))
+    assert price != pytest.approx(round(open_px + 2 * 0.01, 2))
 
 
 def test_order_volume_ratio_invalid_raises():

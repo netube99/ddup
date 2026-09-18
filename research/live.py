@@ -146,7 +146,7 @@ class LedgerStore:
                     commission: float = 0.0, stamp_tax: float = 0.0,
                     transfer_fee: float = 0.0, reason: str = "",
                     created_at: str):
-        side = side.upper()
+        side = str(side).strip().upper()
         if side not in _FILL_SIDES:
             raise ValueError(f"非法 fill side: {side!r}（允许 {sorted(_FILL_SIDES)}）")
         if side in ("BUY", "SELL", "OPENING"):
@@ -185,7 +185,9 @@ class LedgerStore:
         }
         appended = skipped = 0
         for f in fills:
-            key = (str(f.get("date") or default_date or ""), f["symbol"], f["side"],
+            # side 与 append_fill 同一归一化口径，否则小写 side 重跑被判不重复
+            side = str(f["side"]).strip().upper()
+            key = (str(f.get("date") or default_date or ""), f["symbol"], side,
                    round(float(f["price"]), 6), int(f["shares"]),
                    round(float(f.get("commission") or 0.0), 6),
                    round(float(f.get("stamp_tax") or 0.0), 6),
@@ -198,6 +200,7 @@ class LedgerStore:
                              shares=key[4], commission=key[5],
                              stamp_tax=key[6], transfer_fee=key[7],
                              reason=key[8], created_at=created_at)
+            existing.add(key)  # 同批完全重复的 fill 也跳过
             appended += 1
         return appended, skipped
 

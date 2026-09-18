@@ -21,7 +21,7 @@ ML 是引擎的"意图中性打分公式"插槽：引擎只管数据管线唯一
 ```yaml
 models:
   alpha_xs:
-    artifact: models/alpha_xs.onnx      # 必需；相对策略目录；**文件必须已存在**（首训前 touch 占位）；训练导出覆盖同路径
+    artifact: models/alpha_xs.onnx      # 必需；相对策略目录；训练导出写这里（首训可不存在，需 YAML 内联 features 引导）
     # meta: 缺省 = artifact 同名 .meta.json；version 必须 == 3，缺失/不符加载期报错
     features:                            # 仅首次训练引导（meta 存在时以 meta 为准，不一致报错）
       factors: [mom20, vol_z, rsi_z]     # 因子名 → 以 materialize_only 并入因子物化闭包

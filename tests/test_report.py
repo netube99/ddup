@@ -117,3 +117,14 @@ def test_compare(tmp_path):
     assert "多 run 对比报告" in content
     assert "归一化净值对比" in content
     assert "<svg" in content
+
+
+def test_unrecovered_drawdown_annotation(tmp_path):
+    """未修复回撤不得显示为「修复天数」，报告标注距结束天数。"""
+    result = make_result()
+    result["statistics"]["max_dd_unrecovered"] = True
+    result["statistics"]["max_drawdown_recovery_days"] = 4
+    out = tmp_path / "dd.html"
+    generate_report(result, str(out))
+    content = out.read_text(encoding="utf-8")
+    assert "未修复（距结束 4 日）" in content

@@ -26,7 +26,7 @@
                                                           -- 满足填表法 13 必需空）
 
 用法：
-    python scripts/refresh_gold_db.py [--market-db PATH] [--out PATH] [--since 20030101]
+    python scripts/refresh_gold_db.py [--market-db PATH] [--out PATH] [--since 2003]
 
 Token 解析顺序：DDUP_TUSHARE_TOKEN 环境变量 → TUSHARE_TOKEN → tushare_db
 user_config.yaml 的 tushare_token 字段。
@@ -41,6 +41,7 @@ import os
 import sys
 import time
 import urllib.request
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import duckdb
@@ -62,6 +63,17 @@ ETF_PRICE_LIMIT = 0.10  # ETF 涨跌幅限制 10%
 US_APIS = ("us_trycr", "us_tycr")
 FX_CODES = ("XAUUSD.FXCM", "USDCNH.FXCM")
 SGE_CODE = "Au99.99"
+
+
+def _cn_m_window(since: int, until: int) -> tuple[str, str]:
+    """cn_m 月度窗口（YYYYMM 闭区间）；since/until 均为年份整数。"""
+    return f"{since}01", f"{until}12"
+
+
+def _etf_limit(pre_close: float, factor: str) -> float:
+    """ETF 涨跌停价：最小变动价位 0.001，ROUND_HALF_UP（股票才是 0.01）。"""
+    exact = Decimal(repr(float(pre_close))) * Decimal(factor)
+    return float(exact.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP))
 
 
 def _resolve_token() -> str:
@@ -190,7 +202,8 @@ def build(market_db: Path, out_db: Path, since: int, until: int) -> None:
     xau = _pull_years(client, "fx_daily", since, until, ts_code="XAUUSD.FXCM")
     cnh = _pull_years(client, "fx_daily", since, until, ts_code="USDCNH.FXCM")
     sge = _pull_years(client, "sge_daily", since, until, ts_code=SGE_CODE)
-    cnm = client.call("cn_m", start_m=f"{since // 100}01", end_m=f"{until // 100}12")
+    start_m, end_m = _cn_m_window(since, until)
+    cnm = client.call("cn_m", start_m=start_m, end_m=end_m)
     for name, df in [("us_trycr", trycr), ("us_tycr", tycr), ("xau", xau),
                      ("cnh", cnh), ("sge", sge), ("cn_m", cnm)]:
         print(f"    {name}: {len(df)} 行")
@@ -231,8 +244,15 @@ def build(market_db: Path, out_db: Path, since: int, until: int) -> None:
         _asof_strict(dates, cnm_n, ["m1_yoy", "m2_yoy"]).reset_index(drop=True),
     ], axis=1)
     panel["adj_factor"] = panel["adj_factor"].fillna(1.0)
-    panel["up_limit"] = (panel["pre_close"] * (1 + ETF_PRICE_LIMIT)).round(2)
-    panel["down_limit"] = (panel["pre_close"] * (1 - ETF_PRICE_LIMIT)).round(2)
+    up_factor = str(1 + ETF_PRICE_LIMIT)
+    down_factor = str(1 - ETF_PRICE_LIMIT)
+    panel["up_limit"] = [
+        _etf_limit(pc, up_factor) if pd.notna(pc) else pc for pc in panel["pre_close"]
+    ]
+    panel["down_limit"] = [
+        _etf_limit(pc, down_factor) if pd.notna(pc) else pc
+        for pc in panel["pre_close"]
+    ]
     panel = panel[
         ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close",
          "vol", "amount", "adj_factor", "up_limit", "down_limit", "fd_share",
