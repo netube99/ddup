@@ -3,6 +3,8 @@
 仅覆盖本轮审查发现的缺陷；既有行为回归由 tests/test_factor_*.py 承担。
 """
 
+import logging
+
 import pandas as pd
 import pytest
 
@@ -60,3 +62,48 @@ class TestProjectPreservesWhereMask:
         # B（同组未掩码）保留组均值；C 保留 I2 组均值
         assert main.loc[(self.dates[0], "B"), "cg"] == pytest.approx(10.0)
         assert main.loc[(self.dates[0], "C"), "cg"] == pytest.approx(10.0)
+
+
+class TestProjectMaskSemantics:
+    """FAC-08 / V-FAC-02：where 掩码 NaN 不得报成「N 个交易日无值」。
+
+    旧实现按「任意行 NaN」的交易日计数，含掩码行的每天都会触发
+    「坍缩因子在 N 个交易日无值」warning——该日其他 symbol 实际有值。
+    """
+
+    dates = pd.date_range("2024-01-01", periods=4).strftime("%Y%m%d")
+    flag = {"A": 0.0, "B": 1.0, "C": 1.0}
+
+    def test_partial_mask_not_reported_as_missing(self, caplog):
+        main, breadth = _panels(self.dates, ["A", "B"], ["A", "B", "C"], self.flag)
+        nodes = {"cf": {"expr": "mean(close_hfq)", "where": "flag > 0"}}
+        p = plan.build_factor_plan(nodes, ["cf"])
+        with caplog.at_level(logging.WARNING, logger="btcore.factors.plan"):
+            plan.materialize(main, breadth, p)
+        assert not any("无值" in str(r.message) for r in caplog.records), [
+            r.message for r in caplog.records
+        ]
+        with caplog.at_level(logging.INFO, logger="btcore.factors.plan"):
+            issues = plan.validate_materialization(main, p)
+        assert issues == [], issues
+        info_msgs = [r.message % r.args if r.args else r.message
+                     for r in caplog.records if r.levelno == logging.INFO]
+        assert any("掩码" in m for m in info_msgs), info_msgs
+        assert not any("无值" in m for m in info_msgs), info_msgs
+
+    def test_whole_day_mask_warns(self, caplog):
+        """真·整日无值（同日全被掩码）仍须 warning。"""
+        dates = pd.date_range("2024-01-01", periods=4).strftime("%Y%m%d")
+        main, breadth = _panels(dates, ["A", "B"], ["A", "B", "C"], self.flag)
+        nodes = {"cf": {"expr": "mean(close_hfq)", "where": "flag > 0"}}
+        p = plan.build_factor_plan(nodes, ["cf"])
+        plan.materialize(main, breadth, p)
+        # 第 3 天整日掩码（B/C 也置 0）→ 该日全 NaN
+        bad = dates[2]
+        bad_rows = main.index.get_level_values("trade_date") == bad
+        main.loc[bad_rows, "cf"] = float("nan")
+        with caplog.at_level(logging.WARNING, logger="btcore.factors.plan"):
+            plan.validate_materialization(main, p)
+        assert any("无值" in str(r.message) for r in caplog.records), [
+            r.message for r in caplog.records
+        ]

@@ -21,7 +21,7 @@ ML 是引擎的"意图中性打分公式"插槽：引擎只管数据管线唯一
 ```yaml
 models:
   alpha_xs:
-    artifact: models/alpha_xs.onnx      # 必需；相对策略目录；训练导出写这里（首训可不存在，需 YAML 内联 features 引导）
+    artifact: models/alpha_xs.onnx      # 必需；相对策略目录；训练导出写这里（首训可不存在，需 YAML 内联 features 引导）；加载时比对 meta.artifact_sha256 与文件字节，不符报错
     # meta: 缺省 = artifact 同名 .meta.json；version 必须 == 3，缺失/不符加载期报错
     features:                            # 仅首次训练引导（meta 存在时以 meta 为准，不一致报错）
       factors: [mom20, vol_z, rsi_z]     # 因子名 → 以 materialize_only 并入因子物化闭包
@@ -56,8 +56,8 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model exit_guard
 - 标签：panel = horizon 日前向收益 close_hfq 截面 pct rank；holding = trade_log 回合重构，正样本=TREND_BREAK 且净亏损、距卖出∈[1,lookahead]
 - holding 标签只消费单一 run：`--run-id` 显式指定，缺省取最新 completed run（无 completed 回退最新 run，多 run 时 warning）；同日公司行为（DIV/STK_DIV 盘前）先于买卖，红利计入在持回合 pnl，实盘账本 ADJUST 审计行跳过
 - 训练失败模式：holding 回合标的与训练域（index_universe）无交集 → 打印两侧规模 + 退出码 1（检查 --db 回测与 filter_rules.index_universe 是否一致）；单回合 <3 个交易日 → warning 跳过该回合（需 >= 3）
-- 训练域：panel = filter_rules.index_universe 成分并集 + PIT 过滤（未配则全市场）；holding = 回合标的 ∩ 该训练域（交集裁剪）；80/20 时间切分 + embargo（切点前 horizon/lookahead 日剔除）；scaler 仅训练段拟合
-- 产出：`<name>.onnx` + `<name>.meta.json`（v3：特征契约/scaler/指标/train_window/artifact_sha256）；导出强制 sklearn vs ONNX 一致性 ≤1e-4；meta 版本 ≠ 3 → 加载期 ValueError，强制重新导出（v2 模型不可用）
+- 训练域：panel = filter_rules.index_universe 成分并集 + PIT 过滤（未配则全市场；配了但窗口内无成分快照 → 打印警告并回退全市场）；holding = 回合标的 ∩ 该训练域（交集裁剪）；80/20 时间切分 + embargo（切点前 horizon/lookahead 日剔除）；scaler 仅训练段拟合
+- 产出：`<name>.onnx` + `<name>.meta.json`（v3：特征契约/scaler/指标/train_window/artifact_sha256 + 可选 n_trees/best_iteration）；导出**原子写**（.tmp 校验通过后 os.replace，失败旧 artifact 不变）；导出强制 sklearn vs ONNX 一致性 ≤1e-4；meta 版本 ≠ 3 → 加载期 ValueError，强制重新导出（v2 模型不可用）；加载时比对 meta.artifact_sha256 与文件字节，篡改/半写 → ValueError
 - 样本下限：panel ≥500 行；holding ≥100 且正样本 ≥20（不足报错）
 - 指标：panel = 日截面 Spearman IC/ICIR/胜率 + 十分层多空单调性；holding = AUC/precision/recall
 
@@ -77,7 +77,7 @@ python scripts/ml_train.py strategies/my_strategy/config.yaml --model exit_guard
 
 ## 禁令（架构级，违反=静默错分）
 
-- **策略自行加载 ONNX 逐日推理**：第二条数据管线必漂移；账户态特征只有引擎决策时点能算；缺失/截面口径无法自对齐；绕过 meta v3 fail-fast 与 ml_predictions 观测
+- **策略自行加载 ONNX 逐日推理**：第二条数据管线必漂移；账户态特征只有引擎决策时点能算；缺失/截面口径无法自对齐；绕过 meta v3 fail-fast 与 ml_predictions 观测。`scripts/check_anticorrupt.py` 第 15 项机械检查：`strategies/**/*.py` import onnx/onnxruntime 或调用 `InferenceSession` → linter 失败
 - YAML models 节写 post_transform（无效，只从 meta 读）
 - holding 模型列写进 factor_specs（加载报错）
 - 用训练窗口内 IC 宣称模型有效（必须样本外 factor_eval 复测）

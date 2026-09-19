@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research.factor_eval import calc_ic, calc_layered_returns, summarize_ic
+from research.factor_eval import (
+    _fmt_number,
+    calc_ic,
+    calc_layered_returns,
+    summarize_ic,
+)
 
 
 def _make_series(data_dict: dict[tuple[str, str], float]) -> pd.Series:
@@ -112,4 +117,18 @@ class TestSummarizeIC:
     def test_empty(self):
         s = summarize_ic(pd.Series(dtype=float))
         assert s["n_days"] == 0
-        assert s["ic_mean"] == 0.0
+        # 空序列 = 无数据，不是 IC=0（否则坍缩/无截面因子会得到伪统计量）
+        assert all(
+            pd.isna(s[k])
+            for k in ("ic_mean", "ic_std", "icir", "ic_positive_ratio")
+        )
+
+
+class TestFmtNumber:
+    def test_nan_and_none_show_placeholder(self):
+        """无数据显示 '—'（与 summarize_ic 空序列 NaN 配套）。"""
+        assert _fmt_number(float("nan")) == "—"
+        assert _fmt_number(None) == "—"
+
+    def test_number_keeps_four_decimals(self):
+        assert _fmt_number(0.123456) == "0.1235"

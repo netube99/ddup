@@ -23,6 +23,14 @@ from research.cli_common import latest_run_id
 from research.sweep import expand_params, nested_set
 
 
+def _tail_error(text: str, max_lines: int = 8) -> str:
+    """保留 stderr 末尾非空行：真实异常总在 traceback 末尾，截前 200 字符会丢掉它。"""
+    lines = [ln for ln in (text or "").rstrip().splitlines() if ln.strip()]
+    if not lines:
+        return "(无错误输出)"
+    return "\n".join(lines[-max_lines:])
+
+
 def main():
     parser = argparse.ArgumentParser(description="参数扫描回测")
     parser.add_argument("sweep_config", help="sweep 配置文件 YAML")
@@ -33,11 +41,18 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="仅打印参数组合，不运行")
     args = parser.parse_args()
 
-    with open(args.sweep_config) as f:
-        config = yaml.safe_load(f)
+    try:
+        with open(args.sweep_config) as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        parser.error(f"sweep 配置 YAML 非法: {e}")
 
+    if not isinstance(config, dict) or not isinstance(config.get("base"), str):
+        parser.error(
+            f"sweep 配置顶层必须是含 base 键的 mapping: {args.sweep_config}"
+        )
     base_path = config["base"]
-    params_def = config["params"]
+    params_def = config.get("params")
 
     # base 是扫描的必需输入：缺失时 fail-fast（--dry-run 也预检），
     # 避免逐组重复 FileNotFoundError traceback
@@ -45,13 +60,16 @@ def main():
         print(f"错误: base 策略配置不存在: {base_path}", file=sys.stderr)
         return 1
 
+    if not isinstance(params_def, dict) or not params_def:
+        parser.error("sweep 配置的 params 为空：没有可扫描的参数组合")
+
     combinations = expand_params(params_def)
     print(f"参数组合数: {len(combinations)}")
 
     if args.dry_run:
         for label, params in combinations:
             print(f"  {label}")
-        return
+        return 0
 
     # 准备输出数据库；已存在的文件先做旧格式拒止（SQLite 会被
     # sqlite_scanner 静默打开），再启动子进程
@@ -62,6 +80,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
 
+        n_failed = 0
         for i, (label, params) in enumerate(combinations):
             print(f"\n[{i+1}/{len(combinations)}] {label}")
 
@@ -99,7 +118,10 @@ def main():
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
-                print(f"  FAIL: {result.stderr[:200]}")
+                # 保留 stderr 末尾真实异常（截前 200 字符会把 ValueError 切掉）
+                detail = _tail_error(result.stderr or result.stdout)
+                print(f"  FAIL:\n{detail}")
+                n_failed += 1
                 continue
 
             # 聚合结果：读取刚写入的 run 的 stats_json，附加参数标签
@@ -146,11 +168,15 @@ def main():
             except Exception as e:
                 print(f"  ERROR aggregating: {e}")
 
-    # 输出汇总
-    print(f"\n结果已保存到: {out_path}")
+    # 输出汇总：全失败不得打印成功字样，且必须非零退出
+    if n_failed == len(combinations):
+        print("\n所有参数组合均失败，未产出有效结果（检查上方 FAIL）", file=sys.stderr)
+        return 1
     if not out_path.exists():
-        print("所有参数组合均未产出结果库，跳过汇总（检查上方 FAIL/ERROR）")
-        return
+        print("所有参数组合均未产出结果库，跳过汇总（检查上方 FAIL/ERROR）",
+              file=sys.stderr)
+        return 1
+    print(f"\n结果已保存到: {out_path}")
     out_conn = database.connect_result_db(str(out_path), read_only=True)
     try:
         rows = out_conn.execute(
@@ -167,6 +193,7 @@ def main():
             sharpe = stats.get("sharpe", 0)
             mdd = stats.get("max_drawdown", 0)
             print(f"{label:<50} {total_return:>7.1%} {sharpe:>7.2f} {mdd:>7.1%}")
+    return 0
 
 
 if __name__ == "__main__":

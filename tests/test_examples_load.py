@@ -66,16 +66,16 @@ def test_gate_triggered_logic():
     from strategies.selected.core_lowvol_500.strategy import gate_triggered
 
     # 冷启动：历史不足 20 日不触发
-    short = [(20240101 + i, 0.02) for i in range(10)]
+    short = [0.02] * 10
     assert not gate_triggered(short, 60)
 
     # 构造 60 日历史：50 天高值 + 9 天中值，今日低值 → 触发
-    hist = [(20240101 + i, 0.03 if i % 2 == 0 else 0.025) for i in range(59)]
-    low_today = hist + [(20240101 + 60, 0.005)]
+    hist = [0.03 if i % 2 == 0 else 0.025 for i in range(59)]
+    low_today = hist + [0.005]
     assert gate_triggered(low_today, 60)
     # 今日高值 → 不触发
-    high_today = hist + [(20240101 + 60, 0.05)]
+    high_today = hist + [0.05]
     assert not gate_triggered(high_today, 60)
     # 窗口截取：只比较最近 window 个历史值
-    stale_high = [(20240101, 0.001)] + [(20240101 + i, 0.03) for i in range(1, 59)]
-    assert gate_triggered(stale_high + [(20240101 + 60, 0.005)], 60)
+    stale_high = [0.001] + [0.03] * 58
+    assert gate_triggered(stale_high + [0.005], 60)

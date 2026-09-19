@@ -66,11 +66,16 @@ def adjust(account, today: str, day_bars, provider, log: list):
             continue
 
         div = dividends[symbol]
-        if div.get("stk_div", 0) > 0:
-            _apply_stk_div(holding, div["stk_div"], today, log)
-        if div.get("cash_div", 0) > 0:
+        stk_div = div.get("stk_div", 0)
+        cash_div = div.get("cash_div", 0)
+        # INV-01: 现金分红按送转前股数计息（先记 pre_shares 再送转）
+        pre_shares = holding.shares
+        if stk_div > 0:
+            _apply_stk_div(holding, stk_div, today, log)
+        if cash_div > 0:
             bar = day_bars.get(symbol)
-            _apply_cash_div(account, holding, div["cash_div"], today, bar, log)
+            _apply_cash_div(account, holding, cash_div, pre_shares, stk_div,
+                            today, bar, log)
 
 
 def _apply_stk_div(holding, stk_div: float, today: str, log: list):
@@ -86,9 +91,15 @@ def _apply_stk_div(holding, stk_div: float, today: str, log: list):
     })
 
 
-def _apply_cash_div(account, holding, cash_div: float, today: str,
-                    bar, log: list):
-    gross = cash_div * holding.shares
+def _apply_cash_div(account, holding, cash_div: float, pre_shares: int,
+                    stk_div: float, today: str, bar, log: list):
+    """现金分红：gross 按送转前股数计息，scale 用组合除权公式。
+
+    INV-01: 同日送转时送转已先放大 shares，现金必须按 pre_shares 计；
+    scale = pre_close*(1+stk) / (pre_close*(1+stk)+cash)（stk=0 退化为
+    纯现金 pre_close/(pre_close+cash)），作用于已应用送转 scale 的价格。
+    """
+    gross = cash_div * pre_shares
     holding_days = (date.fromisoformat(today) - date.fromisoformat(holding.entry_date)).days
     if holding_days <= 30:
         tax_rate = 0.20
@@ -102,7 +113,8 @@ def _apply_cash_div(account, holding, cash_div: float, today: str,
 
     pre_close = bar_get(bar, "pre_close", 0.0)
     if pre_close > 0:
-        scale = pre_close / (pre_close + cash_div)
+        ex_basis = pre_close * (1.0 + stk_div)
+        scale = ex_basis / (ex_basis + cash_div)
         _rescale_holding(holding, scale)
     else:
         # EDGE-12：缺 bar（bar=None）或 pre_close<=0 时 scale=None——cost 照减但

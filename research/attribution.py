@@ -46,6 +46,17 @@ from btcore.generic_sql import connect_market_db
 logger = logging.getLogger(__name__)
 
 
+def _error_result(msg: str) -> dict:
+    """归因失败的统一返回形状（调用方先检查 error 键）。"""
+    return {
+        "error": msg,
+        "summary": {},
+        "industry_detail": {},
+        "daily": [],
+        "exposure_summary": {},
+    }
+
+
 # ═══════════════════════════════════════════
 # 数据加载
 # ═══════════════════════════════════════════
@@ -164,14 +175,25 @@ def _load_benchmark_weights(
     if unmapped:
         logger.warning("benchmark_weights: %d symbols 无行业映射", len(unmapped))
 
+    if not records:
+        logger.warning(
+            "benchmark_weights: %s 成分股均无行业映射 (%s~%s)",
+            index_code, start, end,
+        )
+        return pd.DataFrame()
+
     df = pd.DataFrame(records)
     # 每日各行业权重 = sum(成分股权重)
     grouped = df.groupby(["date", "industry"])["weight"].sum().reset_index()
-    # 归一化：每日权重和为 1
-    daily_total = grouped.groupby("date")["weight"].sum()
-    grouped["weight"] = grouped.apply(
-        lambda row: row["weight"] / daily_total[row["date"]], axis=1
-    )
+    # 归一化：每日权重和为 1（全 0 权重的日期丢弃，避免 inf/NaN 污染归因）
+    grouped["total"] = grouped.groupby("date")["weight"].transform("sum")
+    grouped = grouped[grouped["total"] > 0]
+    if grouped.empty:
+        logger.warning(
+            "benchmark_weights: %s 权重全为 0 (%s~%s)", index_code, start, end
+        )
+        return pd.DataFrame()
+    grouped["weight"] = grouped["weight"] / grouped["total"]
     pivoted = grouped.pivot_table(
         index="date", columns="industry", values="weight", aggfunc="first", fill_value=0.0
     )
@@ -601,15 +623,16 @@ def brinson_attribute(
         sw_returns = _load_sw_returns(provider_conn, start, end, l1_codes)
 
         if sw_returns.empty:
-            return {"error": "sw_daily 无数据", "summary": {}, "industry_detail": {},
-                    "daily": [], "exposure_summary": {}}
+            return _error_result("sw_daily 无数据")
 
         # 3. 加载基准行业权重
         benchmark_weights = _load_benchmark_weights(
             provider_conn, index_code, start, end, industry_map
         )
         if benchmark_weights.empty:
-            logger.warning("benchmark_weights 为空，配置效应和选股效应将无法计算")
+            # 基准权重缺失时配置/选股效应无意义：若继续按基准收益 0 出结果，
+            # 会把组合收益整体冒充超额收益（TOOL-01 静默错误）
+            return _error_result(f"benchmark_weights 无数据 (index_code={index_code})")
 
         # 4. 读取回测 trade_log（按 run_id 过滤；旧库无该列则不过滤）
         run_cols = {
@@ -656,20 +679,17 @@ def brinson_attribute(
         # 5. 加载 bars 数据（只拉实际交易过的股票）
         traded_symbols = sorted(trade_log_df["symbol"].unique())
         if len(traded_symbols) == 0:
-            return {"error": "trade_log 无买卖记录", "summary": {}, "industry_detail": {},
-                    "daily": [], "exposure_summary": {}}
+            return _error_result("trade_log 无买卖记录")
 
         # 从数据库拉 bars（自 run 起点，供期初持仓重建）
         bars_df = _load_bars_for_symbols(provider_conn, traded_symbols, trade_start, end)
         if bars_df.empty:
-            return {"error": "bars 数据为空", "summary": {}, "industry_detail": {},
-                    "daily": [], "exposure_summary": {}}
+            return _error_result("bars 数据为空")
 
         # 6. 重建每日持仓（行业权重 + 行业收益）
         holdings_df = _reconstruct_daily_holdings(trade_log_df, bars_df, industry_map)
         if holdings_df.empty:
-            return {"error": "持仓重建失败", "summary": {}, "industry_detail": {},
-                    "daily": [], "exposure_summary": {}}
+            return _error_result("持仓重建失败")
 
         # 归因窗口裁剪回用户区间（持仓含 run 起点前的结转日）
         if trade_start != start:
@@ -780,21 +800,17 @@ def brinson_attribute_from_files(
     # 2. 加载行业指数收益 parquet
     sw_df = pd.read_parquet(sw_returns)
     if sw_df.empty:
-        return {
-            "error": "sw_returns 为空",
-            "summary": {},
-            "industry_detail": {},
-            "daily": [],
-            "exposure_summary": {},
-        }
+        return _error_result("sw_returns 为空")
     logger.info("sw_returns (from files): %d days × %d industries", *sw_df.shape)
 
     # 3. 加载基准行业权重 parquet
     bw_df = pd.read_parquet(benchmark_weights)
     if bw_df.empty:
-        logger.warning("benchmark_weights (from files) 为空，配置效应和选股效应将无法计算")
-    else:
-        logger.info("benchmark_weights (from files): %d days × %d industries", *bw_df.shape)
+        # 与 brinson_attribute 同契约：空基准必须报错，不得按基准收益 0 出结果
+        return _error_result(
+            f"benchmark_weights 无数据 (index_code={benchmark_code})"
+        )
+    logger.info("benchmark_weights (from files): %d days × %d industries", *bw_df.shape)
 
     # 4. 加载 bars parquet（需 MultiIndex trade_date, symbol）
     bars_df = pd.read_parquet(bars)
@@ -807,18 +823,15 @@ def brinson_attribute_from_files(
             "bars parquet 需含 MultiIndex (trade_date, symbol) 或对应的列"
         )
     if bars_df.empty:
-        return {
-            "error": "bars 数据为空",
-            "summary": {},
-            "industry_detail": {},
-            "daily": [],
-            "exposure_summary": {},
-        }
+        return _error_result("bars 数据为空")
     logger.info("bars (from files): %d rows", len(bars_df))
 
-    # 5. 读取回测 trade_log（结果库旧格式 fail-fast）
+    # 5. 读取回测 trade_log（结果库旧格式 fail-fast）+ run 起点（bars 覆盖校验）
     backtest_conn = database.connect_result_db(result_db, read_only=True)
     try:
+        run_row = backtest_conn.execute(
+            "SELECT start_date FROM runs WHERE run_id = ?", [run_id]
+        ).fetchone()
         trade_log_df = backtest_conn.execute(
             "SELECT id, date, symbol, side, shares FROM trade_log "
             "WHERE side IN ('BUY', 'SELL', 'STK_DIV') AND run_id = ? ORDER BY date, id",
@@ -828,24 +841,23 @@ def brinson_attribute_from_files(
         backtest_conn.close()
 
     if trade_log_df.empty:
-        return {
-            "error": "trade_log 无买卖记录",
-            "summary": {},
-            "industry_detail": {},
-            "daily": [],
-            "exposure_summary": {},
-        }
+        return _error_result("trade_log 无买卖记录")
+
+    # TOOL-03：bars 起点晚于 run 起点时期初持仓会静默丢失（dump 被 --start
+    # 截断），拒绝归因并要求重新导出全窗 bars
+    if run_row and run_row[0]:
+        run_start = str(run_row[0])
+        bars_start = min(str(d) for d in bars_df.index.get_level_values("trade_date"))
+        if bars_start > run_start:
+            return _error_result(
+                f"bars 起点 {bars_start} 晚于 run {run_id} 起点 {run_start}："
+                "请从 run 起点重新导出 bars.parquet（否则期初持仓丢失）"
+            )
 
     # 6. 重建每日持仓
     holdings_df = _reconstruct_daily_holdings(trade_log_df, bars_df, industry_map_dict)
     if holdings_df.empty:
-        return {
-            "error": "持仓重建失败",
-            "summary": {},
-            "industry_detail": {},
-            "daily": [],
-            "exposure_summary": {},
-        }
+        return _error_result("持仓重建失败")
 
     # 7. Brinson 逐日计算
     daily_df = _compute_brinson_daily(holdings_df, bw_df, sw_df)

@@ -101,3 +101,53 @@ def test_inv6_corp_cash_div_holding_cost():
     assert holding.cost == max(0, old_cost - net), (
         f"INV6 cost: {holding.cost} != {max(0, old_cost - net)}"
     )
+
+
+def test_inv6_combined_stk_cash_event_identity():
+    """INV-01/INV6: 同日送转+现金分红后账户恒等式成立（仅税负耗散）。
+
+    fixture 920089.BJ 20240613（10送4派1.2，税 20%，74600 股）：
+    送转后总市值 + 净派现 + 红利税 == 除权前总市值。
+    """
+    account = Account(cash=0.0, initial_capital=988_450.0, slippage_ticks=0)
+    holding = Holding(
+        symbol="920089.BJ",
+        shares=74_600,
+        entry_date="20240602",
+        entry_price=13.25,
+        cost=13.25 * 74_600,
+        last_price=13.25,
+        locked=False,
+    )
+    account.holdings["920089.BJ"] = holding
+
+    today = "20240613"
+    day_bars = {
+        "920089.BJ": {
+            "symbol": "920089.BJ", "trade_date": today,
+            "open": 9.48, "close": 9.05, "pre_close": 9.38,
+        }
+    }
+    dividends = {"920089.BJ": {"stk_div": 0.4, "cash_div": 0.12}}
+
+    class StubProvider:
+        def get_dividends_on_date(self, date_str):
+            return dividends if date_str == today else {}
+
+    corporate.adjust(account, today, day_bars, StubProvider(), [])
+
+    assert holding.shares == int(74_600 * 1.4) == 104_440
+    expected_price = 13.25 * 9.38 / (9.38 * 1.4 + 0.12)
+    assert math.isclose(holding.last_price, expected_price, rel_tol=1e-12), (
+        f"INV6 combined scale: {holding.last_price} != {expected_price}"
+    )
+    tax = 0.12 * 74_600 * 0.20
+    value_before = 74_600 * 13.25
+    value_after = account.cash + holding.shares * holding.last_price
+    # 无舍入时组合除权严格守恒；fixture 的 pre_close=9.38 是交易所按 tick
+    # 舍入的参考价（13.13/1.4=9.37857），1e-5 容差吸收该舍入残差
+    assert math.isclose(value_after + tax, value_before, rel_tol=1e-5), (
+        f"INV6 identity FAILED: value_after={value_after}, tax={tax}, "
+        f"value_before={value_before}"
+    )
+    assert math.isclose(account.cash, 7161.60, rel_tol=1e-12)

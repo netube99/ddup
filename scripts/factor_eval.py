@@ -3,7 +3,7 @@
 用法:
     python scripts/factor_eval.py mom20,vol_z,ep_z \
         --start 20240101 --end 20240630 [--universe CSI300] [--forward 5] \
-        [--n-quantiles 5]
+        [--n-quantiles 5] [--factor-library strategies/.../factors.yaml]
 
 IC 衰减模式（多前瞻期）:
     python scripts/factor_eval.py cci_z,turnover_z \
@@ -65,6 +65,11 @@ def main() -> int:
         "--benchmark", default=None,
         help="基准指数代码（因子引用 idx_ret 时必需，口径同引擎）",
     )
+    parser.add_argument(
+        "--factor-library", default=None,
+        help="因子库 YAML 路径（缺省顶层 factors/library.yaml）；"
+             "策略本地库（如 strategies/.../factors.yaml）用此评估",
+    )
     args = parser.parse_args()
 
     # --decay 与 --forward 互斥
@@ -87,6 +92,7 @@ def main() -> int:
             n_quantiles=args.n_quantiles,
             benchmark=args.benchmark,
             exec_price=args.exec_price,
+            library_path=args.factor_library,
         )
     except ValueError as e:
         print(f"错误：{e}", file=sys.stderr)

@@ -16,6 +16,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 from btcore.engine import Engine
 from btcore.strategy_loader import load_strategy
 from research import cli_common
@@ -46,7 +48,21 @@ def main() -> int:
     parser.add_argument("--no-report", action="store_true", help="不生成报告")
     args = parser.parse_args()
 
-    strategy = load_strategy(args.yaml)
+    msg = cli_common.validate_date_range(args.start, args.end)
+    if msg is not None:
+        return cli_common.fail(msg)
+    if not Path(args.yaml).is_file():
+        return cli_common.fail(f"策略 YAML 不存在: {args.yaml}")
+
+    try:
+        strategy = load_strategy(args.yaml)
+    except FileNotFoundError as exc:
+        return cli_common.fail(f"文件不存在: {exc.filename or exc}")
+    except yaml.YAMLError as exc:
+        return cli_common.fail(f"策略 YAML 解析失败 ({args.yaml}): {exc}")
+    except ValueError as exc:
+        return cli_common.fail(f"策略配置错误 ({args.yaml}): {exc}")
+
     provider = cli_common.make_provider()
     try:
         engine = Engine(strategy, provider, initial_capital=args.capital, db_path=args.out)

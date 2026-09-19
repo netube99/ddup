@@ -340,7 +340,8 @@ _ROUND_TRIP_SPEC = [
     ("盈利次数", "win_count", _int),
     ("亏损次数", "loss_count", _int),
     ("盈亏次数比", "win_loss_ratio", _ratio),
-    ("分红合计", "total_dividend_received", _num),
+    ("已实现分红", "total_dividend_received", _num),
+    ("分红合计（含期末未平仓 lot）", "total_dividend_accrued", _num),
     ("平均单笔盈亏", "avg_pnl", _num),
     ("平均持有天数", "avg_holding_days", _ratio),
 ]

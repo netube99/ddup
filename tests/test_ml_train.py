@@ -1,4 +1,4 @@
-"""训练管线冒烟 + 确定性：train_panel / train_guard（合成面板，不连真实库）。
+"""训练管线冒烟 + 确定性 + 导出链路：train_panel / train_guard / export_model。
 
 train_panel/train_guard 此前零测试覆盖（整改指导 TEST-02）。本文件用合成
 面板（含 NaN/±inf 特征）跑训练冒烟：断言返回结构、spw/embargo 路径不崩、
@@ -8,11 +8,19 @@ scaler 参数有限；确定性用例用 xgboost.config_context(nthread=1) 固�
 模块级 import 只碰 trainer 的纯逻辑（xgboost 在函数内惰性导入），不整文件跳过。
 """
 
+import hashlib
+import json
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from btcore.ml.trainer import train_guard, train_panel
+from btcore.ml import runtime as ml_runtime
+from btcore.ml.export import export_model
+from btcore.ml.spec import ModelSpec
+from btcore.ml.trainer import TrainResult, train_guard, train_panel
 
 _FEATURES = ["mom20", "turnover_rate", "vol_z"]
 
@@ -169,3 +177,162 @@ def test_train_guard_too_few_positives_raises():
     samples.loc[samples.sample(frac=0.05, random_state=1).index, "label"] = 1
     with pytest.raises(ValueError, match="正样本过少"):
         train_guard(samples, ["mom20", "turnover_rate"], lookahead=3)
+
+
+def _trained(tmp_path, seed=7):
+    """合成面板训练一次，返回 (panel, TrainResult, 未落盘的 ModelSpec)。"""
+    panel = _panel(seed=seed)
+    labels = _labels(panel)
+    res = train_panel(panel, _FEATURES, labels, horizon=5)
+    spec = ModelSpec(
+        name="m", artifact=str(tmp_path / "m.onnx"), features=list(_FEATURES),
+    )
+    return panel, res, spec
+
+
+def _verify_rows(panel):
+    return panel[_FEATURES].astype(float).to_numpy()[:32]
+
+
+def test_export_model_roundtrip_inference_consistency(tmp_path):
+    """INFRA-07：train → export → ModelSpec 加载 → 推理与 sklearn 一致。"""
+    pytest.importorskip("xgboost", reason="需要 xgboost")
+    pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
+    pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
+    panel, res, spec = _trained(tmp_path)
+    onnx_path, meta_path = export_model(
+        res, spec, spec.artifact,
+        label={"type": "xs_fwdret", "horizon": 5},
+        train_window=["20240101", "20240301"],
+        verify_rows=_verify_rows(panel),
+    )
+    loaded = ModelSpec.from_dict("m", {"artifact": "m.onnx"}, str(tmp_path))
+    assert loaded.artifact == onnx_path
+    assert loaded.feature_order == list(_FEATURES)
+    assert not list(tmp_path.glob("*.tmp"))
+
+    meta = json.loads(Path(meta_path).read_text())
+    assert meta["artifact_sha256"] == hashlib.sha256(
+        Path(onnx_path).read_bytes()
+    ).hexdigest()
+    # E2E-02 治理：可选树数/best_iteration（向后兼容，不改 META_VERSION）
+    assert meta["version"] == 3 and meta["n_trees"] >= 1
+    if "best_iteration" in meta:
+        assert meta["n_trees"] == meta["best_iteration"] + 1
+
+    x_raw = panel[_FEATURES].astype(np.float32).to_numpy()[:20]
+    onnx_out = ml_runtime._run_batch(loaded, x_raw)
+    sk_out = res.model.predict(ml_runtime._apply_scaler(loaded, x_raw))
+    np.testing.assert_allclose(onnx_out, sk_out, atol=1e-4)
+
+
+def test_export_model_atomic_on_verify_failure(tmp_path, monkeypatch):
+    """ML-02：_verify 失败时旧 onnx/meta 原样保留，无 .tmp 残留。"""
+    pytest.importorskip("xgboost", reason="需要 xgboost")
+    pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
+    panel, res, spec = _trained(tmp_path)
+    old_onnx = tmp_path / "m.onnx"
+    old_meta = tmp_path / "m.meta.json"
+    old_onnx.write_bytes(b"OLD-ONNX")
+    old_meta.write_text("OLD-META", encoding="utf-8")
+
+    import btcore.ml.export as export_mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("verify boom")
+
+    monkeypatch.setattr(export_mod, "_verify", boom)
+    with pytest.raises(RuntimeError, match="verify boom"):
+        export_model(
+            res, spec, spec.artifact,
+            label={"type": "xs_fwdret", "horizon": 5},
+            train_window=["20240101", "20240301"],
+            verify_rows=_verify_rows(panel),
+        )
+    assert old_onnx.read_bytes() == b"OLD-ONNX"
+    assert old_meta.read_text(encoding="utf-8") == "OLD-META"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_export_model_guard_roundtrip(tmp_path):
+    """INFRA-07：holding scope（分类 + 账户态特征）导出/加载/推理一致。"""
+    pytest.importorskip("xgboost", reason="需要 xgboost")
+    pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
+    pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
+    samples = _guard_samples()
+    samples["hold_days"] = np.arange(len(samples)) % 7
+    feature_cols = ["mom20", "turnover_rate", "hold_days"]
+    res = train_guard(samples, feature_cols, lookahead=3)
+    spec = ModelSpec(
+        name="g", artifact=str(tmp_path / "g.onnx"),
+        features=["mom20", "turnover_rate"], state_features=["hold_days"],
+    )
+    verify = samples[feature_cols].astype(float).to_numpy()[:32]
+    export_model(
+        res, spec, spec.artifact,
+        label={"type": "trend_break", "lookahead": 3},
+        train_window=["20240301", "20240430"], verify_rows=verify,
+    )
+    loaded = ModelSpec.from_dict("g", {"artifact": "g.onnx"}, str(tmp_path))
+    assert loaded.scope == "holding"
+    onnx_out = ml_runtime._run_batch(loaded, verify.astype(np.float32))
+    sk_out = res.model.predict_proba(
+        ml_runtime._apply_scaler(loaded, verify.astype(np.float32))
+    )[:, 1]
+    np.testing.assert_allclose(onnx_out, sk_out, atol=1e-4)
+
+
+def test_export_model_without_early_stopping_records_n_trees(tmp_path):
+    """E2E-02 治理：非早停模型 meta 只记 n_trees（booster 总轮数）。"""
+    xgboost = pytest.importorskip("xgboost", reason="需要 xgboost")
+    pytest.importorskip("onnxmltools", reason="需要 onnxmltools")
+    pytest.importorskip("onnxruntime", reason="需要 onnxruntime")
+    rng = np.random.RandomState(0)
+    x = rng.randn(200, 3)
+    model = xgboost.XGBRegressor(n_estimators=5, max_depth=2).fit(x, x[:, 0])
+    res = TrainResult(
+        model=model, scaler_mean=[0.0] * 3, scaler_std=[1.0] * 3,
+    )
+    spec = ModelSpec(
+        name="m", artifact=str(tmp_path / "m.onnx"), features=list(_FEATURES),
+    )
+    _, meta_path = export_model(
+        res, spec, spec.artifact,
+        label={"type": "xs_fwdret", "horizon": 5},
+        train_window=["20240101", "20240201"], verify_rows=x,
+    )
+    meta = json.loads(Path(meta_path).read_text())
+    assert "best_iteration" not in meta
+    assert meta["n_trees"] == 5
+
+
+def test_ml_train_warns_when_index_snapshots_empty(tmp_path, monkeypatch, capsys):
+    """ML-03：index_universe 已配置但快照为空 → 明确 warning，不静默全市场。"""
+    import yaml
+
+    import scripts.ml_train as mt
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump({
+        "models": {"m": {"artifact": "m.onnx",
+                         "features": {"factors": ["mom20"]}}},
+        "filter_rules": {"index_universe": ["000300.SH"]},
+    }), encoding="utf-8")
+
+    class _Backend:
+        def close(self):
+            pass
+
+    class _Provider:
+        backend = _Backend()
+
+    monkeypatch.setattr(mt.cli_common, "make_provider", lambda: _Provider())
+    monkeypatch.setattr(mt, "resolve_index_snapshots", lambda *a, **k: {})
+    monkeypatch.setattr(mt, "_train_panel", lambda *a, **k: 0)
+    monkeypatch.setattr(sys, "argv", [
+        "ml_train.py", str(cfg), "--model", "m",
+        "--start", "20240101", "--end", "20240630",
+    ])
+    assert mt.main() == 0
+    out = capsys.readouterr().out
+    assert "警告" in out and "全市场" in out

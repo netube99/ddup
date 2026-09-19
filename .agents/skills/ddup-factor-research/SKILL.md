@@ -56,12 +56,14 @@ factors:
 ```bash
 python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20250630 \
     [--universe CSI500] [--forward 5 | --decay 1,3,5,10] [--n-quantiles 5] \
-    [--exec-price close|next-open] [--model path.onnx] [--benchmark 000300.SH]
+    [--exec-price close|next-open] [--model path.onnx] [--benchmark 000300.SH] \
+    [--factor-library strategies/.../factors.yaml]
 ```
 - 输出三段：IC 汇总（Pearson/RankIC + IR + 胜率 + n_days）、分层回测（**Q1=最低档**，含多空 Qmax−Qmin）、≥2 因子加相关性矩阵
 - `--universe`：指数别名 → 成分快照回溯并集 + PIT 逐日过滤；**研究股票池必须与策略候选池一致**
 - `--exec-price next-open`：前瞻从 T+1 开盘计（引擎同款执行时序）——**策略化前必须复核**；动量族因子在可交易口径下显著衰减
-- `--decay` 与显式 `--forward`≠5 互斥；`--model` 仅 panel scope（ddup-ml-research）；坍缩因子自动走全市场 compute_breadth
+- `--factor-library PATH`：评估策略本地因子库（缺省顶层 `factors/library.yaml`）；策略目录自带 `factors.yaml` 的因子必须用此评估
+- `--decay` 与显式 `--forward`≠5 互斥；`--model` 仅 panel scope（ddup-ml-research）；坍缩因子自动走全市场 compute_breadth，且自动跳过截面 IC/分层/相关性并打印提示（空序列统计量返回 NaN，表格显示 `—`，不再输出伪 IR/Win）
 - 失败均 stderr+退出码 1（未知因子/无成分/窗口无数据/嵌套坍缩…）
 - warmup 自动前伸：start − max(365, int(最大窗口×1.5)+10) 日历天（引擎同源）
 - ⚠ 2026-08-07 修复：前瞻收益改用显式 groupby shift（此前 pct_change().shift() 链
@@ -72,16 +74,16 @@ python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20250630 \
 ## 多因子合成（research/composite.py）
 
 ```python
-comp = combine_factors(factor_df, fwd_ret, method="icir", window=60)  # equal|ic|icir
+comp = combine_factors(factor_df, fwd_ret, method="icir", window=60, horizon=5)  # equal|ic|icir
 ev = evaluate_composite(comp, fwd_ret)   # → {"ic":…, "rank_ic":…, "layered":…}
 ```
-前视保护与引擎一致：t 日权重仅用 ≤t-1 日 IC（rolling 后 shift(1)），前 ~window 日 NaN；每因子先截面 zscore，权重按 |w| 归一化。对比三种 method 后，按最优设定策略 factor_specs 的 weight/ascending。
+前视保护与引擎一致：t 日权重仅用截至 t-horizon 日已实现的 IC（rolling 后 shift(max(1, horizon))）；**`horizon` 必须等于 forward_returns 的实际前瞻期**（如 5 日前瞻传 `horizon=5`；缺省 1 只适用于日频前瞻，误用会造成前视）；前 ~window 日 NaN；每因子先截面 zscore，权重按 |w| 归一化。对比三种 method 后，按最优设定策略 factor_specs 的 weight/ascending。
 
 ## 坍缩因子特例
 
 - 研究侧 `compute_factors` 的聚合口径 = 传入 df 的股票池（窄池 ≠ 引擎全市场口径）；评估坍缩因子**必须**用 `compute_breadth(name, backend, lib, start, end, benchmark=...)`（全市场流式分块，与引擎同源口径；`lib` 为 load_library() 结果，`benchmark` 在因子引用 `idx_ret` 时必传）
-- 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层，改时序维度（与基准收益比对 / 择时门控信号）
-- `group_mean` 坍缩的日频标量 = 当日各行业组值的等权平均（compute_breadth 按 date×industry 组取 first 后对组均值；依赖 industry 列，缺失即报错——2026-08 修复 F-BRD-03，此前任意取一组有损）。**等权口径仅限顶层裸 `group_mean(x, g)` 表达式**：被算术/算子包装（如 `group_mean(x,g) - zscore(y)`）时 compute_breadth 落入任意组 first() 分支——静默有损且与引擎投影口径不一致，避免在坍缩因子里包装 group_mean
+- 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层，改时序维度（与基准收益比对 / 择时门控信号）；factor_eval 对坍缩因子自动跳过截面 IC/分层/相关性并打印提示（空 IC 序列统计量为 NaN 而非 0，表格显示 `—`）
+- `group_mean` 坍缩的日频标量 = 当日各行业组值的等权平均（compute_breadth 按 date×industry 组取 first 后对组均值；依赖 industry 列，缺失即报错——2026-08 修复 F-BRD-03）。**分支判定按 `collapse_kind` 结构识别（ops.py:356-366），顶层裸 `group_mean(x, g)` 与算术/算子包装（如 `1 * group_mean(x, g)`）都走等权均值分支，无漏判**（2026-09 实测 n_diff=0）；仍须避免在坍缩表达式里嵌套**组内可变**的保形项（如 `group_mean(x,g) + zscore(y)`）——组内取值不恒定，取组 first 采样才有损
 
 ## 四大陷阱（每轮因子工作前过一遍）
 

@@ -64,6 +64,53 @@ class TestCombine:
         with pytest.raises(ValueError, match="未知合成方法"):
             combine_factors(df, fwd, method="magic")
 
+    def test_horizon_default_is_one(self):
+        df, fwd = _mk_data()
+        c_default = combine_factors(df[["A"]], fwd, method="ic", window=20)
+        c_one = combine_factors(df[["A"]], fwd, method="ic", window=20, horizon=1)
+        assert np.allclose(c_default, c_one, equal_nan=True)
+
+    def test_horizon_rejects_non_positive(self):
+        df, fwd = _mk_data()
+        with pytest.raises(ValueError, match="horizon"):
+            combine_factors(df, fwd, method="ic", horizon=0)
+
+    def test_horizon_shift_blocks_forward_look(self):
+        """h 日前瞻收益：权重须 shift(h)，否则 t 日权重用了 t 之后才实现的 IC。
+
+        断言：扰动 d 日 fwd_ret（d+h 日才实现）后
+        - 严格因果版（horizon=h）在 d+h 之前逐值不变（含 d+h-1 边界）；
+        - 旧版（horizon=1）在 d+1..d+h-1 即被污染（前视）；
+        - 因果版在 d+h 起才变化（扰动确实传播，测试非空转）。
+        """
+        df, fwd = _mk_data(noise=0.1)
+        window = 20
+        dates = list(_DATES)
+        d_i = 50
+        d, d_plus_h = dates[d_i], dates[d_i + 5]
+
+        causal = combine_factors(df, fwd, method="icir", window=window, horizon=5)
+        legacy = combine_factors(df, fwd, method="icir", window=window)
+
+        fwd_pert = fwd.copy()
+        fwd_pert.loc[(d, _SYMS[0])] += 10.0
+        causal_p = combine_factors(
+            df, fwd_pert, method="icir", window=window, horizon=5,
+        )
+        legacy_p = combine_factors(df, fwd_pert, method="icir", window=window)
+
+        before = dates[:d_i + 5]
+        assert np.allclose(causal.loc[before], causal_p.loc[before], equal_nan=True)
+        polluted = dates[d_i + 1:d_i + 5]
+        assert not np.allclose(
+            legacy.loc[polluted], legacy_p.loc[polluted], equal_nan=True,
+        )
+        from_dh = dates[d_i + 5:]
+        assert not np.allclose(
+            causal.loc[from_dh], causal_p.loc[from_dh], equal_nan=True,
+        )
+        assert d_plus_h == dates[d_i + 5]
+
 
 class TestEvaluate:
     def test_composite_beats_noise_factor(self):

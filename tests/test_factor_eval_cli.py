@@ -6,6 +6,8 @@ run_eval 以 MockDataBackend 注入，验证与引擎同源的物化口径：
 - --universe 走 point-in-time 成分过滤
 """
 
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -17,6 +19,14 @@ from tests.conftest import MockDataBackend
 @pytest.fixture
 def backend():
     return MockDataBackend()
+
+
+_LIB_YAML = """\
+factors:
+  gold_ma20:
+    expr: "close_hfq / ma(close_hfq, 20) - 1"
+    description: "临时本地因子库因子"
+"""
 
 
 def test_warmup_lookback_applied(backend, capsys):
@@ -46,11 +56,109 @@ def test_collapse_nested_failfast(backend, capsys, monkeypatch):
         "parent": {"expr": "close_hfq / breadth"},
         "breadth": {"expr": "mean(close_hfq > 0)"},
     }
-    monkeypatch.setattr("research.factor_eval.load_library", lambda: fake_lib)
+    monkeypatch.setattr(
+        "research.factor_eval.load_library", lambda path=None: fake_lib,
+    )
     rc = run_eval(backend, ["parent"], "20240603", "20240628")
     captured = capsys.readouterr()
     assert rc == 1
     assert "嵌套坍缩" in captured.out + captured.err
+
+
+def test_collapse_factor_skips_cross_sectional_ic(backend, capsys):
+    """坍缩因子无截面变异：IC/分层区跳过并提示，不输出伪统计量。"""
+    rc = run_eval(backend, ["pct_above_ma20"], "20240603", "20240628")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "坍缩因子不做截面 IC（时序含义，见 docs §16.5）" in out
+
+    ic_part = out.split("IC 汇总")[1].split("分层回测")[0]
+    ic_lines = [ln for ln in ic_part.splitlines() if "pct_above_ma20" in ln]
+    assert ic_lines
+    assert all("IR=" not in ln and "Win=" not in ln for ln in ic_lines)
+
+    layered_part = out.split("分层回测")[1]
+    layered_lines = [ln for ln in layered_part.splitlines() if "pct_above_ma20" in ln]
+    assert layered_lines
+    assert all("Q1" not in ln for ln in layered_lines)
+    # 不崩溃即为回归（旧版输出 IR=-0.0552/Win=0.4581 的浮点噪声伪统计量）
+
+
+def test_collapse_and_panel_factor_mixed(backend, capsys):
+    """混合评估：保形因子照常出 IC/分层，坍缩因子被跳过。"""
+    rc = run_eval(backend, ["pct_above_ma20", "mom5"], "20240603", "20240628")
+    out = capsys.readouterr().out
+    assert rc == 0
+    ic_part = out.split("IC 汇总")[1].split("分层回测")[0]
+    mom_lines = [ln for ln in ic_part.splitlines() if "mom5" in ln]
+    assert mom_lines and any("IR=" in ln for ln in mom_lines)
+    assert "坍缩因子不做截面 IC（时序含义，见 docs §16.5）" in out
+
+
+def test_collapse_factor_decay_mode_skips(backend, capsys):
+    """--decay 模式同样跳过坍缩因子，不打印伪 RankIC 行。"""
+    rc = run_eval(
+        backend, ["pct_above_ma20"], "20240603", "20240628", decay="1,5",
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "坍缩因子不做截面 IC（时序含义，见 docs §16.5）" in out
+    assert not any(
+        "pct_above_ma20" in ln and "RankIC" in ln for ln in out.splitlines()
+    )
+
+
+def test_local_factor_library(backend, capsys, tmp_path):
+    """--factor-library：策略本地因子库可评估（GOLD-08）。"""
+    lib = tmp_path / "factors.yaml"
+    lib.write_text(_LIB_YAML)
+    rc = run_eval(
+        backend, ["gold_ma20"], "20240603", "20240628",
+        library_path=str(lib),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gold_ma20" in out
+    assert "IC 汇总" in out
+
+
+def test_local_factor_library_unknown_rejected(backend, capsys, tmp_path):
+    """本地库不含的因子仍 fail-fast 且提示可用因子。"""
+    lib = tmp_path / "factors.yaml"
+    lib.write_text(_LIB_YAML)
+    rc = run_eval(
+        backend, ["mom5"], "20240603", "20240628", library_path=str(lib),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "未知因子 'mom5'" in captured.out + captured.err
+    assert "gold_ma20" in captured.out + captured.err
+
+
+def test_cli_factor_library_flag(backend, capsys, tmp_path, monkeypatch):
+    """scripts/factor_eval.py --factor-library 端到端（临时库评估成功）。"""
+    import scripts.factor_eval as cli
+
+    class _ClosableBackend(MockDataBackend):
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        cli.cli_common, "make_provider",
+        lambda: type("_P", (), {"backend": _ClosableBackend()})(),
+    )
+    lib = tmp_path / "factors.yaml"
+    lib.write_text(_LIB_YAML)
+    monkeypatch.setattr(sys, "argv", [
+        "factor_eval.py", "gold_ma20",
+        "--start", "20240603", "--end", "20240628",
+        "--factor-library", str(lib),
+    ])
+    rc = cli.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gold_ma20" in out
+    assert "IC 汇总" in out
 
 
 def test_universe_pit_filter(backend, capsys):

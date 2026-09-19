@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from dataclasses import dataclass
 
 from btcore.database import (
@@ -128,3 +130,29 @@ def test_unrecovered_drawdown_annotation(tmp_path):
     generate_report(result, str(out))
     content = out.read_text(encoding="utf-8")
     assert "未修复（距结束 4 日）" in content
+
+
+def test_report_shows_dividend_accrued(tmp_path):
+    """TOOL-05：往返汇总同时展示已实现分红与含期末未平仓 lot 的全口径分红。"""
+    result = make_result()
+    summary = result["statistics"]["round_trip"]["summary"]
+    summary["total_dividend_received"] = 100.0
+    summary["total_dividend_accrued"] = 250.0
+    out = tmp_path / "div.html"
+    generate_report(result, str(out))
+    content = out.read_text(encoding="utf-8")
+    assert "含期末未平仓 lot" in content
+    assert "250.00" in content
+    assert "100.00" in content
+
+
+def test_compare_nonexistent_run_id(tmp_path):
+    """TOOL-09：compare --runs 含不存在的 run 必须报「run N 不存在」而非静默丢弃。"""
+    db_path = str(tmp_path / "r.db")
+    _seed_db(db_path)
+    r = subprocess.run(
+        [sys.executable, "scripts/compare.py", db_path, "--runs", "1,99"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert "run 99 不存在" in r.stderr

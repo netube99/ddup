@@ -15,6 +15,8 @@ from btcore import database
 from research.cross_validate import (
     _expected_triggers,
     _min_commission_overhead,
+    _summarize_sell_triggers,
+    load_backtest,
     validate_trades,
 )
 from tests.test_stats import make_trades
@@ -48,6 +50,40 @@ def make_db(tmp_path, stats_json=None, config_json=None, extra_trades=()):
         " initial_capital, n_holdings) VALUES (?,?,?,?,?,?,?)",
         [1, "20240603", 90000, 100000, 0, 100000, 1],
     )
+    conn.close()
+    return db
+
+
+def make_ledger_db(tmp_path, initial_capital=40000.0):
+    """最小实盘账本库：ledger_meta + 衍生 runs/account_daily（模拟 signal 后状态）。"""
+    db = tmp_path / "ledger.duckdb"
+    conn = database.init_backtest_db(str(db))
+    conn.execute(
+        "CREATE TABLE ledger_meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO ledger_meta (key, value) VALUES"
+        " ('start_date', '20240603'), ('initial_capital', ?)",
+        [repr(float(initial_capital))],
+    )
+    conn.execute(
+        "INSERT INTO runs (run_id, created_at, strategy, start_date, end_date,"
+        " initial_capital, config_json, status, stats_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        [1, "2026", "live", "20240603", "20240607", initial_capital,
+         json.dumps({"ledger": str(db)}), "live", json.dumps({})],
+    )
+    daily_rows = [
+        ("20240603", 30000, 40000, 0, 0, 1),
+        ("20240607", 34000, 44000, 4000, 4000, 1),
+    ]
+    for date, cash, tv, dp, cp, nh in daily_rows:
+        conn.execute(
+            "INSERT INTO account_daily (run_id, date, cash, total_value, daily_pnl,"
+            " cumulative_pnl, initial_capital, n_holdings)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+            [date, cash, tv, dp, cp, initial_capital, nh],
+        )
     conn.close()
     return db
 
@@ -131,3 +167,68 @@ def test_main_prints_real_stats_keys(tmp_path):
     assert "年化收益率: 0.2000" in r.stdout
     assert "夏普比率: 1.5000" in r.stdout
     assert "平均持有天数: 3.50" in r.stdout
+
+
+def test_summarize_sell_triggers_round_trip_consistency():
+    """TOOL-02：卖出分类盈亏取自 round_trip.trip_detail，与 total_realized_pnl 一致。"""
+    trades = make_trades([
+        ["20240603", "000001.SZ", "BUY", "MANUAL", 10.0, 1000, 10000.0,
+         5.0, 0.0, 0.0, 0.0, -10005.0, ""],
+        ["20240605", "000001.SZ", "SELL", "STOP_LOSS", 9.0, 500, 4500.0,
+         5.0, 2.25, 0.0, 0.0, 4492.75, ""],
+        ["20240606", "000001.SZ", "SELL", "MANUAL", 11.0, 500, 5500.0,
+         5.0, 2.75, 0.0, 0.0, 5492.25, ""],
+    ])
+    stats = {"round_trip": {
+        "trip_detail": [
+            {"sell_trigger": "STOP_LOSS", "pnl": -600.0},
+            {"sell_trigger": "MANUAL", "pnl": 750.0},
+        ],
+        "summary": {"total_realized_pnl": 150.0},
+    }}
+
+    df, note = _summarize_sell_triggers(trades, stats)
+
+    assert df is not None
+    assert {"count", "total_pnl", "avg_pnl", "win_rate"} <= set(df.columns)
+    assert "已实现" in note
+    # 各 trigger 总盈亏之和 = round_trip.summary.total_realized_pnl
+    assert df["total_pnl"].sum() == pytest.approx(150.0)
+    assert df.loc["STOP_LOSS", "win_rate"] == 0.0
+    assert df.loc["MANUAL", "win_rate"] == 1.0
+
+
+def test_summarize_sell_triggers_without_stats_uses_net_proceeds():
+    """TOOL-02：stats 缺失时列名是 net_proceeds（成交净额）并注明口径。"""
+    trades = make_trades([
+        ["20240605", "000001.SZ", "SELL", "MANUAL", 11.0, 1000, 11000.0,
+         5.0, 5.5, 0.0, 0.0, 10989.5, ""],
+    ])
+
+    df, note = _summarize_sell_triggers(trades, None)
+
+    assert df is not None
+    assert "net_proceeds" in df.columns
+    assert "total_pnl" not in df.columns
+    assert "净额" in note
+
+
+def test_ledger_initial_capital_from_meta(tmp_path):
+    """LIVE-05：账本库初始资金取 ledger_meta，不回落 1,000,000。"""
+    db = make_ledger_db(tmp_path, initial_capital=40000.0)
+
+    _, _, _, config, _ = load_backtest(str(db))
+
+    assert config["initial_capital"] == pytest.approx(40000.0)
+
+
+def test_ledger_cli_uses_ledger_capital(tmp_path):
+    """LIVE-05：CLI 收益分母 = 账本 initial_capital（40000 → +10.00%）。"""
+    db = make_ledger_db(tmp_path, initial_capital=40000.0)
+    r = subprocess.run(
+        [sys.executable, "scripts/cross_validate.py", str(db)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0
+    assert "(10.00%)" in r.stdout
+    assert "-95.60%" not in r.stdout

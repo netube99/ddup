@@ -37,14 +37,16 @@ class _UniqueKeyLoader(yaml.SafeLoader):
             mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
 
-# 因子名保留字：与 bars 必需列 / 引擎派生列 / 伪列冲突的名字禁止登记
+# 因子名保留字：与 bars 必需列 / 引擎派生列 / 伪列冲突的名字禁止登记；
+# 算子名同为保留字（FAC-07）——因子名与 _OPS 同名会让 extract_op_names
+# 把引用静默吞掉（`zzz = std(close_hfq, 5) + std` 的依赖丢失），
+# 保留字集合由 ops.OP_NAMES 统一供给，避免两份名单漂移。
 _RESERVED_NAMES = frozenset({
     "open", "high", "low", "close", "vol", "amount",
     "adj_factor", "pre_close", "up_limit", "down_limit",
     "open_hfq", "high_hfq", "low_hfq", "close_hfq", "pct_chg",
     "idx_ret", "log_mktcap", "industry",
-    "abs", "log",
-})
+}) | ops.OP_NAMES
 
 
 def load_library(path: str | None = None) -> dict[str, dict]:
@@ -63,16 +65,30 @@ def load_library(path: str | None = None) -> dict[str, dict]:
 
     for name, spec in factors.items():
         if name in _RESERVED_NAMES:
-            raise ValueError(f"因子名 {name!r} 与保留列名冲突: {lib_path}")
+            raise ValueError(
+                f"因子名 {name!r} 与保留列名/算子名冲突: {lib_path}"
+            )
         if not isinstance(spec, dict) or "expr" not in spec:
             raise ValueError(f"因子 {name!r} 缺少 expr: {lib_path}")
         try:
+            # 非字符串 expr/where 须在 ast 调用前 fail-fast（FAC-05）：
+            # 直接进 ast.parse 会抛裸 TypeError 穿透 ValueError 错误通道
+            if not isinstance(spec["expr"], str):
+                raise ValueError(
+                    f"expr 必须是字符串, 收到 {type(spec['expr']).__name__}: "
+                    f"{spec['expr']!r}"
+                )
+            where = spec.get("where")
+            if where is not None and not isinstance(where, str):
+                raise ValueError(
+                    f"where 必须是字符串, 收到 {type(where).__name__}: "
+                    f"{where!r}"
+                )
             expr_has_ops = ops.has_op_call(spec["expr"])
             if expr_has_ops:
                 ops.validate_op_expr(spec["expr"])
             else:
                 validate_expr(spec["expr"])
-            where = spec.get("where")
             if where:
                 where_has_ops = ops.has_op_call(where)
                 if where_has_ops and not expr_has_ops:
@@ -299,11 +315,17 @@ def compute_breadth(
     """流式计算坍缩因子，返回 (trade_date,) 索引的日频 Series。
 
     仅适用于坍缩算子（mean/group_mean）——这些算子将截面聚合为标量，
-    因此可以分块计算后拼接，内存占用 O(chunk_days × N_symbols) 而非
-    O(N_dates × N_symbols)。
+    因此可以分块计算后拼接。
 
     列推导 / 伪列需求 / warmup 窗口全部由 build_factor_plan 产物供给，
     与引擎 preload 同一推导路径（无第二份手搓逻辑）。
+
+    等价性（FAC-01）：逐块查询，但每块把自 cal_start 起的原始行按 symbol
+    累积为下一块前缀——与引擎广度面板逐行同源（含停牌股复牌前的历史），
+    滚动值 bit 级一致。注意 pandas groupby.rolling 是增量算法，同一窗口在
+    不同前缀长度下可差 ~1 ulp，故「只带最近 max_window 行」无法做到
+    与引擎 0 diff（真实库实测 17/118 日边界翻转）；代价是 carry 内存随
+    已处理区间线性增长（与引擎广度面板同阶），单块 base 查询仍有界。
 
     Args:
         factor_name: 因子名（必须在 lib 中注册且使用坍缩算子）
@@ -336,21 +358,13 @@ def compute_breadth(
     if not len(calendar):
         return pd.Series(dtype=float)
 
-    # warmup 前伸：请求起点前多取 max_window 个交易日，物化后裁剪回请求
-    # 区间——否则区间前段 ts 窗口不足会静默算错（口径同引擎 preload）
+    # warmup 前伸：锚点 = 首个交易日（与 engine._preload_breadth 一致，
+    # 而非用户 start）——非交易日 start 不再改变物化口径
     cal_start = (
-        pd.Timestamp(start)
+        pd.Timestamp(calendar[0])
         - pd.Timedelta(days=factor_plan.to_calendar_days(max_window))
     ).strftime("%Y%m%d")
-    calendar_all = backend.get_calendar(cal_start, end)
-    if not len(calendar_all):
-        return pd.Series(dtype=float)
-    request_days = [d for d in calendar_all if d >= start]
-    lookback = [d for d in calendar_all if d < start]
-    if not request_days:
-        return pd.Series(dtype=float)
-    full_cal = lookback + request_days
-    offset = len(lookback)
+    request_days = calendar
 
     # 单面板（全市场）计算整闭包：请求列取主/广度两侧并集再展开
     # （log_mktcap → total_mv 补列由 plan 的 mktcap 逻辑保证）
@@ -358,35 +372,48 @@ def compute_breadth(
         fplan["main_columns"] | fplan["breadth_columns"]
     )
 
+    # 伪列需求：单面板取 main 侧：主/广度两侧需求归并到 main 键
+    pneeds = fplan["needs"]
+    needs = {
+        "industry_main": pneeds["industry_main"] or pneeds["industry_breadth"],
+        "mktcap_main": pneeds["mktcap_main"] or pneeds["mktcap_breadth"],
+        "index": pneeds["index"],
+    }
+
     results = []
+    # FAC-01：跨块携带「自 cal_start 起」的完整原始行（按 symbol 累积），
+    # 不是只带最近 max_window 行。根因有二：
+    #   1) 停牌股复牌窗口需要停牌前的行——按日历/尾部截断会丢失；
+    #   2) pandas groupby.rolling 是增量累加（带补偿项），同一窗口在不同
+    #      前缀长度下结果可差 ~1 ulp，边界比较（close >= ma）会翻转。
+    # 真实库实测（pct_above_ma20 20230101-20230630 vs Engine.prepare）：
+    # tail(max_window) 残留 17/118 日差异（max 3.7e-4，阈值 1e-12 判定为
+    # diff）；完整前缀携带 diff_dates=0，且与 chunk_days 无关。
+    # 代价：carry 内存随已处理区间线性增长（与引擎广度面板同阶），
+    # 查询仍分块（单块 base 内存有界）。
+    carry: pd.DataFrame | None = None
     i = 0
     n = len(request_days)
     while i < n:
         chunk_end_idx = min(i + chunk_days, n)
-        # 分块起点前伸：在 lookback+request 拼接日历上回溯窗口
-        lookback_start_idx = max(0, offset + i - max_window)
-        chunk_start = full_cal[lookback_start_idx]
-        chunk_end = request_days[chunk_end_idx - 1]
         actual_start = request_days[i]
         actual_end = request_days[chunk_end_idx - 1]
+        # 首块从 lookback 起点加载（等价引擎广度面板一次加载）；
+        # 其余块只查本块区间，历史由 carry 供给
+        chunk_start = cal_start if i == 0 else actual_start
 
-        # Query bars for this chunk (full market)
-        df = backend.query_bars(None, chunk_start, chunk_end, columns=base_cols)
+        base = backend.query_bars(None, chunk_start, actual_end,
+                                  columns=base_cols)
+        df = base if carry is None else pd.concat([carry, base])
         if df.empty:
             i = chunk_end_idx
             continue
 
         df.sort_index(inplace=True)
+        raw_cols = list(df.columns)
         factor_plan.derive_fields(df)
         # 伪列附着：group_mean 引用 industry、idx_ret、log_mktcap 时必须先附着
         # （2026-08-03 实证 F-BRD-02：此前从未附着，industry_mom 直接 ValueError）。
-        # 单面板取 main 侧：主/广度两侧需求归并到 main 键
-        pneeds = fplan["needs"]
-        needs = {
-            "industry_main": pneeds["industry_main"] or pneeds["industry_breadth"],
-            "mktcap_main": pneeds["mktcap_main"] or pneeds["mktcap_breadth"],
-            "index": pneeds["index"],
-        }
         if any(needs.values()):
             factor_plan.ensure_pseudo_columns(
                 df, needs, "main", backend=backend, benchmark=benchmark
@@ -417,6 +444,10 @@ def compute_breadth(
         # Filter to actual chunk range (exclude overlap)
         daily = daily.loc[actual_start:actual_end]
         results.append(daily)
+
+        # 逐 symbol 累积原始列（派生/伪列下块统一重算，避免 concat 时
+        # 派生列对齐出 NaN）
+        carry = df[raw_cols]
 
         i = chunk_end_idx
 

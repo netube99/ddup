@@ -7,7 +7,7 @@ from scripts import check_anticorrupt as ac
 
 
 def test_linter_passes_on_repo():
-    """整个仓库当前必须通过全部 14 项检查。"""
+    """整个仓库当前必须通过全部 15 项检查。"""
     r = subprocess.run(
         [sys.executable, "scripts/check_anticorrupt.py"],
         capture_output=True, text=True,
@@ -70,3 +70,37 @@ def test_circular_import_detected(tmp_path):
     assert any("circular" in e for e in errs)
     # 环方向从 BFS 起点而定，只断言节点集合
     assert "btcore.a" in errs[0] and "btcore.b" in errs[0]
+
+
+def test_strategies_onnx_import_detected(tmp_path):
+    """ML-04：策略层 import onnx/onnxruntime → 机械拦截（文件:行）。"""
+    _make_tree(tmp_path, {
+        "strategies/x/s.py": "import onnxruntime as ort\n",
+        "strategies/y/t.py": "from onnx import load\n",
+    })
+    errs = ac.check_strategies_no_onnx(str(tmp_path))
+    assert any("onnxruntime" in e and "s.py line 1" in e for e in errs)
+    assert any("onnx" in e and "t.py line 1" in e for e in errs)
+
+
+def test_strategies_inference_session_detected(tmp_path):
+    """ML-04：策略层调用 InferenceSession（含属性形式）→ 机械拦截。"""
+    _make_tree(tmp_path, {
+        "strategies/x/s.py": "sess = InferenceSession('m.onnx')\n",
+        "strategies/y/t.py": "sess = onnxruntime.InferenceSession('m.onnx')\n",
+    })
+    errs = ac.check_strategies_no_onnx(str(tmp_path))
+    assert sum("InferenceSession" in e for e in errs) == 2
+
+
+def test_strategies_onnx_compliant_passes(tmp_path):
+    """合规反例：策略只用引擎消费通道（bars 列 / bar dict），零违规。"""
+    _make_tree(tmp_path, {
+        "strategies/x/s.py": (
+            "from btcore.strategy import Strategy\n"
+            "def select(self, bars, snapshot, provider):\n"
+            "    return {\"buy\": [], \"sell\": []}\n"
+        ),
+        "README.md": "onnx not scanned\n",
+    })
+    assert ac.check_strategies_no_onnx(str(tmp_path)) == []

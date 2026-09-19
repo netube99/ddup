@@ -85,6 +85,7 @@ python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
 | 参数 | 说明 |
 |------|------|
 | `factors` | 逗号分隔因子名（来自 `factors/library.yaml`），位置参数；使用 `--model` 时可省略 |
+| `--factor-library` | 因子库 YAML 路径（缺省 `factors/library.yaml`）；评估策略本地因子库时指定 |
 | `--model` | ML 模型 ONNX 路径；模型分数物化为 `ml_<name>` 列后与因子同口径评估（仅支持 panel scope，详见 [ml_guide.md](./ml_guide.md)） |
 | `--start` / `--end` | **必填** |
 | `--universe` | 股票池：简称 `CSI300`/`CSI500`/`CSI1000`（对应 000300.SH/000905.SH/000852.SH）或其他指数代码（原样透传）；默认全市场。取成分快照并集为候选池，因子面板上再按 **point-in-time 成分**逐日过滤（与引擎逐日计算域、ml_train 训练域一致） |
@@ -96,7 +97,7 @@ python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
 **口径与引擎同源**：
 
 - 因子取值前伸 warmup 窗口（`fplan.main_days`，与引擎 preload 一致），滚动因子在评估窗口头部即有值，不再静默 NaN
-- 坍缩因子（市场广度，如 `pct_above_ma20`）走全市场流式 `compute_breadth`，与引擎广度面板同口径；被其他因子表达式引用时会 fail-fast 提示（不支持嵌套坍缩）
+- 坍缩因子（市场广度，如 `pct_above_ma20`）走全市场流式 `compute_breadth`，与引擎广度面板逐值等价；截面 IC/分层对其无意义，评估时自动跳过并提示（时序口径见 factor_library.md §16.5）；被其他因子表达式引用时会 fail-fast 提示（不支持嵌套坍缩）
 
 **默认模式输出**（终端三段）：
 
@@ -165,9 +166,9 @@ python scripts/cross_validate.py <结果库.duckdb> [--run-id N] [--strategy nam
 | `db_path` | 结果库路径，**必填** |
 | `--run-id` | 指定 run_id，缺省取最新 run |
 | `--strategy` | 策略名（仅用于输出标注） |
-| `--capital` | 初始资金，用于磨损动态阈值；默认 0 = 从 run 的 config 读取，再兜底 40000 |
+| `--capital` | 初始资金，用于磨损动态阈值；默认 0 = 从 run 的 config 读取，再兜底 1,000,000 |
 
-**退出码 = 发现的问题数**（0 = 通过），可直接用于脚本断言。
+**退出码 = 发现的问题数**（0 = 通过），可直接用于脚本断言。卖出分类统计的 `total_pnl/win_rate` 来自 `stats_json.round_trip.trip_detail`（按 sell_trigger 聚合，与 `total_realized_pnl` 同源）；无 stats_json 时改列 `net_proceeds`（成交净额，非盈亏）。消费实盘账本库时初始资金取 `ledger_meta.initial_capital`。
 
 | 检查项 | 告警条件 |
 |--------|---------|
@@ -207,7 +208,7 @@ params:
   config.max_positions: [5, 10]
 ```
 
-**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程调用 `run.py` 执行（`--no-report` 关闭浪费的 HTML 生成）；失败组合打印 FAIL 并跳过，不中断扫描。
+**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程调用 `run.py` 执行（`--no-report` 关闭浪费的 HTML 生成）；失败组合打印 FAIL（保留 stderr 尾部真实异常）并跳过，不中断扫描；全组合失败时非零退出且不打印「结果已保存到」；`params` 为空报错 exit 2。
 
 **输出**：每组参数作为**标准 run** 写入 `--out` 库的 `runs` 表（`config_json` 含参数，`compare.py`/`report.py` 原生可读）；同时写 `sweep_results` 表（`id, label, params_json, stats_json`，stats_json 内含 label 与 params 字段）保留参数标签汇总；终端按 收益/Sharpe/MDD 列打印汇总表。
 
@@ -286,17 +287,17 @@ python scripts/live.py status live/main.duckdb
 
 | 子命令 | 语义 |
 |------|------|
-| `init` | 建账：现金 + 可选已有持仓（`positions.yaml` 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账；`entry_date/entry_price` 用于 holding_days 与 trailing 锚点重建，缺省空仓开局） |
-| `sync` | 每日对账：追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST` 条目（超 100 元告警）。数据落后时也可用（估值用旧价不影响股数/现金对账）。statement date 非开市日时自动归一到 ≤date 最近开市日（fill/ADJUST 只落交易日，同一 statement 重跑幂等） |
-| `signal` | 全量回放 → 明日操作单（JSON）：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（券商条件单：每只持仓的 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌、T+1 锁定）。同时重写衍生表 |
-| `status` | 当前状态：最近一日 account_daily、持仓快照（`ledger_holdings`）、最近 10 条成交 |
+| `init` | 建账：`--date` 必须为 `YYYYMMDD` 且是开市日（用 provider 日历校验，非开市日 fail-fast 并提示最近开市日）；现金 + 可选已有持仓（`positions.yaml` 每条 `{symbol, shares, entry_date, entry_price}`，以 `OPENING` 条目入账；`entry_date/entry_price` 用于 holding_days 与 trailing 锚点重建，缺省空仓开局）；写入 `schema_version` 元数据 |
+| `sync` | 每日对账：写库前校验 statement 与 fills 日期——statement date 非开市日自动归一到 ≤date 最近开市日，且归一化日必须落在行情数据覆盖范围内（晚于数据最后一天 fail-fast，与 signal 口径一致）；每个 fill 的显式日期（缺 date 用归一化后的 statement date）必须落在 `[账本 start_date, 对账日]` 交易日历内，否则**整体拒绝、不落库**（不会产生回放永不生效的「死行」）；fills 仅接受 `BUY/SELL/ADJUST`（`OPENING` 仅用于 init positions）；校验通过后追加今日成交 → 轻量回放（无因子，秒级）→ 衍生持仓与券商逐只比对，**不一致即回滚并报差异**；现金差额自动记 `ADJUST` 条目（超 100 元告警），券商现金为负拒绝入账。解析/数值/日期错误走 JSON 错误通道（`{"ok": false, "stage": ...}`），同一 statement 重跑幂等 |
+| `signal` | 全量回放 → 明日操作单（JSON）：`open_sells`（含 reason）/ `open_buys`（T 收盘预估股数，实际以明日开盘价定）/ `broker_conditions`（券商条件单：每只持仓的 TAKE_PROFIT/TRAILING_TP/STOP_LOSS 精确触发价，盘前设置当日有效）/ `notices`（除权预告、停牌；universe 外持仓用补价面板判定，误报停牌已修复）。业务错误（YAML 不存在、`--out` 目录不存在、非交易日、无行情数据）打印可读消息并返回非 0，不再裸 traceback。同时重写衍生表 |
+| `status` | 当前状态：最近一日 account_daily、持仓快照（`ledger_holdings`）、最近 10 条成交。账本库不存在或未初始化 → 报错 exit 2，**不静默建库** |
 
-`sync.yaml` 格式（全量账户信息一次性给到位）：
+`sync.yaml` 格式（全量账户信息一次性给到位；所有数值拒绝 NaN/Inf）：
 
 ```yaml
 date: 20260803
-cash: 41233.55                                  # 券商可用资金
-holdings: [{symbol: 600519.SH, shares: 100}]    # 券商实际持仓
+cash: 41233.55                                  # 券商可用资金（非负）
+holdings: [{symbol: 600519.SH, shares: 100}]    # 券商实际持仓（shares 必须为正整数）
 fills:                                          # 今日实际成交（可为空）
   - {symbol: 000001.SZ, side: SELL, price: 12.34, shares: 1000,
      commission: 2.47, stamp_tax: 6.17, transfer_fee: 0.0, reason: TREND_BREAK}
@@ -308,6 +309,14 @@ fills:                                          # 今日实际成交（可为空
 - **成交是唯一真相源**：持仓/现金永远衍生，不可手改；对不上 = 漏录/错录成交
 - **reason 字段**（= 回测 trigger）：冷却期记账（on_fills）与 ML holding 标签消费它；
   条件单触发离场如实记录（如 `TREND_BREAK`/`TRAILING_TP`），手动操作记 `MANUAL`
+- **输入校验与错误通道**：`init/sync/signal/apply_fill` 的全部数值入口（cash/price/
+  shares/fees/持仓）拒绝 NaN/Inf；应用 fill 后现金为负即 fail-fast（不允许持久化
+  负现金）；`sync` 的解析错误、日期非法、无行情数据与 `status` 的坏账本路径均以
+  JSON/可读消息报错，退出码非 0
+- **schema 版本**：账本 `ledger_meta.schema_version`（当前 `1`）；打开时校验，
+  缺失 = 兼容旧账本，未知版本报错
+- **仅支持个股**：行情链只覆盖 A 股个股；账本若持有 ETF/基金标的则无行情，
+  `signal` 报「无行情数据」、`ledger_holdings` 不刷新（`sync` 对账仍可用）
 - **一致性保证**：回测 trade_log 灌入账本回放，衍生账户轨迹与回测逐日逐分钱一致、
   末日 pending_actions 逐键相等（`tests/test_live.py::TestBacktestParity` 锁定）
 - 每日节奏：收盘后 ①更新行情库 ②`sync` ③`signal` ④次日盘前按操作单设券商条件单
@@ -318,7 +327,7 @@ fills:                                          # 今日实际成交（可为空
 |------|------|
 | `bench_universe_preload.py --start D --end D [--yaml path] [--skip-load] [--skip-engine]` | 性能基准：全市场 preload vs 沪深300+中证500+中证1000 成分并集 preload，分数据加载层（行数/耗时/内存）与端到端（engine.run 耗时）两层；调优 `get_universe` 时使用 |
 | `dump_fixtures.py` | 从真实行情库重新生成 `tests/fixtures/*.parquet` 测试 fixtures（无参数；数据库结构或数据更新后使用） |
-| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，14 项结构检查；开发工具） |
+| `check_anticorrupt.py` | 提交前的架构约束静态检查（无参数，15 项结构检查；开发工具） |
 | `live_e2e_check.py [--bt-db 回测库] [--ledger 账本] [--yaml 策略]` | 实盘账本全链路回归（需真实行情库）：以回测结果库为 ground truth 连续模拟交易日的 init → 每日 sync → 每日 signal，校验 signal 操作单等于回测次日实际成交、sync 对账通过、错报持仓回滚拒绝、中途建账与全程回放等价 |
 
 ---
@@ -509,7 +518,7 @@ result = brinson_attribute(
 }
 ```
 
-**数据不足时不抛异常**，返回 `{"error": "原因", "summary": {}, "industry_detail": {}, "daily": [], "exposure_summary": {}}`（如 trade_log 无记录、bars 为空、sw_daily 无数据等），调用方需先检查 `"error"` 键。
+**数据不足时不抛异常**，返回 `{"error": "原因", "summary": {}, "industry_detail": {}, "daily": [], "exposure_summary": {}}`（如 trade_log 无记录、bars 为空、sw_daily 无数据、benchmark_weights 无数据＝index 拼错/窗口无成分快照等），调用方需先检查 `"error"` 键。
 
 **口径（2026-08 版本）**：
 
@@ -540,7 +549,7 @@ result = brinson_attribute_from_files(
 | `benchmark_weights` | parquet，index=trade_date，columns=行业名，值 0~1 |
 | `bars` | 个股 bars parquet：MultiIndex `(trade_date, symbol)`，或含 `trade_date, symbol` 列（自动 set_index）；须含 `close, pct_chg` |
 
-前三个 parquet 用 `scripts/dump_brinson_data.py` 导出（`--index` 指定基准指数）；提供 `--result-db` 与 `--start`/`--end` 时 dump 自动导出 `bars.parquet`，否则 bars 需自行导出。任一文件不存在抛 `FileNotFoundError`。返回值结构与 6.3 相同（含 `"error"` 键约定）。
+前三个 parquet 用 `scripts/dump_brinson_data.py` 导出（`--index` 指定基准指数）；提供 `--result-db` 与 `--start`/`--end` 时 dump 自动导出 `bars.parquet`，否则 bars 需自行导出。bars 起点必须 ≤ run 起始日，否则返回 error（期初持仓无法重建）；dump 对无效 `--index` 非零退出。任一文件不存在抛 `FileNotFoundError`。返回值结构与 6.3 相同（含 `"error"` 键约定）。
 
 ---
 

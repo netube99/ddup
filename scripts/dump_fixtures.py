@@ -162,6 +162,12 @@ def _get_dividend_symbols(conn, start, end):
     return [r[0] for r in rows]
 
 
+def _bars_select_clause() -> str:
+    """bars 联表 SELECT 子句：stk_factor_pro(s) JOIN bak_basic(b) 时所有
+    BAR_COLUMNS 须加 s. 限定（两表同有 ts_code/trade_date，裸列歧义）。"""
+    return ", ".join(f"s.{col}" for col in BAR_COLUMNS)
+
+
 def _dump_bars(conn, symbols, start, end):
     """Dump projected stk_factor_pro columns for given symbols and date range.
 
@@ -171,10 +177,9 @@ def _dump_bars(conn, symbols, start, end):
     if not symbols:
         return pd.DataFrame()
 
-    fields = ", ".join(BAR_COLUMNS)
     placeholders = ",".join("?" * len(symbols))
     sql = (
-        f"SELECT {fields}, b.eps AS eps FROM stk_factor_pro s "
+        f"SELECT {_bars_select_clause()}, b.eps AS eps FROM stk_factor_pro s "
         "LEFT JOIN bak_basic b ON b.ts_code = s.ts_code "
         "AND b.trade_date = s.trade_date "
         f"WHERE s.ts_code IN ({placeholders}) "

@@ -30,22 +30,22 @@ class TargetAllocator(Strategy):
         super().on_start(provider, first_date, end_date)
         self._top_k = int(self.config.get("top_k", 8))
         self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
-        self._last_rebalance = 0
+        # 调仓交易日计数器（初值 = interval 保证首日调仓）
+        self._days_since_rebalance: int = self._rebalance_interval
 
     def select(self, bars, account_snapshot, provider) -> dict:
         if not bars:
             return {"buy": [], "sell": [], "target_value": {}}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
-        date_int = int(date_str) if date_str else 0
 
         # ── 时间门控：非调仓日不操作 ───────────────────────────────────
-        # select 每日运行，策略代码自行判断是否调仓。
-        is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
-        if not is_rebalance_day:
+        # select 每日运行，策略代码自行判断是否调仓（交易日计数器）。
+        self._days_since_rebalance += 1
+        if self._days_since_rebalance < self._rebalance_interval:
             return {"buy": [], "sell": [], "target_value": {}}
 
-        self._last_rebalance = date_int
+        self._days_since_rebalance = 0
 
         filtered = self.filter_bars(bars, date_str)
 

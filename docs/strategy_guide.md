@@ -332,8 +332,7 @@ class MyStrategy(Strategy):
 |---|---|---|---|
 | `initial_capital` | `float` | `1000000` | 初始资金（元） |
 | `max_positions` | `int` | `20` | 最大持仓数。所有买入路径达到上限后只记 INFO 日志、不拦截——策略应自行管理持仓数量 |
-| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = `tick_size` 元）。必须是非负整数，否则 `ValueError` |
-| `tick_size` | `float` | `0.01` | 品种最小变动价位（元），∈(0,1]。A 股股票 0.01；场内 ETF/黄金 ETF 0.001（**ETF 策略必须显式声明**，否则滑点放大 10 倍）。滑点价与舍入均按该网格 |
+| `slippage_ticks` | `int` | `2` | 手动买卖滑点 tick 数（1 tick = 0.01 元）。必须是非负整数，否则 `ValueError` |
 | `condition_slippage_ticks` | `int \| None` | `None` | 条件单（含条件买入）独立滑点 tick 数；`None` 时沿用 `slippage_ticks`。必须是非负整数或 None，否则 `ValueError` |
 | `execution_price` | `str` | `"open"` | 手动订单成交价字段：`"open"`（次日开盘）或 `"close"`（次日收盘），其他值 `ValueError` |
 | `commission_rate` | `float` | `0.00015` | 佣金费率（万 1.5） |
@@ -414,24 +413,36 @@ factor_library: factors.yaml   # 相对于策略 YAML 所在目录
 
 ```python
 def on_start(self, provider, first_date, end_date=None):
-    self._last_rebalance: int = 0
     self._rebalance_interval = int(self.config.get("rebalance_interval", 22))
+    # 交易日计数器：初值 = interval 保证首日（prev_day 预计算）即调仓
+    self._days_since_rebalance: int = self._rebalance_interval
 
 def select(self, bars, account_snapshot, provider):
     if not bars:
         return {"buy": [], "sell": []}
-    date_int = int(next(iter(bars.values())).get("trade_date", ""))
     current = set(account_snapshot.holdings.keys())
 
-    # 非调仓日：只紧急卖出，不新买
-    if date_int - self._last_rebalance < self._rebalance_interval:
+    # 每个决策日 +1，达到 interval 才是调仓日——禁止 int(YYYYMMDD) 日期差：
+    # int("20240201") - int("20240122") = 79，跨月/周末会强插调仓
+    self._days_since_rebalance += 1
+    if self._days_since_rebalance < self._rebalance_interval:
         urgent = [s for s in current if self._needs_urgent_exit(s, bars.get(s, {}))]
         return {"buy": [], "sell": urgent}
 
     # 调仓日：完整轮动
-    self._last_rebalance = date_int
+    self._days_since_rebalance = 0
     # ... 正常排名、选股、卖出逻辑
 ```
+
+**交易日口径是硬约定**：调仓间隔、`min_hold_days` 最短持有期、冷却期全部按交易日计数，
+不得用 `int(trade_date)` 十进制差（日期不是数字，`20240131 + 1 = 20240132` 不会滚动到 2 月）：
+
+- 调仓间隔：上面的 `_days_since_rebalance` 计数器（每个 `select` 决策日 +1）。
+- 最短持有期：直接读引擎持仓快照的 `holding.holding_days`（交易日口径，成交当日为 1，
+  见 `self_managed_rank` / `value_momentum`），或自建 per-symbol 计数器（买入日置 0，
+  每个 `select` 日 +1）。
+- 冷却期：per-symbol 剩余交易日计数器——`on_fills` 成交时置 N，`on_tick` 每个决策日
+  -1，跌穿 0 解除（见 `rolling_ranker` / `core_lowvol_500`）。
 
 **排名阈值模式**（每只持仓独立跟踪，排名跌出阈值才卖出，换手由排名变化自然驱动）：见 `self_managed_rank` 示例。
 
@@ -627,16 +638,17 @@ register_buy_condition_handler("MY_BUY", my_buy_handler)
 
 ```python
 def on_fills(self, trades, provider):
-    """条件单退出的标的进入冷却期。"""
+    """条件单退出的标的进入冷却期（per-symbol 剩余交易日数，成交当日为第 1 天）。"""
     for t in trades:
         if t.side == "SELL" and t.trigger in ("STOP_LOSS", "TAKE_PROFIT", "TRAILING_TP"):
-            self._cooldown[t.symbol] = int(t.date) + self._cooldown_days
+            self._cooldown[t.symbol] = self._cooldown_days
 
 def on_tick(self, bars, snapshot, provider):
-    """冷却期递减 + 条件单状态修剪。"""
-    expired = [s for s, d in self._cooldown.items() if d <= date_int]
-    for s in expired:
-        del self._cooldown[s]
+    """冷却期递减（交易日口径）+ 条件单状态修剪。"""
+    for s in list(self._cooldown):
+        self._cooldown[s] -= 1
+        if self._cooldown[s] < 0:
+            del self._cooldown[s]
     self._cond.prune(set(snapshot.holdings.keys()))
 
 def calc_conditions(self, symbol, entry_price, bar, holding_days):
@@ -650,11 +662,11 @@ def calc_conditions(self, symbol, entry_price, bar, holding_days):
     return conds
 ```
 
-`buy_weights` 按得分比例分配，总和 < 1 保留现金缓冲。
+`buy_weights` 按目标权重分配，总和 < 1 保留现金缓冲：权重是 `total_value` 的分数（非买入名单内的相对比例），归一分母应取整个 target 集合——只在新买入间归一化会让单只新买入索要 90% 总资产，满仓轮动被现金护栏系统性跳过（见 `rolling_ranker`）。
 
 ### 6.2.1 岔路：自管理换手 — `self_managed_time/` · `self_managed_rank/`
 
-两种模式见 §4.7。`self_managed_time`：时间门控 + 非对称买卖（买侧固定间隔，卖侧随时）；`self_managed_rank`：排名阈值 + 逐仓独立管理（`on_fills` 记录入场日期，排名掉出 `top_k × sell_rank_mult` 且持有 ≥ `min_hold_days` 才卖），并演示 `provider.get_historical_bars()` 历史回溯。
+两种模式见 §4.7。`self_managed_time`：时间门控 + 非对称买卖（买侧固定间隔，卖侧随时）；`self_managed_rank`：排名阈值 + 逐仓独立管理（读引擎快照 `holding_days`（交易日口径）判断持有 ≥ `min_hold_days`，排名掉出 `top_k × sell_rank_mult` 才卖），并演示 `provider.get_historical_bars()` 历史回溯。
 
 ### 6.3 Level 2：目标仓位调仓 — `strategies/examples/target_allocator/`
 

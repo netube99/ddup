@@ -68,14 +68,6 @@ python scripts/dump_brinson_data.py /path/to/market.duckdb --out brinson_data
 # 从真实数据库重新生成测试 fixtures
 python scripts/dump_fixtures.py
 
-# 黄金研究库刷新（4 只黄金 ETF 行情/份额 + 美债实际收益率/汇率/上海金/M2，
-# 海外序列按"严格早于中国交易日"对齐；写入 data/gold_market.duckdb）
-python scripts/refresh_gold_db.py
-
-# 黄金策略回测（DDUP_BACKEND 切换后端，缺省 = adapters/tushare.py 股票后端）
-DDUP_BACKEND=adapters.tushare_gold:TushareGoldBackend \
-  python scripts/run.py strategies/exploring/gold_mid_term/config.yaml \
-  --start 20190101 --end 20260914 --out results/gold.duckdb
 ```
 
 ---
@@ -89,8 +81,7 @@ btcore/     — 全部机制/基础设施（勿随意修改）：engine.py 主�
               match/ 撮合（core 原语 / conditions 条件单 / manual 普通单，子模块互不 import）、
               ml/ ML 子系统（spec/dataset/runtime/trainer/conditions/export）、
               database.py 结果库、stats.py 统计纯函数、generic_sql.py 填表法后端
-adapters/   — 用户数据后端实现（可编辑）：tushare.py = GenericSQLBackend 填表（股票）、
-              tushare_gold.py = 黄金 ETF/宏观对齐后端（DDUP_BACKEND 选择）
+adapters/   — 用户数据后端实现（可编辑）：tushare.py = GenericSQLBackend 填表（A 股个股）
 research/   — 研究工具库（纯 importable 模块，不含 CLI）：factor_eval/composite/attribution/report、
               HTML 报告生成、实盘账本回放 research/live.py
 scripts/    — 可执行 CLI 入口（回测运行、报告/对比、因子评估、交叉验证、参数扫描、
@@ -115,20 +106,20 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 
 ## 关键入口
 
-- `Engine.run(start, end)`（btcore/engine.py:404）：preload → 因子/ML 物化 → 逐日 step → 统计落库
-- `Engine.step`（engine.py:624）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
-- `Engine.compute_pending`（engine.py:732）：on_fills → on_tick → select → 校验 → calc_conditions
+- `Engine.run(start, end)`（btcore/engine.py:416）：preload → 因子/ML 物化 → 逐日 step → 统计落库
+- `Engine.step`（engine.py:666）：公司行为 → 撮合（manual → 条件卖 → 条件买）→ 结算 → 次日决策
+- `Engine.compute_pending`（engine.py:777）：on_fills → on_tick → select → 校验 → calc_conditions
 - `Strategy` ABC（btcore/strategy.py:8）：声明式属性 REQUIRED_FIELDS/FACTOR_SPECS/FILTER_RULES +
   钩子 get_universe/on_start/on_fills/on_tick/select/calc_conditions
 - `strategy_loader.load_strategy(path)`（strategy_loader.py:185）：YAML → Strategy；
   策略模型 features 以 materialize_only 并入因子闭包（build_strategy :40）
-- 因子：`ops.eval_op_expr`（factors/ops.py:370，_OPS 固定算子表）；
-  `plan.build_factor_plan`（factors/plan.py:174）/ `materialize`（:287 两路供给：广度面板→主面板）
+- 因子：`ops.eval_op_expr`（factors/ops.py:372，_OPS 固定算子表）；
+  `plan.build_factor_plan`（factors/plan.py:188）/ `materialize`（:308 两路供给：广度面板→主面板）
 - 撮合：`match.conditions.exit_conditions`(:79)/`entry_conditions`(:199)；
   自定义条件单 `register_condition_handler`（match/conditions.py:24）
 - ML：`ml/runtime.materialize_predictions`(:100) → `ml_<name>` 列；`ml/dataset.build_panel`(:23)
-  训练与引擎同一物化函数链；meta v3 契约（ml/spec.py:33 META_VERSION）
-- 结果库：`database.init_backtest_db`（database.py:132），6 表多 run 累积 DuckDB（sequence 自增 + 显式事务）
+  训练与引擎同一物化函数链；meta v3 契约（ml/spec.py:34 META_VERSION）
+- 结果库：`database.init_backtest_db`（database.py:136），6 表多 run 累积 DuckDB（sequence 自增 + 显式事务）
 - 统计：`stats.calculate_statistics`（stats.py:13，纯函数）
 
 ## 数据流（一天）
@@ -295,16 +286,16 @@ strategies/ — 用户策略（YAML + Strategy 子类；可编辑）：examples/
 - Fixtures 在 `tests/fixtures/*.parquet`（约 2.8MB，已提交 git）
 - 8 个不变量测试：`tests/test_invariants/`（INV1 账户恒等式、INV2 手数、INV3 现金非负、
   INV4 T+1 锁定、INV5 买卖互斥、INV6 公司行为一致性、INV7 条件单成交价范围、INV8 涨跌停跳过）
-- 708 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
+- 859 个测试总计，覆盖因子库、策略层、target_value、volume-ratio、fill-notification、
   列裁剪、index_universe、因子算子、物化规划与 CSE、多因子合成、卖出来源归因、
-  GenericSQLBackend 表单校验、滑点 tick 口径（股票 0.01 / ETF 0.001）、
+  GenericSQLBackend 表单校验、滑点 tick 口径（0.01）、
   ML 子系统（spec 解析、loader 整合、panel/holding 双 scope 引擎集成、T+1 锁定、
   训练面板与引擎物化一致性、时间切分 embargo、评估指标、首训免占位引导）、
   统计指标（交易磨损/管理复杂度、首日收益与初始资金回撤基准）、HTML 报告与多 run 对比、
   stats_json 落盘迁移、
   debug 快照与回放、参数扫描、坍缩因子物化完整性、on_tick 条件买单、factor_plan 验证、
   实盘账本（成交应用/对账/操作单/回测往返一致性 parity、非开市日 sync 归一化/批量幂等）、
-  select 协议 sell_reasons 键、黄金库刷新（cn_m 窗口/ETF 0.001 档位限价）、
+  select 协议 sell_reasons 键、
   审查门禁（findings 验收/backlog 归并/收敛判据）
 
 ---

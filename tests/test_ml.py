@@ -178,6 +178,44 @@ class TestModelSpec:
         )
         assert spec.scope == "panel"
 
+    def test_artifact_sha256_verified(self, tmp_path):
+        """ML-01：meta 含 artifact_sha256 时按文件字节校验，正常加载通过。"""
+        art = tmp_path / "a.onnx"
+        blob = b"trained-onnx-bytes"
+        art.write_bytes(blob)
+        write_meta(
+            tmp_path / "a.meta.json",
+            artifact_sha256=hashlib.sha256(blob).hexdigest(),
+        )
+        spec = ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
+        assert spec.meta["artifact_sha256"] == hashlib.sha256(blob).hexdigest()
+
+    def test_artifact_sha256_mismatch_rejected(self, tmp_path):
+        """ML-01：篡改/半写 ONNX 与 meta 哈希不符 → 加载期 ValueError。"""
+        art = tmp_path / "a.onnx"
+        art.write_bytes(b"tampered-bytes")
+        good = hashlib.sha256(b"original-bytes").hexdigest()
+        write_meta(tmp_path / "a.meta.json", artifact_sha256=good)
+        with pytest.raises(ValueError, match="artifact_sha256") as ei:
+            ModelSpec.from_dict("a", {"artifact": "a.onnx"}, str(tmp_path))
+        msg = str(ei.value)
+        assert good[:12] in msg
+        actual = hashlib.sha256(b"tampered-bytes").hexdigest()
+        assert actual[:12] in msg
+
+    def test_artifact_sha256_bootstrap_skipped_when_artifact_absent(self, tmp_path):
+        """ML-01：首训引导（require_meta=False、artifact 尚不存在）跳过校验。"""
+        write_meta(tmp_path / "a.meta.json", artifact_sha256="0" * 64)
+        spec = ModelSpec.from_dict(
+            "a",
+            {"artifact": "a.onnx",
+             "features": {"factors": ["mom20"], "raw": ["turnover_rate"]}},
+            str(tmp_path),
+            require_meta=False,
+        )
+        assert spec.artifact == str(tmp_path / "a.onnx")
+        assert not (tmp_path / "a.onnx").exists()
+
 
 class TestLoaderIntegration:
     def _models(self, tmp_path, state=(), post="xs_rank"):

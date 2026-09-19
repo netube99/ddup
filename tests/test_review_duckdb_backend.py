@@ -2,22 +2,16 @@
 
 覆盖本轮 P0/P1 修复：
 
-- F-MKT-01 ``refresh_gold_db._asof_strict`` 严格早于对齐必须保持调用方行序，
-  否则宏观列与行情行错位（``data/gold_market.duckdb`` 宏观列静默错配）。
 - F-MKT-02 ``dump_brinson_data`` 行情/结果库连接必须旧格式 fail-fast
   （DuckDB 的 sqlite_scanner 会静默打开旧 SQLite 文件）。
-- F-MKT-03 ``dump_fixtures`` / ``refresh_gold_db`` 行情库连接同样 fail-fast。
+- F-MKT-03 ``dump_fixtures`` 行情库连接同样 fail-fast。
 """
 
 import sqlite3
 import sys
-from pathlib import Path
 
 import duckdb
-import pandas as pd
 import pytest
-
-from scripts.refresh_gold_db import _asof_strict
 
 
 def _make_sqlite(path, ddl: str) -> str:
@@ -26,41 +20,6 @@ def _make_sqlite(path, ddl: str) -> str:
     conn.commit()
     conn.close()
     return str(path)
-
-
-# ═══════════════════════════════════════════
-# F-MKT-01: _asof_strict 行序保持
-# ═══════════════════════════════════════════
-
-
-def test_asof_strict_preserves_caller_row_order():
-    """调用方行序（如 DuckDB 扫描的日期降序）必须原样返回。"""
-    dates = pd.Series(["20240103", "20240102", "20240101"])
-    macro = pd.DataFrame(
-        {"trade_date": ["20240101", "20240102", "20240103"], "v": [1.0, 2.0, 3.0]}
-    )
-    out = _asof_strict(dates, macro, ["v"])
-    values = out["v"].tolist()
-    assert values[0] == 2.0   # 20240103 严格早于 → 20240102 的值
-    assert values[1] == 1.0   # 20240102 → 20240101
-    assert pd.isna(values[2])  # 20240101 无更早值
-
-
-def test_asof_strict_same_date_rows_share_value():
-    """同一天多只 ETF（重复日期）：跨 symbol 的宏观值必须相同。"""
-    dates = pd.Series(["20240103", "20240103", "20240102", "20240102"])
-    macro = pd.DataFrame(
-        {"trade_date": ["20240101", "20240102", "20240103"], "v": [1.0, 2.0, 3.0]}
-    )
-    out = _asof_strict(dates, macro, ["v"])
-    assert out["v"].tolist() == [2.0, 2.0, 1.0, 1.0]
-
-
-def test_asof_strict_empty_macro_keeps_order_and_nan():
-    dates = pd.Series(["20240103", "20240102"])
-    out = _asof_strict(dates, pd.DataFrame(), ["v"])
-    assert out["v"].isna().all()
-    assert len(out) == 2
 
 
 # ═══════════════════════════════════════════
@@ -224,7 +183,7 @@ def test_dump_brinson_valid_duckdb_provider_exports_parquets(tmp_path, monkeypat
 
 
 # ═══════════════════════════════════════════
-# F-MKT-03: dump_fixtures / refresh_gold_db 旧格式拒绝
+# F-MKT-03: dump_fixtures 旧格式拒绝
 # ═══════════════════════════════════════════
 
 
@@ -237,11 +196,3 @@ def test_dump_fixtures_rejects_sqlite_market(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "FIXTURES_DIR", str(tmp_path / "fixtures"))
     with pytest.raises(ValueError, match="不是 DuckDB 格式"):
         mod.main()
-
-
-def test_refresh_gold_rejects_sqlite_market(tmp_path):
-    import scripts.refresh_gold_db as mod
-
-    sqlite_market = _make_sqlite(tmp_path / "market.db", "CREATE TABLE t (a INTEGER)")
-    with pytest.raises(ValueError, match="不是 DuckDB 格式"):
-        mod.build(Path(sqlite_market), tmp_path / "gold.duckdb", 2024, 2024)

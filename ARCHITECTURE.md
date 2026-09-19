@@ -16,11 +16,11 @@ btcore/        全部机制/基础设施（引擎、ABC、因子机制、撮合�
   match/       撮合：core（共享结算原语）/ conditions（条件单）/ manual（普通买卖）
   ml/          ML 子系统：spec / dataset / trainer / labels / runtime / conditions / metrics / export
 adapters/      用户数据后端实现（可编辑）—— tushare.py 是对 GenericSQLBackend 的填表
-factors/       用户因子定义 library.yaml（可编辑，126 个因子，纯 YAML 数据）
+factors/       用户因子定义 library.yaml（可编辑，217 个因子，纯 YAML 数据）
 strategies/    用户策略（可编辑）：examples/ 教学参考、selected/ 精选、exploring/ 实验、archive/
 research/      研究工具库（纯 importable 模块，无 CLI）：因子评估、合成、归因、HTML 报告
 scripts/       可执行 CLI 入口（回测、报告、评估、训练、扫描、回放、校验）
-tests/         pytest 套件（539 测试）+ fixtures/*.parquet + test_invariants/（INV1-INV8）
+tests/         pytest 套件（814 测试）+ fixtures/*.parquet + test_invariants/（INV1-INV8）
 docs/          设计文档（index.md 是导航入口）
 results/       回测结果库（*.duckdb，DuckDB，多 run 累积）
 ```
@@ -42,12 +42,12 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 
 ## 2. 核心机制层 btcore/
 
-### 2.1 引擎 engine.py（987 行）—— 主循环
+### 2.1 引擎 engine.py（1036 行）—— 主循环
 
 | 符号 | 位置 | 职责 |
 |---|---|---|
-| `required_bar_columns` | engine.py:220 | preload 列裁剪：契约列 ∪ REQUIRED_FIELDS ∪ filter 列 ∪ fplan main_columns |
-| `class Engine` | engine.py:268 | 构造读 strategy.config：initial_capital/max_positions/滑点/benchmark/execution_price |
+| `required_bar_columns` | engine.py:273 | preload 列裁剪：契约列 ∪ REQUIRED_FIELDS ∪ filter 列 ∪ fplan main_columns |
+| `class Engine` | engine.py:321 | 构造读 strategy.config：initial_capital/max_positions/滑点/benchmark/execution_price |
 | `run(start, end)` | engine.py:353 | init_backtest_db → prepare → write_run → 逐日 step → 统计落库 |
 | `prepare(start, end)` | engine.py:450 | 回测/实盘回放共用 preload 管线（无 DB 写入）：日历 → 前视锚定 → universe → 因子/ML 物化 → 裁切 → on_start |
 | `_build_factor_plan` | engine.py:514 | FACTOR_SPECS + FACTOR_NODES → 因子供给计划 |
@@ -150,10 +150,10 @@ btcore/                  不 import strategies/ 顶层 factors/ adapters/（单�
 | limits.py | `get_limit_prices`(:8)、`_round2_half_up`(:27) | 涨跌停价：优先 bar 列，否则 pre_close×板块幅度，Decimal ROUND_HALF_UP 到分 |
 | costs.py | `make_costs_fn`(:4) | 费用闭包工厂：佣金（最低 5 元）/印花税（仅卖）/过户费 |
 | slippage.py | `apply_slippage`(:4) | tick 滑点：price ± ticks×0.01 |
-| corporate.py | `adjust`(:15) | 除权除息：送股股数/价格重缩放、现金分红（除息日预缴红利税 ≤30d 20%/≤1y 10%/>1y 免） |
+| corporate.py | `adjust`(:58) | 除权除息：送股股数/价格重缩放、现金分红（除息日预缴红利税 ≤30d 20%/≤1y 10%/>1y 免） |
 | filters.py | `StockFilter`(:25)、`filter_required_columns`(:13) | 见 2.3 |
-| database.py | `init_backtest_db`(:124)、`transaction`(:101)、write_run(:133)/write_daily(:151)/write_trades(:208)/write_run_stats(:230)/read_runs(:239)/read_run_data(:247)/write_ml_predictions(:266)/write_debug_snapshot(:288) | 结果库 DuckDB：runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions 六表（sequence 自增，显式事务） |
-| stats.py | `calculate_statistics`(:9) | 统计指标纯函数：收益/回撤/夏普/Sortino/VaR/回合 FIFO(:216)/卖出来源归因(:374)/成本分解(:439)/交易磨损(:459)/管理复杂度(:505)/基准对比(:557) |
+| database.py | `init_backtest_db`(:136)、`transaction`(:121)、write_run(:149)/write_daily(:175)/write_trades(:248)/write_run_stats(:266)/read_runs(:274)/read_run_data(:279)/write_ml_predictions(:297)/write_debug_snapshot(:319) | 结果库 DuckDB：runs/account_daily/holdings/trade_log/debug_snapshots/ml_predictions 六表（sequence 自增，显式事务） |
+| stats.py | `calculate_statistics`(:13) | 统计指标纯函数：收益/回撤/夏普/Sortino/VaR/回合 FIFO(:216)/卖出来源归因(:374)/成本分解(:439)/交易磨损(:459)/管理复杂度(:505)/基准对比(:557) |
 
 ---
 
@@ -197,16 +197,16 @@ moneyflow/cyq_perf/margin_detail 等表的字段以「别名: 表名.字段名�
 
 | 脚本 | main | 用途 |
 |---|---|---|
-| run.py | :38 | YAML 策略回测 → 结果库.duckdb |
+| run.py | :39 | YAML 策略回测 → 结果库.duckdb |
 | report.py / compare.py | :15 / :28 | 单 run HTML 报告 / 多 run 对比表+HTML |
-| factor_eval.py | :64 | 因子 IC/分层/相关性（--model 可评 ML 分数列） |
-| ml_train.py | :66 | ML 训练（panel/holding 双 scope，同一物化路径） |
-| sweep.py | :47 | 参数扫描批量回测（点路径语法展开参数空间） |
+| factor_eval.py | :26 | 因子 IC/分层/相关性（--model 可评 ML 分数列） |
+| ml_train.py | :69 | ML 训练（panel/holding 双 scope，同一物化路径） |
+| sweep.py | :34 | 参数扫描批量回测（点路径语法展开参数空间） |
 | replay.py | :10 | 交易决策回放（消费 debug_snapshots） |
-| cross_validate.py | :213 | 回测结果交叉验证（validate_trades :56 / validate_daily :178） |
-| check_anticorrupt.py | :205 | 反破坏 linter（14 项结构检查，提交前必过） |
-| dump_fixtures.py / dump_brinson_data.py | :54 / :10 | fixtures 再生成 / 归因数据导出 |
-| bench_universe_preload.py | :70 | universe preload 性能基准 |
+| cross_validate.py | scripts:17 | 回测结果交叉验证（research/cross_validate.py: validate_trades :151 / validate_daily :285） |
+| check_anticorrupt.py | :452 | 反破坏 linter（15 项结构检查，提交前必过） |
+| dump_fixtures.py / dump_brinson_data.py | :60 / :25 | fixtures 再生成 / 归因数据导出 |
+| bench_universe_preload.py | :57 | universe preload 性能基准 |
 
 ---
 
@@ -284,9 +284,9 @@ bars_to_dict → _save_state（事务回滚快照）
 - `tests/test_invariants/` 8 个不变量（16 测试，手动步进引擎）：
   INV1 账户恒等式 / INV2 手数整百 / INV3 现金非负 / INV4 T+1 锁定 /
   INV5 买卖互斥 / INV6 公司行为一致性 / INV7 条件单成交价∈[low,high] / INV8 涨跌停跳过
-- 其余 41 个顶层测试文件（519 个用例；含参数化展开共 539 passed）按域分布：引擎撮合、
+- 其余 58 个顶层测试文件（含参数化展开共 814 passed）按域分布：引擎撮合、
   成本/限制/公司行为、数据后端（generic_sql 34 个）、因子系统（ops/plan/cse/library/eval）、
-  策略加载、统计/结果库/报告、ML（test_ml.py 54 个，含训练面板与引擎物化一致性）
+  策略加载、统计/结果库/报告、ML（test_ml.py 61 个，含训练面板与引擎物化一致性）
 - 命令：`pytest tests/ -v`；`ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/`；
   `python scripts/check_anticorrupt.py`
 

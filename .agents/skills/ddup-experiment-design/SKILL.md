@@ -45,12 +45,12 @@ params:
 ```bash
 python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results/sweep_r3.duckdb [--dry-run]
 ```
-- params 点路径覆写 base，值列表做**笛卡尔积**（示例 5×3×3=45 组）；`--dry-run` 预览组合
+- params 点路径覆写 base，值列表做**笛卡尔积**（示例 5×3×3=45 组）；`--dry-run` 预览组合；**`params: {}` 报错退出码 2**（不得把 base 当扫描结果运行）
 - 路径段支持**列表整数下标**：如 `config.factor_specs.0.weight: [0.5, 0.8]` 可扫 factor_specs 权重；仅当路径段对 list 用非整数段（如漏索引的 `config.factor_specs.weight`）才报错
 - **值必须是列表**：标量 int/float → TypeError 直接崩溃；字符串 → product 静默逐字符拆开（`"abc"` 得 3 组、每组一个字符）静默写坏 config——最常见的低级错误
 - **CLI 只有 yaml/--start/--end/--out/--capital/--dry-run 六个参数，不接受 `--no-report`**——它内部调 run.py 时已强制带 `--no-report`，手动加会 usage error
 - 单次调用 = 一个窗口；多窗口网格需外层 shell 循环分次调用（每次独立 --out 或同库串行累积）
-- 执行 = subprocess **串行**调 run.py（共享 --out，规避并行锁）；失败组合打印 FAIL 跳过
+- 执行 = subprocess **串行**调 run.py（共享 --out，规避并行锁）；失败组合打印 FAIL（保留 stderr 末尾真实异常）并跳过；**全组合失败 → 退出码 1 且不打印「结果已保存到」**
 - 结果写同库 runs + sweep_results 表（label/params/stats），末尾打印收益/Sharpe/MDD 汇总行，直接 grep 即可
 - 多 run 横向对比：`python scripts/compare.py results/sweep_r3.duckdb --html cmp.html`（11 项指标表 + 归一化净值叠加）
 

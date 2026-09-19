@@ -186,7 +186,7 @@ def test_run_loop_writes_standard_runs(tmp_path, monkeypatch):
         "--start", "20240101", "--end", "20240131", "--out", str(out_db),
     ])
     rc = sweep_mod.main()
-    assert rc is None  # main 无返回值，退出码靠 sys.exit
+    assert rc == 0
     assert len(captured_cmds) == 2
     for cmd in captured_cmds:
         assert "--no-report" in cmd
@@ -197,3 +197,76 @@ def test_run_loop_writes_standard_runs(tmp_path, monkeypatch):
     n_sweep = conn.execute("SELECT COUNT(*) FROM sweep_results").fetchone()[0]
     conn.close()
     assert n_runs == 2 and n_sweep == 2
+
+
+def test_empty_params_exit_2(tmp_path):
+    """TOOL-08：params: {} 应报错退出码 2，不得把 base 当扫描结果运行。"""
+    sweep_config = tmp_path / "sweep.yaml"
+    base_config = tmp_path / "base.yaml"
+    base_config.write_text("top_k: 5\n")
+    sweep_config.write_text(yaml.dump({"base": str(base_config), "params": {}}))
+
+    result = subprocess.run(
+        [sys.executable, "scripts/sweep.py", str(sweep_config),
+         "--start", "20240101", "--end", "20240131", "--dry-run"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "params" in result.stderr
+
+
+def test_all_combinations_fail_exit_nonzero(tmp_path, monkeypatch, capsys):
+    """TOOL-04：全组合失败 → 非零退出且不打印「结果已保存到」。"""
+    import scripts.sweep as sweep_mod
+
+    sweep_config = tmp_path / "sweep.yaml"
+    base_config = tmp_path / "base.yaml"
+    base_config.write_text("top_k: 5\n")
+    sweep_config.write_text(
+        yaml.dump({"base": str(base_config), "params": {"top_k": [5, 10]}})
+    )
+    out_db = tmp_path / "never.duckdb"
+
+    def fake_run(cmd, capture_output=True, text=True):
+        return subprocess.CompletedProcess(cmd, 1, "", "ValueError: boom")
+
+    monkeypatch.setattr(sweep_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "sweep.py", str(sweep_config),
+        "--start", "20240101", "--end", "20240131", "--out", str(out_db),
+    ])
+    rc = sweep_mod.main()
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "结果已保存到" not in captured.out
+    assert not out_db.exists()
+
+
+def test_fail_keeps_tail_of_stderr(tmp_path, monkeypatch, capsys):
+    """TOOL-06：FAIL 保留 stderr 末尾真实异常（不截断到 200 字符）。"""
+    import scripts.sweep as sweep_mod
+
+    sweep_config = tmp_path / "sweep.yaml"
+    base_config = tmp_path / "base.yaml"
+    base_config.write_text("top_k: 5\n")
+    sweep_config.write_text(
+        yaml.dump({"base": str(base_config), "params": {"top_k": [5]}})
+    )
+    noisy = "\n".join([
+        "noise " + "x" * 500,
+        "Traceback (most recent call last):",
+        "ValueError: max_positions 必须是正整数: 0",
+    ])
+
+    def fake_run(cmd, capture_output=True, text=True):
+        return subprocess.CompletedProcess(cmd, 1, "", noisy)
+
+    monkeypatch.setattr(sweep_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "sweep.py", str(sweep_config),
+        "--start", "20240101", "--end", "20240131",
+        "--out", str(tmp_path / "o.duckdb"),
+    ])
+    sweep_mod.main()
+    captured = capsys.readouterr()
+    assert "ValueError: max_positions 必须是正整数: 0" in captured.out

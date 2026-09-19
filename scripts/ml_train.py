@@ -75,8 +75,15 @@ def main() -> int:
 
     yaml_path = Path(args.yaml)
     yaml_dir = str(yaml_path.parent)
-    with open(yaml_path, encoding="utf-8") as f:
-        doc = yaml.safe_load(f)
+    try:
+        with open(yaml_path, encoding="utf-8") as f:
+            doc = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print(f"错误: 策略 YAML 解析失败: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(doc, dict):
+        print(f"错误: 策略 YAML 顶层必须是 mapping: {args.yaml}", file=sys.stderr)
+        return 2
 
     models_raw = doc.get("models") or {}
     if args.model not in models_raw:
@@ -130,6 +137,12 @@ def main() -> int:
                 symbols = sorted(set().union(*snaps.values()))
                 pit_members = snaps
                 print(f"训练域: {len(symbols)} 只（index_universe 并集，PIT 过滤）")
+            else:
+                print(
+                    f"警告: filter_rules.index_universe={index_codes} 在 "
+                    f"{args.start}-{args.end} 内未解析到任何成分快照，"
+                    f"训练域回退为全市场——请检查成分表数据是否已同步"
+                )
 
         benchmark = (doc.get("config") or {}).get("benchmark")
 

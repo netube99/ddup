@@ -137,7 +137,10 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
             logger.info("[%s] %s 条件单 %s 成交: fill=%s shares=%d %s",
                         trade_date, symbol, cond["type"], trade.price,
                         trade.shares, log_params)
-            finalize_sell(account, holding, shares)
+            # INV-03: desired=全部持仓，成交量 cap 截断时 finalize_sell 告警
+            # （与 manual_sell 同款文案），不再部分成交且零日志
+            finalize_sell(account, holding, shares, desired=holding.shares,
+                          warn=_warn, trade_date=trade_date)
             break
 
     return trades
@@ -232,11 +235,16 @@ def entry_conditions(account, bars: dict, orders: list[dict],
             shares = int(order["shares"] / 100) * 100
         else:
             shares = int(order["value"] / fill_price / 100) * 100
+        requested = shares
         shares = cap_by_volume(bar, shares, account)
         if shares < 100:
             _warn("[%s] %s 条件买入可买不足 100 股, 跳过",
                            trade_date, symbol)
             continue
+        if shares < requested:
+            # INV-03: volume cap 截断告警（与条件卖出/手动卖出同款口径）
+            _warn("[%s] %s 成交量约束截断买入: %d/%d",
+                  trade_date, symbol, shares, requested)
 
         trade = buy_checked(account, symbol, bar, shares, fill_price,
                             order["type"], trade_date, _warn, costs_fn,

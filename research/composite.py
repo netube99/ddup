@@ -5,8 +5,11 @@
 因子表达式内用 winsorize/neutralize 算子完成），再按滚动窗口内
 因子 IC（或 ICIR）确定带符号权重，逐日加权合成。
 
-前视约定：t 日权重只用 ≤ t-1 日的 IC 估计（rolling 后 shift(1)），
-t 日 IC 依赖 t 日之后才能实现的收益，不可用于当日权重。
+前视约定：t 日权重只用截至 t-h 日已实现的 IC 估计
+（rolling 后 shift(max(1, horizon))；h 为 forward_returns 的收益期间）。
+t 日 IC 依赖 t 日之后 h 日才能实现的收益，不可用于当日权重——
+旧版只 shift(1)，当 h>1 时 t 日权重仍含 t-h..t-1 日尚未实现的收益信息，
+属前视；调用方必须传入与 forward_returns 一致的 horizon。
 
 纯函数模块：不依赖 btcore / engine，输入输出均为 (trade_date, symbol)
 MultiIndex 面板，与 research/factor_eval.py 同风格。
@@ -32,6 +35,7 @@ def combine_factors(
     method: str = "icir",
     window: int = 60,
     min_periods: int | None = None,
+    horizon: int = 1,
 ) -> pd.Series:
     """多因子合成截面得分。
 
@@ -41,12 +45,17 @@ def combine_factors(
         method: "equal"（等权）| "ic"（滚动 IC 加权）| "icir"（滚动 ICIR 加权）。
         window: IC 估计的滚动窗口（交易日）。
         min_periods: 滚动窗口最少有效观测数，默认 max(2, window // 2)。
+        horizon: forward_returns 的收益期间（交易日）。权重按
+            shift(max(1, horizon)) 对齐信息可得时点：t 日权重只用截至
+            t-horizon 日已实现的 IC。必须与实际前瞻期一致，默认 1。
 
     Returns:
         composite 得分 Series（同索引）。前 ~window 日因权重不可估计为 NaN。
     """
     if method not in ("equal", "ic", "icir"):
         raise ValueError(f"未知合成方法: {method!r}，支持 equal/ic/icir")
+    if not isinstance(horizon, (int, np.integer)) or horizon < 1:
+        raise ValueError(f"horizon 必须为正整数（交易日）: {horizon!r}")
     if factor_df.empty:
         return pd.Series(dtype=float, name="composite")
 
@@ -56,11 +65,12 @@ def combine_factors(
 
     mp = min_periods if min_periods is not None else max(2, window // 2)
     ic_df = pd.DataFrame({c: calc_ic(z[c], forward_returns)[0] for c in z.columns})
-    mean = ic_df.rolling(window, min_periods=mp).mean().shift(1)
+    lag = max(1, horizon)
+    mean = ic_df.rolling(window, min_periods=mp).mean().shift(lag)
     if method == "ic":
         w = mean
     else:
-        std = ic_df.rolling(window, min_periods=mp).std().shift(1)
+        std = ic_df.rolling(window, min_periods=mp).std().shift(lag)
         w = mean / std.where(std != 0)
     denom = w.abs().sum(axis=1)
     w = w.div(denom.where(denom != 0), axis=0)

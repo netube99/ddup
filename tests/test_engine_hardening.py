@@ -235,6 +235,24 @@ def test_empty_range_fails_fast_not_completed(tmp_path):
         conn.close()
 
 
+def test_empty_calendar_start_after_end_message():
+    """E2E-04: start>end 报『开始日晚于结束日』而非笼统『日历为空』。"""
+    engine = _make_engine(_DuckStrategy())
+    with pytest.raises(ValueError, match="开始日晚于结束日") as ei:
+        engine.run("20240610", "20240603")
+    assert "20240610" in str(ei.value)
+    assert "20240603" in str(ei.value)
+
+
+def test_empty_calendar_weekend_range_message():
+    """E2E-04: 纯周末区间报可操作信息（含区间，提示无交易日）。"""
+    engine = _make_engine(_DuckStrategy())
+    with pytest.raises(ValueError, match="无交易日") as ei:
+        engine.run("20240608", "20240609")
+    assert "20240608" in str(ei.value)
+    assert "20240609" in str(ei.value)
+
+
 def test_buy_duplicate_symbols_raise():
     """buy 名单重复 symbol → 决策时点 ValueError（双重扣款 + 持仓覆盖的前置拦截）。"""
     engine = _make_engine(_DuckStrategy(
@@ -250,6 +268,33 @@ def test_sell_duplicate_symbols_raise():
     ))
     with pytest.raises(ValueError, match="重复 symbol"):
         engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_sell_shares_exceeds_holdings_raises():
+    """INV-04: sell_shares > 当前持仓 → fail-fast，不静默钳制为清仓。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"buy": [], "sell": ["000001.SZ"],
+                 "sell_shares": {"000001.SZ": 200}}
+    ))
+    engine.account.holdings["000001.SZ"] = make_holding(
+        symbol="000001.SZ", shares=100)
+    with pytest.raises(ValueError, match="超过当前持仓") as ei:
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+    assert "000001.SZ" in str(ei.value)
+    assert "200" in str(ei.value)
+    assert "100" in str(ei.value)
+
+
+def test_sell_shares_equal_to_holdings_passes():
+    """全量卖出的合法写法（sell_shares == 持仓）不受 INV-04 校验拦截。"""
+    engine = _make_engine(_DuckStrategy(
+        actions={"buy": [], "sell": ["000001.SZ"],
+                 "sell_shares": {"000001.SZ": 100}}
+    ))
+    engine.account.holdings["000001.SZ"] = make_holding(
+        symbol="000001.SZ", shares=100)
+    engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+    assert engine.pending_actions["sell_shares"] == {"000001.SZ": 100}
 
 
 def test_select_non_dict_raises():
@@ -314,6 +359,30 @@ def test_provider_clamp_blocks_future():
     assert dates == {"20240501", "20240603"}
 
 
+def test_compute_pending_clamps_passthrough_queries():
+    """INV-02: 决策窗口内三个透传方法被钳到 calc_date。"""
+    seen = {}
+
+    class Probe(_DuckStrategy):
+        def select(self, bars, snapshot, provider):
+            seen["div"] = provider.get_dividends_on_date("20240613")
+            seen["cal"] = provider.get_calendar("20240603", "20240701")
+            seen["bars"] = provider.get_engine_bars(None, "20240701")
+            seen["as_of"] = provider.get_as_of()
+            return {"buy": [], "sell": []}
+
+    engine = _make_engine(Probe())
+    engine.compute_pending("20240606",
+                           {"000001.SZ": make_bar(date="20240606")}, [])
+
+    assert seen["div"] == {}  # 未来除权日不可见
+    assert seen["cal"] and max(seen["cal"]) <= "20240606"
+    assert seen["bars"].index.get_level_values("trade_date").max() <= "20240606"
+    assert seen["as_of"] == "20240606"
+    # 决策窗口关闭 → 锚点复位（实盘 signal 操作单需要未钳制的未来视图）
+    assert engine.provider.get_as_of() is None
+
+
 def test_on_start_runs_with_clamped_asof():
     """run() 在 on_start 前已钳制 provider（前视窗口闭合）。"""
     seen = {}
@@ -364,43 +433,6 @@ def test_slippage_ticks_valid_accepted():
     assert eng._slippage_ticks == 0
     eng2 = _cfg_engine({})
     assert eng2._slippage_ticks == 2
-
-
-def test_tick_size_default_stock_and_etf_override():
-    """默认 tick=0.01（股票）；ETF 策略声明 0.001 后滑点落在毫厘网格。"""
-    assert _cfg_engine({}).tick_size == 0.01
-    etf = _cfg_engine({"tick_size": 0.001, "slippage_ticks": 2})
-    assert etf.tick_size == 0.001
-    assert etf._slip_fn(9.101, 2, 1) == pytest.approx(9.103)
-    stock = _cfg_engine({"slippage_ticks": 2})
-    assert stock._slip_fn(9.101, 2, 1) == pytest.approx(9.12)
-
-
-def test_tick_size_invalid_raises():
-    for bad in (0, -0.001, 1.5, "0.001", True, float("nan")):
-        with pytest.raises(ValueError, match="tick_size"):
-            _cfg_engine({"tick_size": bad})
-
-
-def test_engine_run_applies_etf_tick_size_to_fills(tmp_path):
-    """config.tick_size 进入真实撮合：ETF tick 下成交价落 0.001 网格。"""
-    strat = _DuckStrategy({"buy": ["000001.SZ"], "sell": []})
-    strat.config = {"tick_size": 0.001, "slippage_ticks": 2}
-    provider = DataProvider(MockDataBackend())
-    db = str(tmp_path / "etf_tick.duckdb")
-    engine = Engine(strat, provider, initial_capital=1_000_000, db_path=db)
-    engine.run("20240603", "20240607")
-    conn = connect_result_db(db, read_only=True)
-    try:
-        trade_date, price = conn.execute(
-            "SELECT date, price FROM trade_log WHERE side='BUY' ORDER BY id LIMIT 1"
-        ).fetchone()
-    finally:
-        conn.close()
-    bar = MockDataBackend().query_bars(["000001.SZ"], trade_date, trade_date)
-    open_px = float(bar.loc[(trade_date, "000001.SZ"), "open"])
-    assert price == pytest.approx(round(open_px + 2 * 0.001, 3))
-    assert price != pytest.approx(round(open_px + 2 * 0.01, 2))
 
 
 def test_order_volume_ratio_invalid_raises():

@@ -1,8 +1,11 @@
+import logging
+
 import pytest
 
 from btcore import limits
 from btcore.costs import calc_trade_costs
 from btcore.match.conditions import (
+    entry_conditions,
     exit_conditions,
     handle_stop_loss,
     handle_take_profit,
@@ -182,3 +185,43 @@ def test_exit_condition_slip_ticks_default_falls_back():
                              calc_trade_costs, apply_slippage)
 
     assert trades[0].price == 9.48  # 回退 account.slippage_ticks
+
+
+# ── INV-03: 条件单被 volume cap 截断必须告警（manual 路径同款）──
+
+
+def test_exit_conditions_warns_on_volume_cap(caplog):
+    holding = make_holding(shares=100_000,
+                           conditions=[{"type": "STOP_LOSS", "price": 9.5}])
+    account = make_account(cash=0.0, holdings={"000001.SZ": holding},
+                           order_volume_ratio=0.05)
+    # cap = int(1000 手 * 0.05) * 100 = 5000 股 < 请求 100000
+    bar = make_bar(low=9.4, vol=1000)
+
+    with caplog.at_level(logging.WARNING):
+        trades = exit_conditions(account, {"000001.SZ": bar},
+                                 limits.get_limit_prices, calc_trade_costs,
+                                 apply_slippage)
+
+    assert len(trades) == 1
+    assert trades[0].shares == 5000
+    assert "成交量约束截断" in caplog.text
+    assert "5000/100000" in caplog.text
+
+
+def test_entry_conditions_warns_on_volume_cap(caplog):
+    account = make_account(cash=1_000_000.0, order_volume_ratio=0.05)
+    order = {"symbol": "000001.SZ", "type": "LIMIT_BUY", "price": 9.0,
+             "shares": 100_000}
+    # open 8.5 <= limit 9.0 → 触发; cap = 5000 股 < 请求 100000
+    bar = make_bar(open=8.5, high=8.6, low=8.4, vol=1000)
+
+    with caplog.at_level(logging.WARNING):
+        trades = entry_conditions(account, {"000001.SZ": bar}, [order], 10,
+                                  limits.get_limit_prices, calc_trade_costs,
+                                  apply_slippage)
+
+    assert len(trades) == 1
+    assert trades[0].shares == 5000
+    assert "成交量约束截断" in caplog.text
+    assert "5000/100000" in caplog.text

@@ -13,9 +13,12 @@ YAML 重新回放即得到该策略口径下的明日操作。
                   与回测结果库同 schema，report/cross_validate/replay 直接可用
 """
 
+import bisect
 import json
 import logging
+import math
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import pandas as pd
 
@@ -26,6 +29,70 @@ from btcore.match.core import finalize_sell, is_valid_price
 logger = logging.getLogger(__name__)
 
 LIVE_RUN_ID = 1  # 衍生表统一挂在 run_id=1（每个账本库一个逻辑 run）
+LEDGER_SCHEMA_VERSION = 1  # ledger_meta.schema_version 当前版本（LIVE-14）
+
+
+# ── 输入校验工具（LIVE-01/02/06）──
+
+
+def require_finite(value, field: str) -> float:
+    """数值入口统一 fail-fast：非数值或 NaN/Inf 直接 ValueError。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} 非法（非数值）: {value!r}") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{field} 非法（NaN/Inf）: {value!r}")
+    return number
+
+
+def validate_date_format(date: str) -> str:
+    """校验 YYYYMMDD 八位真实日期（INFRA-05）。"""
+    text = str(date)
+    if len(text) != 8 or not text.isdigit():
+        raise ValueError(f"日期需为 YYYYMMDD 八位数字: {date!r}")
+    try:
+        datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        raise ValueError(f"日期非法: {date!r}") from None
+    return text
+
+
+def validate_open_day(date: str, provider) -> None:
+    """init --date 开市日校验：非开市日 fail-fast 并提示最近开市日。"""
+    if date not in provider.get_calendar(date, date):
+        prev = provider.prev_trading_day(date)
+        hint = f"，最近开市日 {prev}" if prev else "（早于行情数据范围？）"
+        raise ValueError(f"{date} 不是开市日{hint}")
+
+
+def has_market_data(provider, date: str) -> bool:
+    """全市场当日是否有行情（与 signal 对 signal_date 有 bars 的判据同口径）。"""
+    bars = provider.get_engine_bars(
+        None, date, lookback_start=date, columns=["close"],
+    )
+    return not bars.empty
+
+
+def validate_fill_dates(fills: list[dict], calendar: list[str],
+                        default_date: str | None = None) -> list[str]:
+    """校验 fill 显式/缺省日期均落在日历内（LIVE-01）。
+
+    返回问题描述列表（含行号/日期/symbol）；空列表 = 全部合法。
+    """
+    open_days = set(calendar)
+    problems = []
+    for i, f in enumerate(fills, start=1):
+        if not isinstance(f, dict):
+            problems.append(f"第 {i} 行: 非法条目 {f!r}")
+            continue
+        date = str(f.get("date") or default_date or "")
+        if date not in open_days:
+            problems.append(
+                f"第 {i} 行: date={date!r} symbol={f.get('symbol')!r}"
+            )
+    return problems
+
 
 LEDGER_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS ledger_meta (
@@ -86,6 +153,14 @@ class LedgerStore:
         self.conn = database.init_backtest_db(path)
         self.conn.execute(LEDGER_SCHEMA_SQL)
         self.conn.commit()
+        # schema 版本治理（LIVE-14）：缺失 = 兼容旧账本，未知版本 fail-fast
+        version = self.get_meta("schema_version")
+        if version is not None and version != str(LEDGER_SCHEMA_VERSION):
+            self.conn.close()
+            raise ValueError(
+                f"账本 schema_version={version} 不受支持"
+                f"（当前版本 {LEDGER_SCHEMA_VERSION}）——请使用对应版本的 ddup"
+            )
 
     def close(self):
         self.conn.close()
@@ -116,28 +191,35 @@ class LedgerStore:
         """
         if self.is_initialized():
             raise ValueError("账本已初始化（initial_capital 已存在）")
-        if initial_cash < 0 or initial_capital <= 0:
+        start_date = validate_date_format(start_date)
+        cash = require_finite(initial_cash, "initial_cash")
+        capital = require_finite(initial_capital, "initial_capital")
+        if cash < 0 or capital <= 0:
             raise ValueError(
-                f"initial_cash/initial_capital 非法: {initial_cash}, {initial_capital}"
+                f"initial_cash/initial_capital 非法: {cash}, {capital}"
             )
+        self.set_meta("schema_version", str(LEDGER_SCHEMA_VERSION))
         self.set_meta("start_date", start_date)
-        self.set_meta("initial_cash", repr(float(initial_cash)))
-        self.set_meta("initial_capital", repr(float(initial_capital)))
+        self.set_meta("initial_cash", repr(cash))
+        self.set_meta("initial_capital", repr(capital))
 
     @property
     def start_date(self) -> str:
         v = self.get_meta("start_date")
         if v is None:
             raise ValueError("账本未初始化")
-        return v
+        return validate_date_format(v)
+
+    def _finite_meta(self, key: str) -> float:
+        return require_finite(self.get_meta(key) or "0", key)
 
     @property
     def initial_cash(self) -> float:
-        return float(self.get_meta("initial_cash") or "0")
+        return self._finite_meta("initial_cash")
 
     @property
     def initial_capital(self) -> float:
-        return float(self.get_meta("initial_capital") or "0")
+        return self._finite_meta("initial_capital")
 
     # ── 成交 ──
 
@@ -149,6 +231,10 @@ class LedgerStore:
         side = str(side).strip().upper()
         if side not in _FILL_SIDES:
             raise ValueError(f"非法 fill side: {side!r}（允许 {sorted(_FILL_SIDES)}）")
+        price = require_finite(price, f"{side} price")
+        commission = require_finite(commission, f"{side} commission")
+        stamp_tax = require_finite(stamp_tax, f"{side} stamp_tax")
+        transfer_fee = require_finite(transfer_fee, f"{side} transfer_fee")
         if side in ("BUY", "SELL", "OPENING"):
             if not symbol or not isinstance(shares, int) or shares <= 0:
                 raise ValueError(
@@ -160,10 +246,18 @@ class LedgerStore:
             "INSERT INTO ledger_fills (date, symbol, side, price, shares,"
             " commission, stamp_tax, transfer_fee, reason, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (date, symbol, side, float(price), int(shares),
-             float(commission), float(stamp_tax), float(transfer_fee),
-             reason, created_at),
+            (date, symbol, side, price, int(shares),
+             commission, stamp_tax, transfer_fee, reason, created_at),
         )
+
+    def _idempotency_key(self, row) -> tuple:
+        """幂等判重键：仅用于比较，不写回归一化值（LIVE-15）。"""
+        date, symbol, side, price, shares, commission, stamp_tax, \
+            transfer_fee, reason = row
+        return (str(date), str(symbol), str(side).strip().upper(),
+                round(float(price), 6), int(shares),
+                round(float(commission), 6), round(float(stamp_tax), 6),
+                round(float(transfer_fee), 6), str(reason))
 
     def append_fills_idempotent(self, fills: list[dict],
                                 created_at: str,
@@ -171,35 +265,53 @@ class LedgerStore:
         """幂等追加：完全重复的成交跳过（agent 重跑同一 statement 不双重入账）。
 
         重复判定按 (date, symbol, side, price, shares, commission,
-        stamp_tax, transfer_fee, reason) 全字段归一化后精确匹配。
+        stamp_tax, transfer_fee, reason) 全字段归一化后精确匹配；归一化仅用于
+        判重，落库保留原始数值（LIVE-15）。OPENING 仅用于 init 建账，sync
+        批量入口拒绝（LIVE-08）。
         default_date: fill 缺 date 时的缺省成交日（sync.yaml 的 statement
         级 date——见 docs/cli_and_research.md §2.9 的 fills 格式）。
         返回 (appended, skipped)。
         """
         existing = {
-            (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8])
+            self._idempotency_key(r)
             for r in self.conn.execute(
                 "SELECT date, symbol, side, price, shares, commission,"
                 " stamp_tax, transfer_fee, reason FROM ledger_fills"
             ).fetchall()
         }
         appended = skipped = 0
-        for f in fills:
-            # side 与 append_fill 同一归一化口径，否则小写 side 重跑被判不重复
+        for i, f in enumerate(fills, start=1):
             side = str(f["side"]).strip().upper()
-            key = (str(f.get("date") or default_date or ""), f["symbol"], side,
-                   round(float(f["price"]), 6), int(f["shares"]),
-                   round(float(f.get("commission") or 0.0), 6),
-                   round(float(f.get("stamp_tax") or 0.0), 6),
-                   round(float(f.get("transfer_fee") or 0.0), 6),
-                   str(f.get("reason") or "MANUAL"))
+            if side == "OPENING":
+                raise ValueError(
+                    f"第 {i} 行 side=OPENING 不被 sync 接受"
+                    "——OPENING 仅用于 init --positions 建账"
+                )
+            date = str(f.get("date") or default_date or "")
+            price = require_finite(f["price"], f"第 {i} 行 price")
+            shares_value = require_finite(f["shares"], f"第 {i} 行 shares")
+            if not float(shares_value).is_integer():
+                raise ValueError(
+                    f"第 {i} 行 shares 必须为整数: {f['shares']!r}"
+                )
+            shares = int(shares_value)
+            commission = require_finite(
+                f.get("commission") or 0.0, f"第 {i} 行 commission")
+            stamp_tax = require_finite(
+                f.get("stamp_tax") or 0.0, f"第 {i} 行 stamp_tax")
+            transfer_fee = require_finite(
+                f.get("transfer_fee") or 0.0, f"第 {i} 行 transfer_fee")
+            reason = str(f.get("reason") or "MANUAL")
+            key = self._idempotency_key(
+                (date, f["symbol"], side, price, shares, commission,
+                 stamp_tax, transfer_fee, reason))
             if key in existing:
                 skipped += 1
                 continue
-            self.append_fill(key[0], key[1], key[2], price=key[3],
-                             shares=key[4], commission=key[5],
-                             stamp_tax=key[6], transfer_fee=key[7],
-                             reason=key[8], created_at=created_at)
+            self.append_fill(date, f["symbol"], side, price=price,
+                             shares=shares, commission=commission,
+                             stamp_tax=stamp_tax, transfer_fee=transfer_fee,
+                             reason=reason, created_at=created_at)
             existing.add(key)  # 同批完全重复的 fill 也跳过
             appended += 1
         return appended, skipped
@@ -284,30 +396,49 @@ class LedgerStore:
 # ── 成交应用（账本 → 账户状态机）──
 
 
+def _check_cash_nonneg(account: types.Account, today: str, note: str) -> None:
+    """LIVE-13：应用 fill 后现金为负 → fail-fast（不允许持久化负现金）。"""
+    if account.cash < -1e-9:
+        raise ValueError(
+            f"[{today}] 应用成交后现金为负 {account.cash:.2f}（{note}）"
+            "——账本数据不一致，拒绝继续"
+        )
+
+
 def apply_fill(account: types.Account, fill: dict, today: str) -> types.Trade | None:
     """把一条账本成交应用到账户。返回 Trade（BUY/SELL）或 None（ADJUST）。
 
     与撮合层的差异：价格/费用用真实成交值，无滑点、无费用模型、
-    无涨跌停/成交量校验（券商已成交即是事实）。
+    无涨跌停/成交量校验（券商已成交即是事实）。数值入口全部 isfinite
+    校验（LIVE-02），应用后现金为负即 fail-fast（LIVE-13）。
     """
     side = fill["side"]
     if side == "ADJUST":
-        account.cash += fill["price"]  # ADJUST 的金额存在 price 字段
+        amount = require_finite(fill["price"], "ADJUST 金额")
+        account.cash += amount  # ADJUST 的金额存在 price 字段
+        _check_cash_nonneg(account, today, "ADJUST")
         return None
 
     symbol = fill["symbol"]
-    shares = fill["shares"]
-    turnover = fill["price"] * shares
+    price = require_finite(fill["price"], f"{side} {symbol} price")
+    shares = int(require_finite(fill["shares"], f"{side} {symbol} shares"))
+    commission = require_finite(fill.get("commission") or 0.0,
+                                f"{side} {symbol} commission")
+    stamp_tax = require_finite(fill.get("stamp_tax") or 0.0,
+                               f"{side} {symbol} stamp_tax")
+    transfer_fee = require_finite(fill.get("transfer_fee") or 0.0,
+                                  f"{side} {symbol} transfer_fee")
+    turnover = price * shares
 
     if side == "BUY":
-        net = -(turnover + fill["commission"] + fill["transfer_fee"])
+        net = -(turnover + commission + transfer_fee)
         account.cash += net
         holding = account.holdings.get(symbol)
         if holding is not None:
             # 加仓：加权均价，保留原 entry_date（红利税持股期口径偏保守）
             total_shares = holding.shares + shares
             holding.entry_price = (
-                holding.entry_price * holding.shares + fill["price"] * shares
+                holding.entry_price * holding.shares + price * shares
             ) / total_shares
             holding.cost += turnover
             holding.shares = total_shares
@@ -315,14 +446,15 @@ def apply_fill(account: types.Account, fill: dict, today: str) -> types.Trade | 
         else:
             account.holdings[symbol] = types.Holding(
                 symbol=symbol, shares=shares, entry_date=today,
-                entry_price=fill["price"], cost=turnover,
-                last_price=fill["price"], locked=True,
+                entry_price=price, cost=turnover,
+                last_price=price, locked=True,
             )
+        _check_cash_nonneg(account, today, f"BUY {symbol}")
         return types.Trade(
             date=today, symbol=symbol, side="BUY", trigger=fill["reason"],
-            price=fill["price"], shares=shares, turnover=turnover,
-            commission=fill["commission"], stamp_tax=0.0,
-            transfer_fee=fill["transfer_fee"], slippage_amount=0.0,
+            price=price, shares=shares, turnover=turnover,
+            commission=commission, stamp_tax=0.0,
+            transfer_fee=transfer_fee, slippage_amount=0.0,
             net_amount=net, reason=fill["reason"],
         )
 
@@ -334,14 +466,15 @@ def apply_fill(account: types.Account, fill: dict, today: str) -> types.Trade | 
         raise ValueError(
             f"[{today}] 卖出 {symbol} {shares} 股超过持仓 {holding.shares}——账本不一致"
         )
-    net = turnover - fill["commission"] - fill["stamp_tax"] - fill["transfer_fee"]
+    net = turnover - commission - stamp_tax - transfer_fee
     account.cash += net
     finalize_sell(account, holding, shares)
+    _check_cash_nonneg(account, today, f"SELL {symbol}")
     return types.Trade(
         date=today, symbol=symbol, side="SELL", trigger=fill["reason"],
-        price=fill["price"], shares=shares, turnover=turnover,
-        commission=fill["commission"], stamp_tax=fill["stamp_tax"],
-        transfer_fee=fill["transfer_fee"], slippage_amount=0.0,
+        price=price, shares=shares, turnover=turnover,
+        commission=commission, stamp_tax=stamp_tax,
+        transfer_fee=transfer_fee, slippage_amount=0.0,
         net_amount=net, reason=fill["reason"],
     )
 
@@ -352,16 +485,18 @@ def seed_opening(account: types.Account, store: LedgerStore, provider,
 
     holding_days 种子值 = entry 到 init 之间引擎会经历的结算次数
     （交易日历上 (entry, init) 的开区间长度），使回放首日 compute_pending
-    递增后与连续运行的引擎口径一致。
+    递增后与连续运行的引擎口径一致。init 非开市日时锚定 ≤init 的最近
+    开市日（bisect 防御，LIVE-06）。
     """
     calendar = provider.get_calendar("20000101", init_date)
-    init_idx = {d: i for i, d in enumerate(calendar)}
+    anchor_idx = bisect.bisect_right(calendar, init_date) - 1
     for f in store.fills(side_filter=frozenset({"OPENING"})):
         symbol, shares = f["symbol"], f["shares"]
         entry = f["date"]
-        if entry not in init_idx:
+        if entry not in calendar:
             logger.warning("OPENING %s entry_date %s 非交易日，口径近似", symbol, entry)
-        seed_days = max(0, init_idx.get(init_date, 0) - init_idx.get(entry, 0))
+        entry_idx = max(0, bisect.bisect_right(calendar, entry) - 1)
+        seed_days = max(0, anchor_idx - entry_idx)
         existing = account.holdings.get(symbol)
         if existing is not None:
             total = existing.shares + shares
@@ -504,11 +639,20 @@ def light_replay(store: LedgerStore, provider, end: str) -> types.Account:
 def reconcile(store: LedgerStore, provider, date: str,
               actual_cash: float, actual_holdings: dict) -> ReconReport:
     """对账：轻量回放衍生状态 vs 券商实际。持仓股数必须逐只相等。"""
+    actual_cash = require_finite(actual_cash, "actual_cash")
+    holdings: dict[str, int] = {}
+    for symbol, shares in actual_holdings.items():
+        value = require_finite(shares, f"holdings[{symbol}].shares")
+        if not float(value).is_integer() or value <= 0:
+            raise ValueError(
+                f"holdings[{symbol}].shares 必须为正整数: {shares!r}"
+            )
+        holdings[str(symbol)] = int(value)
     account = light_replay(store, provider, date)
     derived = {s: h.shares for s, h in account.holdings.items()}
     diffs = {}
-    for symbol in sorted(set(derived) | set(actual_holdings)):
-        d, a = derived.get(symbol, 0), int(actual_holdings.get(symbol, 0))
+    for symbol in sorted(set(derived) | set(holdings)):
+        d, a = derived.get(symbol, 0), holdings.get(symbol, 0)
         if d != a:
             diffs[symbol] = (d, a)
     delta = actual_cash - account.cash
@@ -516,7 +660,7 @@ def reconcile(store: LedgerStore, provider, date: str,
         date=date, ok=not diffs,
         holding_diffs=diffs,
         cash_derived=account.cash, cash_actual=actual_cash, cash_delta=delta,
-        derived_holdings=derived, actual_holdings=dict(actual_holdings),
+        derived_holdings=derived, actual_holdings=holdings,
     )
 
 
@@ -627,20 +771,23 @@ def build_op_sheet(engine: Engine, provider, today: str) -> dict:
 
     notices = []
     day_bars = engine.bars_by_date.get(today)
+    # universe 外持仓（切策略/手动买入）用补价面板判停牌，避免误报（LIVE-03）。
+    # t1_lock 不再提示：操作单面向次日，届时当日买入已解锁（LIVE-04 删除死代码）
+    fallback_today = (build_price_fallback(
+        provider, set(account.holdings), [today], engine) or {}).get(today, {})
     for symbol in sorted(account.holdings.keys()):
-        if day_bars is None or symbol not in day_bars.index:
-            notices.append({"type": "suspended", "symbol": symbol,
-                            "message": f"{symbol} 今日无行情（停牌？），明日不可操作"})
+        if day_bars is not None and symbol in day_bars.index:
+            continue
+        if symbol in fallback_today:
+            continue
+        notices.append({"type": "suspended", "symbol": symbol,
+                        "message": f"{symbol} 今日无行情（停牌？），明日不可操作"})
     if next_day:
         divs = provider.get_dividends_on_date(next_day) or {}
         for symbol in sorted(account.holdings.keys()):
             if symbol in divs:
                 notices.append({"type": "ex_div", "symbol": symbol,
                                 "message": f"{symbol} 明日除权除息: {divs[symbol]}"})
-    locked = [s for s, h in account.holdings.items() if h.locked]
-    for s in sorted(locked):
-        notices.append({"type": "t1_lock", "symbol": s,
-                        "message": f"{s} 今日买入，明日可卖（T+1 已解锁于明日）"})
 
     return {
         "signal_date": today,

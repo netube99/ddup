@@ -4,7 +4,7 @@
 在 bare_bones 的骨架之上新增：
   - on_fills   — 成交感知 → 条件单卖出后的冷却期
   - on_tick    — 每日冷却期递减 + ConditionBuilder 状态修剪
-  - buy_weights — 按因子得分比例分配买入资金
+  - buy_weights — 按目标权重（整个 target 集合归一）分配买入资金
   - calc_conditions holding_days 自适应 — 新仓紧止损，老仓放宽
   - REQUIRED_FIELDS — 声明策略命令式访问的额外列
 
@@ -32,7 +32,7 @@ class RollingRanker(Strategy):
         self._top_k = int(self.config.get("top_k", 5))
         self._cooldown_days = int(self.config.get("cooldown_days", 3))
 
-        # 冷却期 map：symbol → 冷却截止日 (YYYYMMDD int)
+        # 冷却期 map：symbol → 剩余交易日数（成交当日为第 1 天）
         self._cooldown: dict[str, int] = {}
 
     # ── on_fills: 成交感知 ────────────────────────────────────────────────
@@ -48,26 +48,25 @@ class RollingRanker(Strategy):
             if t.side == "SELL" and t.trigger in (
                 "STOP_LOSS", "TAKE_PROFIT", "TRAILING_TP"
             ):
-                self._cooldown[t.symbol] = int(t.date) + self._cooldown_days
+                # 交易日计数器，禁止 int(t.date) 日期差（跨月跳变）
+                self._cooldown[t.symbol] = self._cooldown_days
 
     # ── on_tick: 每日状态维护 ─────────────────────────────────────────────
     def on_tick(self, bars, snapshot, provider) -> None:
         """每日运行——策略即使在 select 中自行管理调仓节奏，on_tick 也不受影响。
 
         维护项：
-          1. 冷却期到期清理
+          1. 冷却期递减（交易日口径）
           2. ConditionBuilder 修剪已平仓标的的 trailing 锚点
         """
         if not bars:
             return
 
-        date_str = next(iter(bars.values())).get("trade_date", "")
-        date_int = int(date_str) if date_str else 0
-
-        # 冷却期到期 → 允许重新买入
-        expired = [s for s, d in self._cooldown.items() if d <= date_int]
-        for s in expired:
-            del self._cooldown[s]
+        # 冷却期递减：每个决策日 -1，跌穿 0 解除
+        for sym in list(self._cooldown):
+            self._cooldown[sym] -= 1
+            if self._cooldown[sym] < 0:
+                del self._cooldown[sym]
 
         # 清理已平仓标的的 trailing high 锚点（基类默认 on_tick 负责）
         super().on_tick(bars, snapshot, provider)
@@ -97,13 +96,13 @@ class RollingRanker(Strategy):
         buy_list = sorted(target - current)
         sell_list = sorted(current - target)
 
-        # ── buy_weights: 按因子得分比例分配资金 ─────────────────────────
-        # 引擎等权分配是 total_value / max_positions。
-        # 提供 buy_weights 可让高分标的获得更多资金。所有权重和 ≤ 1，
-        # 剩余现金保留在账户中。
+        # ── buy_weights: 按账户总价值的目标权重分配 ─────────────────────
+        # 归一分母是整个 target 集合（而非仅新买入名单）：新买入按其目标
+        # 权重下单，已持仓名不重复计入分母/买满——否则满仓轮动时单只新买入
+        # 会索要 90% 总资产，被现金护栏系统性跳过。权重×总资产即目标市值。
         buy_weights = None
         if buy_list:
-            raw = score.loc[buy_list].clip(lower=0)
+            raw = sorted_score.loc[sorted(target)].clip(lower=0)
             total = raw.sum()
             if total > 0:
                 # 留 10% 现金缓冲

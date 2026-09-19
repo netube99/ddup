@@ -4,7 +4,7 @@
 # 在 bare_bones 基础之上新增：
 #   - on_fills 成交感知 → 冷却期管理
 #   - on_tick 每日维护 → 冷却期递减 + 条件单状态修剪
-#   - buy_weights 按得分比例分配资金
+#   - buy_weights 按目标权重分配资金（整个 target 集合归一，新买入不被现金护栏跳过）
 #   - calc_conditions 中 holding_days 自适应调参
 #   - REQUIRED_FIELDS 列裁剪声明
 #   - 费率/滑点覆盖默认值

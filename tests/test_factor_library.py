@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from btcore.factors import ops
 from btcore.factors.expr import evaluate_expr
 from btcore.factors.library import (
     compute_breadth,
@@ -90,6 +91,35 @@ class TestLoad:
     def test_reserved_name_rejected(self, tmp_path):
         path = _write_lib(tmp_path, 'factors:\n  close:\n    expr: "open"\n')
         with pytest.raises(ValueError, match="保留列名"):
+            load_library(path)
+
+    def test_operator_name_rejected(self, tmp_path):
+        """FAC-07：算子名（std 等）不得登记为因子名——否则依赖提取静默丢弃。"""
+        path = _write_lib(tmp_path, 'factors:\n  std:\n    expr: "close_hfq"\n')
+        with pytest.raises(ValueError, match="保留列名"):
+            load_library(path)
+
+    def test_reserved_names_cover_all_operators(self):
+        """FAC-07：保留字集合覆盖全部算子名，且现有因子库无冲突。"""
+        from btcore.factors.library import _RESERVED_NAMES
+
+        assert ops.OP_NAMES <= _RESERVED_NAMES
+        lib = load_library()
+        assert not (set(lib) & ops.OP_NAMES)
+
+    def test_non_string_expr_rejected(self, tmp_path):
+        """FAC-05：expr 非字符串须在 ast 调用前 fail-fast 为 ValueError。"""
+        path = _write_lib(tmp_path, "factors:\n  bad:\n    expr: 5\n")
+        with pytest.raises(ValueError, match="表达式非法"):
+            load_library(path)
+
+    def test_non_string_where_rejected(self, tmp_path):
+        """FAC-05：where 非字符串同样包装为 ValueError。"""
+        path = _write_lib(
+            tmp_path,
+            'factors:\n  bad:\n    expr: "close"\n    where: 5\n',
+        )
+        with pytest.raises(ValueError, match="表达式非法"):
             load_library(path)
 
     def test_cycle_rejected(self, tmp_path):
@@ -245,6 +275,46 @@ class TestResolve:
             resolve_closure(["nope"])
 
 
+class _SuspensionBackend:
+    """合成 backend：B 股第 10~39 日停牌（无行），验证分块历史携带。
+
+    ts 窗口按「最近 max_window 行」而非日历天回溯；分块边界若丢掉停牌前
+    的行，复牌日因子值会与全量/引擎口径不一致（FAC-01）。
+    """
+
+    def __init__(self, n_days: int = 60):
+        self._dates = pd.bdate_range("2024-01-02", periods=n_days).strftime(
+            "%Y%m%d"
+        ).tolist()
+        gap = set(self._dates[10:40])
+        rows = []
+        for i, d in enumerate(self._dates):
+            for s, base, slope in (("A", 10.0, 0.3), ("B", 40.0, 0.3),
+                                   ("C", 30.0, 0.0)):
+                if s == "B" and d in gap:
+                    continue
+                rows.append((d, s, base + slope * i))
+        self._bars = pd.DataFrame(
+            {"close": [r[2] for r in rows], "adj_factor": 1.0},
+            index=pd.MultiIndex.from_tuples(
+                [(r[0], r[1]) for r in rows], names=["trade_date", "symbol"]
+            ),
+        )
+
+    def get_calendar(self, start: str, end: str) -> list[str]:
+        return [d for d in self._dates if start <= d <= end]
+
+    def query_bars(self, symbols, start, end, columns=None):
+        dates = self._bars.index.get_level_values("trade_date")
+        df = self._bars[(dates >= start) & (dates <= end)]
+        if symbols is not None:
+            df = df[df.index.get_level_values("symbol").isin(symbols)]
+        df = df.copy()
+        if columns is not None:
+            df = df.loc[:, sorted(set(columns))]
+        return df
+
+
 class TestComputeBreadth:
     """2.5: compute_breadth 流式计算坍缩因子。"""
 
@@ -286,6 +356,45 @@ class TestComputeBreadth:
             check_names=False,
             rtol=1e-9,
         )
+
+    def test_chunk_days_invariance_with_suspension(self, tmp_path):
+        """FAC-01 回归：停牌缺口下输出必须与 chunk_days 无关（逐日完全一致）。
+
+        旧实现按日历回看 max_window 行，停牌股复牌日窗口历史被截断；
+        新实现逐 symbol 携带最近 max_window 行，停牌前后行连续。
+        """
+        path = _write_lib(
+            tmp_path,
+            "factors:\n"
+            "  dev5:\n"
+            '    expr: "mean(close_hfq / ma(close_hfq, 5) - 1)"\n',
+        )
+        lib = load_library(path)
+        backend = _SuspensionBackend()
+        cal = backend.get_calendar("00000101", "99991231")
+        out = {
+            c: compute_breadth("dev5", backend, lib, cal[0], cal[-1], chunk_days=c)
+            for c in (1, 17, 60, 1000)
+        }
+        ref = out[1000]
+        assert list(ref.index) == cal
+        assert ref.iloc[4:].notna().all()  # 前 4 日为窗口预热
+        assert ref.iloc[40:].notna().all()  # 复牌后（B 停牌缺口后）仍有值
+        for c in (1, 17, 60):
+            pd.testing.assert_series_equal(
+                out[c].astype(float), ref.astype(float),
+                check_names=False, rtol=1e-12, atol=0,
+            )
+
+    def test_warmup_anchor_is_first_trading_day(self):
+        """FAC-01：warmup 锚点 = calendar[0]（与 engine.py 一致），
+        非交易日 start 不改变输出。"""
+        lib = load_library()
+        backend = MockDataBackend()
+        cal = backend.get_calendar("20240601", "20240628")  # 20240601 周六
+        a = compute_breadth("adv_dec_ratio", backend, lib, "20240601", "20240628")
+        b = compute_breadth("adv_dec_ratio", backend, lib, cal[0], "20240628")
+        pd.testing.assert_series_equal(a, b, check_names=False)
 
     def test_empty_calendar_returns_empty_series(self, tmp_path):
         """无交易日时应返回空 Series。"""

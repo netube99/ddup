@@ -9,7 +9,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 0. 五要素（写之前逐项填空，填不满=临场发挥）
 
-1. **信号周期**：select() 每日运行；调仓节奏策略自管（时间门控/排名阈值），非调仓日返回空名单
+1. **信号周期**：select() 每日运行；调仓节奏策略自管（时间门控/排名阈值），非调仓日返回空名单。调仓间隔/min_hold/冷却期一律**交易日计数**（`_days_since_rebalance` 每决策日 +1；最短持有读 `holding.holding_days`；冷却 per-symbol 剩余计数器），禁用 `int(YYYYMMDD)` 日期差（跨月跳变强插调仓）
 2. **入场两层**：过滤=方向（filter_rules + factor_specs.ascending），触发=下单时点（buy 名单 / buy_conditions）
 3. **出场**：至少一条离场路径（conditions / calc_conditions），多路径写清优先级（首条触发即 break）
 4. **仓位**：先固定（等权/top_k），逻辑验证后再 buy_weights/target_value
@@ -48,7 +48,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 - target_value：dict{symbol: ≥0 有限值}；**与 buy/sell/buy_conditions 全互斥**；0=清仓、未出现不动；trigger="TARGET"，先卖后买
 - sell_shares：dict，键必须 ⊆ sell，值正整数
 - sell_reasons：dict{symbol: 非空字符串}，键必须 ⊆ sell；按 symbol 覆盖手动卖出的 trigger（缺省 "MANUAL"）——卖出来源归因（如 TREND_BREAK 盘前评估离场），on_fills 冷却期记账与 ML holding 标签都消费 trigger
-- buy_weights：dict，键与 buy **精确一致**，单项∈(0,1]、和≤1；None=等权
+- buy_weights：dict，键与 buy **精确一致**，单项∈(0,1]、和≤1；None=等权。权重是 `total_value` 的分数（非名单内相对比例）——归一用整个 target 集合，只在新买入间归一会让单只新买入索要 ~90% 总资产、被现金护栏跳过（rolling_ranker 教训）
 - buy_conditions：list[dict]，每条必含 symbol/type/price(>0)，value 与 shares 恰填一个；symbol 不得与 buy/sell 重叠；T 日声明 T+1 盘中触发，未触发自动失效
   - **互斥是同日全量校验**：on_tick 返回的 buy_conditions 会与同日 select 的 buy 名单合并校验——若 on_tick 对某 symbol 挂了条件单，select 必须从 buy_list 排除同一 symbol（否则 ValueError）。
     惯用模式（见 condition_hunter）：on_tick 把已挂单 symbol 记入 `self._breakout_symbols`，select 里 `buy_list = [s for s in buy_list if s not in self._breakout_symbols]`，调仓日再重置该集合。
@@ -58,7 +58,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 4. YAML config 引擎键（默认值）
 
-`initial_capital`=1000000、`max_positions`=20（超限仅 INFO 不拦截）、`slippage_ticks`=2（非负 int）、`condition_slippage_ticks`=None（沿用前者）、`tick_size`=0.01（品种最小变动价位，∈(0,1]；A 股股票 0.01、场内 ETF 0.001——ETF 策略必须显式声明，否则滑点放大 10 倍）、`execution_price`="open"（open/close）、`commission_rate`=0.00015、`min_commission`=5.0、`stamp_tax_rate`=0.0005（仅卖）、`transfer_fee_rate`=0.00001、`benchmark`=None（自动推导：单指数→该指数，否则 000300.SH；空串=无基准）、`order_volume_ratio`=None（单笔≤vol 手×ratio；须 ∈(0,1]，超 1 或非正 → ValueError）、`quiet_skips`=False、`ml_log`。自定义键（top_k/rebalance_interval 等）引擎不消费，config.get() 自读。顶层键：strategy(module:Class)/config/factor_specs/filter_rules/conditions/factor_library(自定义因子库路径)/models。
+`initial_capital`=1000000、`max_positions`=20（超限仅 INFO 不拦截）、`slippage_ticks`=2（非负 int）、`condition_slippage_ticks`=None（沿用前者）、`execution_price`="open"（open/close）、`commission_rate`=0.00015、`min_commission`=5.0、`stamp_tax_rate`=0.0005（仅卖）、`transfer_fee_rate`=0.00001、`benchmark`=None（自动推导：单指数→该指数，否则 000300.SH；空串=无基准）、`order_volume_ratio`=None（单笔≤vol 手×ratio；须 ∈(0,1]，超 1 或非正 → ValueError）、`quiet_skips`=False、`ml_log`。自定义键（top_k/rebalance_interval 等）引擎不消费，config.get() 自读。顶层键：strategy(module:Class)/config/factor_specs/filter_rules/conditions/factor_library(自定义因子库路径)/models。
 程序化构造（免 YAML）：`build_strategy(cls, config, factor_specs=, filter_rules=, factor_library=, models=)` 与 YAML 加载行为等价（`btcore/strategy_loader.py`；conditions 直接写入 config 键；factor_library 可传路径或预加载 dict）。
 
 ## 5. 条件单系统
@@ -85,6 +85,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 - target_value 与 buy/sell/buy_conditions 同日混用；buy∩sell；名单重复 symbol
 - on_tick 返回 buy_conditions 以外的键；忘记 super()/prune()
 - 每日状态维护（冷却递减/trailing 更新/状态机）塞进调仓分支——select 每日都跑，维护放 on_tick
+- 用 `int(trade_date)` 算调仓间隔/持有期/冷却期（十进制差：`int("20240201")-int("20240122")=79`，跨月强插调仓、冷却跨月立即过期）→ 交易日计数器 / `holding.holding_days`；范式见 docs/strategy_guide.md §4.7 与 examples/self_managed_time、rolling_ranker
 - 策略里自查数据库判断市场状态 → 用 provider.get_benchmark_trend()/get_historical_bars()（前视保护查询）
 - 研究侧用 `compute_factors` 评估坍缩因子 → 必须 `compute_breadth`（全市场口径，ddup-factor-research）
 - 策略自行加载 ONNX 逐日推理 → 绕开前视保护与物化体系，严禁（ddup-ml-research）

@@ -19,7 +19,11 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="HTML 报告输出路径")
     args = parser.parse_args()
 
-    generate_report_from_db(args.db, args.out, run_id=args.run_id)
+    try:
+        generate_report_from_db(args.db, args.out, run_id=args.run_id)
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+        print(f"错误: 无法写报告 {args.out!r}: {e}", file=sys.stderr)
+        return 1
     print(f"report: {args.out}")
     return 0
 

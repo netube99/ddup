@@ -570,7 +570,7 @@ corr_mat = calc_factor_corr(factor_df)
 
 ### 11.3 多因子合成
 
-`research/composite.py` 提供滚动 IC/ICIR 加权合成；前视保护：t 日权重只用 ≤ t-1 日的 IC 估计。
+`research/composite.py` 提供滚动 IC/ICIR 加权合成；前视保护：`horizon=h` 时 t 日权重只用截至 t-h 日已实现的 IC 估计（缺省 h=1）；h>1 必须显式传 horizon（2026-09-19 审计 FAC-02 修复）。
 
 ```python
 from research.composite import combine_factors, evaluate_composite
@@ -579,6 +579,7 @@ composite = combine_factors(
     factor_df, fwd_ret,
     method="icir",     # "equal" | "ic" | "icir"
     window=60,         # IC 估计滚动窗口（交易日）；前 ~window 日权重不可估计，得分为 NaN
+    horizon=1,         # 前瞻天数 h；权重 shift(max(1,h))，评估 h 日 IC 时必须传 h
     # min_periods=None → 自动取 max(2, window//2)
 )
 # 每因子先截面 zscore，再按带符号滚动 IC/IR 权重（归一化）逐日加权
@@ -609,7 +610,7 @@ result = evaluate_composite(composite, fwd_ret, n_quantiles=10)
 
 **陷阱四：坍缩因子不可用于截面评估**
 
-- 症状：对 `mean(x)` / `group_mean(x, g)` 因子调 `calc_ic` 全 NaN、`calc_layered_returns` 无法分档、`combine_factors` 合成全 NaN。
+- 症状：对 `mean(x)` / `group_mean(x, g)` 因子调 `calc_ic` 全 NaN、`calc_layered_returns` 无法分档、`combine_factors` 合成全 NaN（`factor_eval` 已自动识别坍缩因子并跳过截面 IC/分层，打印提示）。
 - 根因：坍缩因子同日（同组）所有股票取值相同，截面无变异——宏观/广度指标天然没有截面区分度。
 - 修复：改用**时序维度**评估——与基准收益比对、作择时信号检验，或用 `compute_breadth` 流式输出日频标量序列（§16.5）。另注意：研究侧 `compute_factors` 简单路径没有引擎的全市场广度机制，`mean()` 的聚合范围就是传入 df 的股票池；传入中证 500 成分股时，"全市场站上 MA20 的比例"实际是"中证 500 内部口径"，与引擎路径的全市场口径不同。
 

@@ -40,21 +40,9 @@ print(b.get_calendar('20240101', '20240131'))
 ### 1.1 运行时选择后端（多后端项目）
 
 CLI 缺省使用 `adapters.tushare:TushareBackend`；用环境变量 `DDUP_BACKEND`
-可在不改代码的情况下切换到其他后端（格式 `module:Class`）：
-
-```bash
-# 黄金策略后端（data/gold_market.duckdb，构建脚本 scripts/refresh_gold_db.py）
-DDUP_BACKEND=adapters.tushare_gold:TushareGoldBackend \
-  python scripts/run.py strategies/exploring/gold_mid_term/config.yaml \
-  --start 20190101 --end 20260914 --out results/gold.duckdb
-```
-
-适用场景：同一项目里有多个数据域（股票 / ETF / 期货），一个后端对应
-一个 DuckDB 库，策略按需切换。`run.py` / `factor_eval.py` / `sweep.py` /
+可在不改代码的情况下切换后端（格式 `module:Class`）。适用场景：同一项目里
+有多个数据域（各自一个 DuckDB 库），`run.py` / `factor_eval.py` / `sweep.py` /
 `live.py` 等所有经 `research/cli_common.make_provider()` 的入口都遵守该变量。
-
-参考实现：`adapters/tushare_gold.py`（黄金 ETF + 宏观对齐列，海外序列按
-"严格早于中国交易日" 对齐，无前视）。
 
 ---
 

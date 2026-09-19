@@ -4,7 +4,6 @@ import json
 import logging
 import math
 from collections import Counter
-from functools import partial
 
 import pandas as pd
 
@@ -30,7 +29,7 @@ _SELECT_KEYS = frozenset({
 # make_costs_fn + Strategy 侧 conditions）；EDGE-05 未知键 typo 告警的比对集。
 # 策略自定义键不在其中且与已知键编辑距离远，不会误报。
 _ENGINE_CONFIG_KEYS = frozenset({
-    "slippage_ticks", "condition_slippage_ticks", "tick_size",
+    "slippage_ticks", "condition_slippage_ticks",
     "order_volume_ratio",
     "execution_price", "initial_capital", "max_positions", "benchmark",
     "quiet_skips", "ml_log",
@@ -75,15 +74,6 @@ def _validate_engine_config(config: dict) -> None:
         raise ValueError(
             "condition_slippage_ticks 必须是非负整数或 None: "
             f"{condition_slippage_ticks!r}"
-        )
-    tick_size = config.get("tick_size", 0.01)
-    if (not isinstance(tick_size, (int, float))
-            or isinstance(tick_size, bool)
-            or not math.isfinite(tick_size)
-            or tick_size <= 0 or tick_size > 1):
-        raise ValueError(
-            f"tick_size 必须是 (0,1] 内的数值（品种最小变动价位，股票 0.01、"
-            f"ETF 0.001）: {tick_size!r}"
         )
     order_volume_ratio = config.get("order_volume_ratio")
     if order_volume_ratio is not None and (
@@ -150,11 +140,12 @@ def _validate_buy_conditions(conds: list) -> list:
     return conds
 
 
-def _validate_select_actions(actions, on_tick_result):
+def _validate_select_actions(actions, on_tick_result, holdings=None):
     """select()/on_tick() 返回协议校验 + on_tick buy_conditions 合并。
 
     全部规则通过（on_tick 的 buy_conditions 已并入 actions）后返回
     actions；任何协议违背立即 raise，不让脏指令流入 pending/撮合层。
+    holdings 传入当前持仓时校验 sell_shares 不超过持仓（INV-04）。
     """
     if not isinstance(actions, dict):
         raise ValueError(
@@ -223,6 +214,14 @@ def _validate_select_actions(actions, on_tick_result):
                 or shares <= 0):
             raise ValueError(
                 f"sell_shares[{symbol}] 必须是正整数股数: {shares!r}"
+            )
+        # INV-04: 超过持仓会被撮合层 min(desired, shares) 静默钳成清仓，
+        # 与「部分减仓」意图不符——决策时点 fail-fast
+        holding = holdings.get(symbol) if holdings else None
+        if holding is not None and shares > holding.shares:
+            raise ValueError(
+                f"sell_shares[{symbol}] 请求 {shares} 股超过当前持仓 "
+                f"{holding.shares} 股"
             )
 
     sell_reasons = actions.get("sell_reasons") or {}
@@ -353,10 +352,8 @@ class Engine:
         slippage_ticks = config.get("slippage_ticks", 2)
         condition_slippage_ticks = config.get("condition_slippage_ticks")
         self.condition_slippage_ticks = condition_slippage_ticks
-        # 品种最小变动价位（股票 0.01 / 场内 ETF 0.001）：绑定进滑点函数，
-        # 撮合层滑点与价格舍入都落在 tick 网格上
-        self.tick_size = float(config.get("tick_size", 0.01))
-        self._slip_fn = partial(apply_slippage, tick_size=self.tick_size)
+        # 滑点函数：tick 固定 0.01，价格舍入到分
+        self._slip_fn = apply_slippage
         self.costs_fn = make_costs_fn(config)
         bench_code = config.get("benchmark")
         if bench_code is None:
@@ -535,9 +532,22 @@ class Engine:
         if set_dividend_bounds is not None:
             set_dividend_bounds(start, end)
 
+        # 重跑同一 Engine 实例时清掉上一轮回测的残留锚点，日历查询本身
+        # 不该被钳制（锚点在下方针对策略钩子重新设置）
+        self.provider.set_as_of(None)
         calendar = self.provider.get_calendar(start, end)
         if not calendar:
-            raise ValueError("日历为空")
+            # E2E-04: 空日历区分「区间参数错误」与「数据覆盖问题」，
+            # 给出可操作诊断而非笼统的「日历为空」
+            if start > end:
+                raise ValueError(
+                    f"日历为空：开始日晚于结束日（start={start} > end={end}），"
+                    "请检查回测区间参数"
+                )
+            raise ValueError(
+                f"日历为空：{start} ~ {end} 无交易日（区间可能全为非交易日，"
+                "或交易日历/行情数据未更新、未覆盖该区间）"
+            )
 
         # 前视钳制提前到 preload 阶段：get_universe / on_start 内的
         # provider 查询以首日前一交易日为锚（首个模拟日决策时点口径），
@@ -555,51 +565,61 @@ class Engine:
         preload_start = (
             pd.Timestamp(calendar[0]) - pd.Timedelta(days=warmup_days)
         ).strftime("%Y%m%d")
-        bars_df = self.provider.get_engine_bars(
-            load_symbols, calendar[-1],
-            lookback_start=preload_start,
-            columns=required_bar_columns(self.strategy, fplan),
-        )
-        bars_df.sort_index(inplace=True)
-        factor_plan.validate_required_columns(bars_df)
-        factor_plan.derive_fields(bars_df)
-        if fplan:
-            # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
-            logger.debug("factor warmup rows: %s", fplan["windows"])
-            breadth_df = self._preload_breadth(fplan, calendar)
-            self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
-            factor_plan.materialize(bars_df, breadth_df, fplan)
-            # 物化后验证
-            issues = factor_plan.validate_materialization(bars_df, fplan)
-            for issue in issues:
-                # EDGE-08: level 白名单 {warning, error}；未知 level 按
-                # warning 处理并告警，杜绝 getattr(logger, level) 崩 run
-                level = _FACTOR_ISSUE_LEVELS.get(issue["level"])
-                if level is None:
-                    logger.warning(
-                        "[因子验证] 未知 issue level %r, 按 warning 处理",
-                        issue["level"],
+        # 预载是引擎内部批量拉取，需要完整回测区间（含锚点之后）——临时
+        # 解除 as_of；策略钩子（on_start）在下方恢复锚点后运行
+        anchor = self.provider.get_as_of()
+        self.provider.set_as_of(None)
+        try:
+            bars_df = self.provider.get_engine_bars(
+                load_symbols, calendar[-1],
+                lookback_start=preload_start,
+                columns=required_bar_columns(self.strategy, fplan),
+            )
+            bars_df.sort_index(inplace=True)
+            factor_plan.validate_required_columns(bars_df)
+            factor_plan.derive_fields(bars_df)
+            if fplan:
+                # 因子物化：广度面板（全市场×短窗口，投影后释放）+ 主面板
+                logger.debug("factor warmup rows: %s", fplan["windows"])
+                breadth_df = self._preload_breadth(fplan, calendar)
+                self._attach_pseudo_columns(bars_df, fplan["needs"], "main")
+                factor_plan.materialize(bars_df, breadth_df, fplan)
+                # 物化后验证
+                issues = factor_plan.validate_materialization(bars_df, fplan)
+                for issue in issues:
+                    # EDGE-08: level 白名单 {warning, error}；未知 level 按
+                    # warning 处理并告警，杜绝 getattr(logger, level) 崩 run
+                    level = _FACTOR_ISSUE_LEVELS.get(issue["level"])
+                    if level is None:
+                        logger.warning(
+                            "[因子验证] 未知 issue level %r, 按 warning 处理",
+                            issue["level"],
+                        )
+                        level = logger.warning
+                    level("[因子验证] %s", issue["message"])
+            if self._model_specs:
+                # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
+                # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
+                # 变换的排名口径 = 因子计算域，与训练面板口径一致
+                ml_runtime.materialize_predictions(bars_df, self._model_specs)
+            # 若 factor_universe 比 trading universe 更宽，裁切到交易域
+            if factor_symbols is not None and trade_symbols is not None:
+                trade_set = set(trade_symbols)
+                mask = bars_df.index.get_level_values("symbol").isin(trade_set)
+                bars_df = bars_df[mask]
+                if bars_df.empty:
+                    raise ValueError(
+                        "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
                     )
-                    level = logger.warning
-                level("[因子验证] %s", issue["message"])
-        if self._model_specs:
-            # panel 模型批量推理 → ml_<name> 分数列（因果物化列的逐行
-            # 点态函数，无前视）；在 factor_universe 裁切前执行，截面后
-            # 变换的排名口径 = 因子计算域，与训练面板口径一致
-            ml_runtime.materialize_predictions(bars_df, self._model_specs)
-        # 若 factor_universe 比 trading universe 更宽，裁切到交易域
-        if factor_symbols is not None and trade_symbols is not None:
-            trade_set = set(trade_symbols)
-            mask = bars_df.index.get_level_values("symbol").isin(trade_set)
-            bars_df = bars_df[mask]
-            if bars_df.empty:
-                raise ValueError(
-                    "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
-                )
+        finally:
+            self.provider.set_as_of(anchor)
         self.bars_df = bars_df
         self.bars_by_date = _DaySlicer(bars_df)
         self.provider.attach_bars(bars_df)
         self.strategy.on_start(self.provider, calendar[0], end_date=end)
+        # 离开策略钩子窗口：锚点复位，实盘工具（操作单次日日历/分红探测、
+        # 补价面板）需要未钳制的数据视图
+        self.provider.set_as_of(None)
         return calendar
 
     def _build_factor_plan(self) -> dict | None:
@@ -660,6 +680,9 @@ class Engine:
             return cached
 
         self._save_state()
+        # 当日锚点：corporate.adjust 按今日查询分红（as_of 在 compute_pending
+        # 结束时复位，实盘工具需要未钳制的未来视图）
+        self.provider.set_as_of(today)
 
         try:
             with database.transaction(conn):
@@ -760,61 +783,67 @@ class Engine:
         结果写入 pending_actions，由次日 step 撮合（回放中则被丢弃）。
         """
         self.provider.set_as_of(calc_date)
+        try:
+            for holding in self.account.holdings.values():
+                holding.holding_days += 1
+                holding.locked = False
 
-        for holding in self.account.holdings.values():
-            holding.holding_days += 1
-            holding.locked = False
+            if bars_dict is None:
+                day_bars_view = self.bars_by_date.get(calc_date)
+                if day_bars_view is None:
+                    return
+                bars_dict = bars_to_dict(day_bars_view, calc_date)
 
-        if bars_dict is None:
-            day_bars_view = self.bars_by_date.get(calc_date)
-            if day_bars_view is None:
-                return
-            bars_dict = bars_to_dict(day_bars_view, calc_date)
+            # holding scope 模型：账户态特征只能在决策时点计算，分数注入持仓
+            # 的 bar dict——策略在 on_tick/select/calc_conditions 中像读普通列
+            # 一样读 ml_<name>，引擎不负责解释分数的含义
+            if self._holding_models:
+                self._inject_holding_model_scores(bars_dict)
 
-        # holding scope 模型：账户态特征只能在决策时点计算，分数注入持仓
-        # 的 bar dict——策略在 on_tick/select/calc_conditions 中像读普通列
-        # 一样读 ml_<name>，引擎不负责解释分数的含义
-        if self._holding_models:
-            self._inject_holding_model_scores(bars_dict)
+            fills = list(trades) if trades else []
+            # on_fills 是可选 hook（鸭子类型策略可能没定义），须在 select 之前调用
+            on_fills = getattr(self.strategy, "on_fills", None)
+            if callable(on_fills):
+                on_fills(fills, self.provider)
 
-        fills = list(trades) if trades else []
-        # on_fills 是可选 hook（鸭子类型策略可能没定义），须在 select 之前调用
-        on_fills = getattr(self.strategy, "on_fills", None)
-        if callable(on_fills):
-            on_fills(fills, self.provider)
-
-        snapshot = types.Snapshot(
-            cash=self.account.cash,
-            # 深拷贝: 策略在 select 里改 snapshot 的 Holding 不能污染引擎状态
-            holdings=copy.deepcopy(self.account.holdings),
-            trades=fills,
-            total_value=self.account.total_value,
-        )
-        # on_tick 是可选钩子：每日运行，在 select 之前更新策略内部状态
-        on_tick = getattr(self.strategy, "on_tick", None)
-        on_tick_result = None
-        if callable(on_tick):
-            on_tick_result = on_tick(bars_dict, snapshot, self.provider)
-
-        actions = self.strategy.select(bars_dict, snapshot, self.provider)
-        self.pending_actions = _validate_select_actions(actions, on_tick_result)
-
-        for symbol, holding in self.account.holdings.items():
-            bar = bars_dict.get(symbol, {})
-            entry_price = holding.entry_price
-            holding_days = holding.holding_days
-            # 2026-08 审计补校验：calc_conditions 返回非 list（None/int/str/dict）
-            # 此前以晦涩异常崩溃或空 dict 静默当作无离场计划（S-HOOK-05）
-            conditions = self.strategy.calc_conditions(
-                symbol, entry_price, bar, holding_days
+            snapshot = types.Snapshot(
+                cash=self.account.cash,
+                # 深拷贝: 策略在 select 里改 snapshot 的 Holding 不能污染引擎状态
+                holdings=copy.deepcopy(self.account.holdings),
+                trades=fills,
+                total_value=self.account.total_value,
             )
-            if not isinstance(conditions, list):
-                raise ValueError(
-                    f"calc_conditions() 必须返回 list[dict]，{symbol} 得到 "
-                    f"{type(conditions).__name__}: {conditions!r}"
+            # on_tick 是可选钩子：每日运行，在 select 之前更新策略内部状态
+            on_tick = getattr(self.strategy, "on_tick", None)
+            on_tick_result = None
+            if callable(on_tick):
+                on_tick_result = on_tick(bars_dict, snapshot, self.provider)
+
+            actions = self.strategy.select(bars_dict, snapshot, self.provider)
+            self.pending_actions = _validate_select_actions(
+                actions, on_tick_result, holdings=self.account.holdings
+            )
+
+            for symbol, holding in self.account.holdings.items():
+                bar = bars_dict.get(symbol, {})
+                entry_price = holding.entry_price
+                holding_days = holding.holding_days
+                # 2026-08 审计补校验：calc_conditions 返回非 list（None/int/str/dict）
+                # 此前以晦涩异常崩溃或空 dict 静默当作无离场计划（S-HOOK-05）
+                conditions = self.strategy.calc_conditions(
+                    symbol, entry_price, bar, holding_days
                 )
-            holding.conditions = conditions
-            match.conditions.validate_condition_types(holding.conditions)
+                if not isinstance(conditions, list):
+                    raise ValueError(
+                        f"calc_conditions() 必须返回 list[dict]，{symbol} 得到 "
+                        f"{type(conditions).__name__}: {conditions!r}"
+                    )
+                holding.conditions = conditions
+                match.conditions.validate_condition_types(holding.conditions)
+        finally:
+            # 决策窗口结束：锚点复位。策略钩子已全部执行完毕；实盘 signal
+            # 在回放结束后读取明日日历/分红（build_op_sheet）需要未钳制视图
+            self.provider.set_as_of(None)
 
     def _warn_in_sample_overlap(self, start: str, end: str) -> None:
         """回测窗口与模型训练窗口重叠时告警（样本内乐观偏差风险）。

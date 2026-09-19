@@ -12,6 +12,9 @@ scripts/cross_validate.py 是薄壳 CLI；被测逻辑全部在本模块。
 import json
 from collections import Counter
 
+import duckdb
+import pandas as pd
+
 from btcore import database
 from btcore.constants import COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE
 from btcore.match import conditions as condition_registry
@@ -32,6 +35,28 @@ def _expected_triggers() -> set[str]:
     return _ENGINE_TRIGGERS | condition_registry.registered_condition_types()
 
 
+def _ledger_capital(conn: duckdb.DuckDBPyConnection) -> float | None:
+    """实盘账本识别：ledger_meta 存在且 initial_capital 合法时返回该值。
+
+    ledger_meta 是实盘账本唯一的账户参数事实源（research/live.py 的
+    LedgerStore）；账本 run 的 config_json 只含 {"ledger": path}，没有
+    initial_capital——不注入会让磨损阈值/收益率回落到 1,000,000（LIVE-05）。
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM ledger_meta WHERE key = 'initial_capital'"
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        value = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
     """加载回测结果。返回 (trades_df, daily_df, stats_dict, config, run)。
 
@@ -39,12 +64,21 @@ def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
     （trade_log 按 date,id 排序，保证同日时序与写入序一致）。纯读入口不开
     读写连接：init_backtest_db 会执行 DDL 与 DELETE FROM holdings，且与
     同进程只读连接 / 跨进程读者产生 DuckDB 连接配置冲突。
+
+    实盘账本库（含 ledger_meta 表）的初始资金以 ledger_meta 为准注入
+    config，避免回落引擎默认的 1,000,000（LIVE-05）。
     """
     conn = database.connect_result_db(db_path, read_only=True)
     try:
+        ledger_capital = _ledger_capital(conn)
         if run_id is None:
-            run_id = latest_run_id(conn)
+            try:
+                run_id = latest_run_id(conn)
+            except duckdb.CatalogException:
+                run_id = None
             if run_id is None:
+                if ledger_capital is not None:
+                    raise ValueError("账本库尚无衍生 run（请先执行 live signal）")
                 raise ValueError("No runs found in database")
 
         run_df = conn.execute(
@@ -62,6 +96,8 @@ def load_backtest(db_path: str, run_id: int | None = None) -> tuple:
             if isinstance(config_json, str) and config_json
             else {}
         )
+        if ledger_capital is not None:
+            config["initial_capital"] = ledger_capital
         return trades, daily, stats, config, run
     finally:
         conn.close()
@@ -74,8 +110,51 @@ def _min_commission_overhead(n_buys: int, capital: float, min_commission: float)
     return (n_buys * min_commission) / capital
 
 
-def validate_trades(trades, config, strategy_name="", capital: float = 0):
-    """验证交易记录与策略设计的一致性。"""
+def _summarize_sell_triggers(trades, stats: dict | None = None):
+    """卖出按 trigger 分类统计。返回 (DataFrame | None, 口径说明)。
+
+    盈亏口径优先取 stats_json 的 round_trip.trip_detail（与
+    total_realized_pnl / report / sell_source 同源）；无 stats 时退回
+    net_amount 成交净额——列名必须叫 net_proceeds，绝不可冒充盈亏
+    （SELL 行 net_amount 是卖出净额，SUM 不是盈亏，TOOL-02）。
+    """
+    sell_trades = trades[trades["side"] == "SELL"]
+    if len(sell_trades) == 0:
+        return None, ""
+
+    trips = ((stats or {}).get("round_trip") or {}).get("trip_detail") or []
+    if trips:
+        trip_df = pd.DataFrame(trips)
+        if {"sell_trigger", "pnl"} <= set(trip_df.columns):
+            grouped = trip_df.groupby("sell_trigger").agg(
+                count=("pnl", "count"),
+                total_pnl=("pnl", "sum"),
+                avg_pnl=("pnl", "mean"),
+                win_rate=("pnl", lambda s: float((s > 0).mean())),
+            )
+            return grouped, (
+                "已实现盈亏口径 (stats_json.round_trip.trip_detail 按 sell_trigger "
+                "聚合，与 total_realized_pnl 一致)"
+            )
+
+    grouped = sell_trades.groupby("trigger").agg(
+        count=("turnover", "count"),
+        avg_amount=("turnover", "mean"),
+        net_proceeds=("net_amount", "sum"),
+    )
+    return grouped, (
+        "net_proceeds 为卖出成交净额（非盈亏）；无 stats_json.round_trip 时"
+        "无法给出已实现盈亏"
+    )
+
+
+def validate_trades(trades, config, strategy_name="", capital: float = 0,
+                    stats: dict | None = None):
+    """验证交易记录与策略设计的一致性。
+
+    stats: runs.stats_json 解析结果；卖出分类盈亏来自 round_trip.trip_detail，
+        缺失时降级为 net_proceeds 成交净额（列名注明口径）。
+    """
     issues = []
     notes = []
 
@@ -187,15 +266,12 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0):
             if capital >= 100000 and pct > 0.5:
                 issues.append(f"TOO_MANY_SMALL_TRADES: {pct:.1%} 的买入触发最低佣金")
 
-    # 7. 检查持有周期
-    sell_trades = trades[trades["side"] == "SELL"]
-    if len(sell_trades) > 0:
-        sell_trigger_stats = sell_trades.groupby("trigger").agg(
-            count=("turnover", "count"),
-            avg_amount=("turnover", "mean"),
-            total_pnl=("net_amount", "sum"),
-        )
-        notes.append(f"卖出分类统计:\n{sell_trigger_stats.to_string()}")
+    # 7. 卖出分类统计（已实现盈亏取自 round_trip.trip_detail，不得用
+    #    SELL 行 net_amount 冒充；无 stats 时列名 net_proceeds 并注明口径）
+    sell_stats_df, sell_stats_note = _summarize_sell_triggers(trades, stats)
+    if sell_stats_df is not None:
+        notes.append(f"卖出分类统计（{sell_stats_note}）:\n"
+                     f"{sell_stats_df.to_string()}")
 
     # 8. 交易频率检查
     avg_trades_per_day = len(trades) / n_days if n_days > 0 else 0

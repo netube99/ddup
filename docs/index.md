@@ -51,7 +51,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 | Brinson 行业归因 | `research.attribution` | [CLI 与研究工具](./cli_and_research.md) |
 | 程序化 API（Python 驱动回测） | `Engine(strategy, provider).run()` | [策略设计指南](./strategy_guide.md) |
 | 实盘账本 / 每日信号操作单 | `scripts/live.py`、`research.live` | [CLI 与研究工具](./cli_and_research.md) |
-| 让 Agent 自主做策略研究 | `.agents/skills/` 研究 skills（随仓库分发） | `ddup-research-loop` 入口共 7 个（研究 6 + 实盘操作 1），agent 按任务触发加载 |
+| 让 Agent 自主做策略研究 | `.agents/skills/` 研究 skills（随仓库分发） | `.agents/skills/` 共 8 个（研究 6 + 实盘操作 1 + 审查门禁 1），agent 按任务触发加载 |
 
 ## 标准工作流
 

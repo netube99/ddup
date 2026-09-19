@@ -77,7 +77,7 @@
 - [ ] **C7 能力开关语义** — 辅助能力以后端是否提供数据为开关，无额外配置。
   静态：`generic_sql.py:78-85` `_EXTRAS` 动态装配；能力空位 `st_symbol/industry_name/listing_date/index_code/index_member/benchmark_close/benchmark_adj_factor`（`generic_sql.py:99-102`）。
 
-- [ ] **C8 禁止重引入清单** — `scripts/check_anticorrupt.py` 14 项机械检查必须绿；另有人工补查项：无 `factors/builtin.py`、无因子类层次、Strategy ABC 无行为开关、无 GuardedProvider、无 ML 外挂模式（策略不得自行加载 ONNX）。
+- [ ] **C8 禁止重引入清单** — `scripts/check_anticorrupt.py` 15 项机械检查必须绿；另有人工补查项：无 `factors/builtin.py`、无因子类层次、Strategy ABC 无行为开关、无 GuardedProvider、无 ML 外挂模式（策略不得自行加载 ONNX）。
   动态：`python scripts/check_anticorrupt.py` 退出码 0。
 
 ---
@@ -354,7 +354,7 @@
 - [ ] **CLI-MLT-01** ml_train.py — holding 缺 --db 报错；meta version≠3 拒绝；YAML 写 post_transform 无效（以 meta 为准）（`scripts/ml_train.py:67-160`）。
 - [ ] **CLI-DMP-01** dump_fixtures.py — 窗口固定 20240601-0701（limits 额外 20200820-25）；ST 宽窗 dump 但 bars 主窗窄窗——**st 与 bars 交集为 0 的结构性空转即源于此**，改造 fixture 前先读 MlTestScout 实证统计（本文 §0.4）。
 - [ ] **CLI-BRN-01** dump_brinson_data.py — `--index` 过滤防多指数混入（2026-08 修复；SQL `WHERE iw.index_code=?` 硬过滤，缺省值 000300.SH 亦安全）；`--result-db` 须配 start/end 才导 bars。
-- [ ] **CLI-LINT-01** check_anticorrupt.py — 14 项检查（调用点 `scripts/check_anticorrupt.py:main` 汇总，docstring 14 条 1-21 行，与实际一致）；AGENTS.md 声称的 5 条架构规则曾经无检查（已补），核对 docstring 与实际检查数一致。
+- [ ] **CLI-LINT-01** check_anticorrupt.py — 15 项检查（调用点 `scripts/check_anticorrupt.py:main` 汇总，docstring 15 条，与实际一致）；AGENTS.md 声称的 5 条架构规则曾经无检查（已补），核对 docstring 与实际检查数一致。
 - [ ] **CLI-SYNC-01** check_skill_sync.py — 7 项对账（CLI flag/算子/select 键/filter 键/条件单键/meta v3/config 默认值）；接口变更后必跑。
 - [ ] **RS-FEV-01** research.factor_eval — IC<3 样本→NaN；分层 q=1 最低档；衰减 fwd_ret 用 close_hfq；corr<3 行跳过（`research/factor_eval.py:10-166`）。
 - [ ] **RS-CMP-01** research.composite — 滚动 IC/ICIR 权重只用 ≤t-1 日 IC（shift(1) 前视保护，`research/composite.py:29-77`）；全部无 IC 行保持 NaN 非 0。

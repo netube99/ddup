@@ -197,3 +197,19 @@ class TestReplayDefaultRun:
         )
         assert "20240603" in r1.stdout
         assert "20240606" not in r1.stdout
+
+    def test_nonexistent_run_id_reports_missing(self, tmp_path):
+        """TOOL-09：--run-id 不存在时报「run N 不存在」而非「无匹配快照」。"""
+        import subprocess
+        import sys
+
+        db_path = str(tmp_path / "replay.db")
+        self._run_engine(db_path, "20240603", "20240605")
+
+        r = subprocess.run(
+            [sys.executable, "scripts/replay.py", db_path, "--run-id", "99",
+             "--list-symbols"],
+            capture_output=True, text=True,
+        )
+        assert r.returncode == 1
+        assert "run 99 不存在" in r.stderr

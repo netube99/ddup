@@ -1,6 +1,10 @@
 """Brinson 归因测试 — 合成数据单测 + 真库冒烟。"""
 
 
+import subprocess
+import sys
+
+import duckdb
 import numpy as np
 import pandas as pd
 import pytest
@@ -301,11 +305,102 @@ def _make_bt_db(path):
     """最小结果库（真实 schema，DuckDB）：归因测试的 trade_log 载体。"""
     conn = database.init_backtest_db(str(path))
     database.write_run(
-        conn, created_at="x", strategy="t", start_date="20240601",
+        conn, created_at="x", strategy="t", start_date="20240603",
         end_date="20240701", initial_capital=1e6, config_json="{}",
         status="completed",
     )
     return conn
+
+
+def _make_market_db(path):
+    """最小行情库：index_member_all / sw_daily / index_weight 三表。"""
+    conn = duckdb.connect(str(path))
+    conn.execute(
+        "CREATE TABLE index_member_all (ts_code VARCHAR, l1_name VARCHAR, l1_code VARCHAR)"
+    )
+    conn.execute(
+        "INSERT INTO index_member_all VALUES ('600036.SH', '银行', '801780.SI')"
+    )
+    conn.execute(
+        "CREATE TABLE sw_daily (trade_date VARCHAR, ts_code VARCHAR,"
+        " name VARCHAR, pct_change DOUBLE)"
+    )
+    conn.execute("INSERT INTO sw_daily VALUES ('20240603', '801780.SI', '银行', 1.0)")
+    conn.execute(
+        "CREATE TABLE index_weight (index_code VARCHAR, con_code VARCHAR,"
+        " trade_date VARCHAR, weight DOUBLE)"
+    )
+    conn.close()
+
+
+class TestBenchmarkErrors:
+    """TOOL-01：benchmark_weights 空数据必须返回 error，不得按基准收益 0 出结果。"""
+
+    def test_db_path_missing_index_returns_error(self, tmp_path):
+        bt_db = str(tmp_path / "bt.duckdb")
+        _make_bt_db(bt_db).close()
+        market_db = str(tmp_path / "market.duckdb")
+        _make_market_db(market_db)
+
+        result = brinson_attribute(
+            bt_db, market_db, "20240603", "20240607", index_code="999999.XX"
+        )
+
+        assert "error" in result, "空 benchmark_weights 必须报错而非静默归因"
+        assert "benchmark_weights 无数据" in result["error"]
+        assert "999999.XX" in result["error"]
+        assert result["summary"] == {}
+
+    def test_from_files_empty_benchmark_weights_returns_error(self, tmp_path):
+        db_path = str(tmp_path / "test.duckdb")
+        _make_bt_db(db_path).close()
+
+        out_dir = tmp_path / "parquet_data"
+        out_dir.mkdir()
+        pd.DataFrame({"ts_code": ["600036.SH"], "l1_name": ["银行"]}).to_parquet(
+            out_dir / "industry_map.parquet", index=False
+        )
+        pd.DataFrame({"银行": [0.01]}, index=["20240603"]).to_parquet(
+            out_dir / "sw_returns.parquet"
+        )
+        pd.DataFrame().to_parquet(out_dir / "benchmark_weights.parquet")
+        pd.DataFrame(
+            {"close": [35.0], "pct_chg": [1.0]},
+            index=pd.MultiIndex.from_tuples(
+                [("20240603", "600036.SH")], names=["trade_date", "symbol"]
+            ),
+        ).to_parquet(out_dir / "bars.parquet")
+
+        result = brinson_attribute_from_files(
+            result_db=db_path,
+            industry_map=str(out_dir / "industry_map.parquet"),
+            sw_returns=str(out_dir / "sw_returns.parquet"),
+            benchmark_weights=str(out_dir / "benchmark_weights.parquet"),
+            bars=str(out_dir / "bars.parquet"),
+            run_id=1,
+            benchmark_code="000300.SH",
+        )
+
+        assert "error" in result, "空 benchmark_weights 必须报错而非静默归因"
+        assert "benchmark_weights 无数据" in result["error"]
+        assert "000300.SH" in result["error"]
+        assert result["summary"] == {}
+
+    def test_dump_brinson_invalid_index_exits_nonzero(self, tmp_path):
+        """TOOL-01：dump --index 无权重数据 → 非零退出且不写空 benchmark_weights。"""
+        market_db = str(tmp_path / "market.duckdb")
+        _make_market_db(market_db)
+        out = tmp_path / "out"
+
+        r = subprocess.run(
+            [sys.executable, "scripts/dump_brinson_data.py", market_db,
+             "--out", str(out), "--index", "999999.XX"],
+            capture_output=True, text=True,
+        )
+
+        assert r.returncode != 0
+        assert "999999.XX" in r.stderr
+        assert not (out / "benchmark_weights.parquet").exists()
 
 
 # ═══════════════════════════════════════════
@@ -513,3 +608,45 @@ class TestBrinsonFromFiles:
         )
         assert "error" in result
         assert result["error"] == "sw_returns 为空"
+
+    def test_bars_start_after_run_start_returns_error(self, tmp_path):
+        """TOOL-03：bars 被 --start 截断（起点晚于 run 起点）→ error，不静默丢期初持仓。"""
+        db_path = str(tmp_path / "test.duckdb")
+        bconn = _make_bt_db(db_path)  # run start = 20240603
+        bconn.execute(
+            "INSERT INTO trade_log (id, run_id, date, symbol, side, trigger,"
+            " price, shares, turnover, commission) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (1, 1, "20240603", "600036.SH", "BUY", "MANUAL", 0.0, 10000, 0.0, 0.0),
+        )
+        bconn.close()
+
+        out_dir = tmp_path / "parquet_data"
+        out_dir.mkdir()
+        pd.DataFrame({"ts_code": ["600036.SH"], "l1_name": ["银行"]}).to_parquet(
+            out_dir / "industry_map.parquet", index=False
+        )
+        pd.DataFrame({"银行": [0.01]}, index=["20240605"]).to_parquet(
+            out_dir / "sw_returns.parquet"
+        )
+        pd.DataFrame({"银行": [1.0]}, index=["20240605"]).to_parquet(
+            out_dir / "benchmark_weights.parquet"
+        )
+        pd.DataFrame(
+            {"close": [35.0], "pct_chg": [1.0]},
+            index=pd.MultiIndex.from_tuples(
+                [("20240605", "600036.SH")], names=["trade_date", "symbol"]
+            ),
+        ).to_parquet(out_dir / "bars.parquet")
+
+        result = brinson_attribute_from_files(
+            result_db=db_path,
+            industry_map=str(out_dir / "industry_map.parquet"),
+            sw_returns=str(out_dir / "sw_returns.parquet"),
+            benchmark_weights=str(out_dir / "benchmark_weights.parquet"),
+            bars=str(out_dir / "bars.parquet"),
+            run_id=1,
+        )
+
+        assert "error" in result
+        assert "bars 起点" in result["error"]
+        assert "20240603" in result["error"]

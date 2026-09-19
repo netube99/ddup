@@ -7,6 +7,7 @@ feature_order = factors + raw + state_features，双方严格按此列序取向�
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -46,8 +47,8 @@ def export_model(
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    meta_path = out.with_suffix(".meta.json")
     blob = onx.SerializeToString()
-    out.write_bytes(blob)
 
     meta = {
         "version": META_VERSION,
@@ -66,16 +67,44 @@ def export_model(
         "artifact_sha256": hashlib.sha256(blob).hexdigest(),
     }
 
-    meta_path = out.with_suffix(".meta.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
+    # E2E-02 治理（可选键，向后兼容）：记录导出实际树数。early stopping
+    # 模型的 ONNX 只含 best_iteration+1 棵（onnxmltools 截断），
+    # 训练侧 booster 总树数会误导版本追溯。
+    best_iteration = getattr(result.model, "best_iteration", None)
+    if best_iteration is not None:
+        meta["best_iteration"] = int(best_iteration)
+        meta["n_trees"] = int(best_iteration) + 1
+    else:
+        booster = getattr(result.model, "get_booster", None)
+        if callable(booster):
+            rounds = getattr(booster(), "num_boosted_rounds", None)
+            if callable(rounds):
+                meta["n_trees"] = int(rounds())
 
-    # 一致性校验：同一份输入，sklearn 与 ONNX 输出必须一致。
-    # 弹出可能缓存的同路径旧会话（同进程重复导出时）
+    # 原子写：onnx/meta 先写同目录 .tmp，一致性校验通过后才 os.replace
+    # 落位。任一环节失败（含校验失败/中断）清理 tmp，旧 artifact 原样保留。
+    tmp_onnx = out.with_name(out.name + ".tmp")
+    tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
+    try:
+        tmp_onnx.write_bytes(blob)
+        with open(tmp_meta, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+
+        # 一致性校验：同一份输入，sklearn 与 ONNX 输出必须一致。
+        if verify_rows is not None and len(verify_rows) > 0:
+            ml_runtime._sessions.pop(str(tmp_onnx), None)
+            _verify(spec, result, tmp_onnx, meta, verify_rows)
+        os.replace(tmp_onnx, out)
+        os.replace(tmp_meta, meta_path)
+    except BaseException:
+        tmp_onnx.unlink(missing_ok=True)
+        tmp_meta.unlink(missing_ok=True)
+        raise
+    finally:
+        ml_runtime._sessions.pop(str(tmp_onnx), None)
+
+    # 同进程重复导出同一路径：弹掉旧会话，后续推理读新文件
     ml_runtime._sessions.pop(str(out), None)
-    if verify_rows is not None and len(verify_rows) > 0:
-        _verify(spec, result, out, meta, verify_rows)
-
     logger.info("导出完成: %s (%d bytes)", out.name, out.stat().st_size)
     return str(out), str(meta_path)
 

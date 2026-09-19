@@ -39,13 +39,15 @@ trigger 全集：MANUAL（select 名单）、TARGET（target_value 调仓）、C
 ```bash
 python scripts/cross_validate.py results/r3.duckdb [--run-id N]   # 退出码=问题数，0=通过
 ```
-九项检查：trigger 分布（集外仅 INFO）、买卖比>3 或 <0.3、同日同票买卖冲突、**交易磨损/资金比超分档阈值**（≤5万 3%、≤50万 1%、>50万 0.5%，另加最低佣金×2+印花税底；≤5万降级 INFO）、小单过多（≥10万资金且>50% 买入触发最低佣金，边界 = min_commission/commission_rate，默认费率 ≈33333）、日均成交>10 笔、持仓超 max_positions、负现金、卖出按 trigger 分类统计（INFO）。
+九项检查：trigger 分布（集外仅 INFO）、买卖比>3 或 <0.3、同日同票买卖冲突、**交易磨损/资金比超分档阈值**（≤5万 3%、≤50万 1%、>50万 0.5%，另加最低佣金×2+印花税底；≤5万降级 INFO）、小单过多（≥10万资金且>50% 买入触发最低佣金，边界 = min_commission/commission_rate，默认费率 ≈33333）、日均成交>10 笔、持仓超 max_positions、负现金、卖出按 trigger 分类统计（INFO；已实现盈亏取自 `stats_json.round_trip.trip_detail`，与 `total_realized_pnl` 同源；无 stats 时列名 `net_proceeds` 为成交净额并注明非盈亏）。消费实盘账本库时初始资金取 `ledger_meta.initial_capital`（不回落 1,000,000）。
 
 ## 2. trade_log SQL 六维
 
 ```sql
--- ① 卖出按 trigger 分组：哪个 trigger 在亏钱？胜率？
-SELECT trigger, COUNT(*), AVG(net_amount), SUM(CASE WHEN net_amount>0 THEN 1 ELSE 0 END)*1.0/COUNT(*)
+-- ① 卖出按 trigger 分组：哪个 trigger 在亏钱？胜率？——盈亏/胜率必须来自
+--    stats_json.round_trip.trip_detail（net_amount 是成交净额，不是盈亏，见 schema 节；
+--    下列 net_amount 聚合仅用于分组频次/均额示意）
+SELECT trigger, COUNT(*), AVG(net_amount)
 FROM trade_log WHERE side='SELL' AND run_id=? GROUP BY trigger;
 -- ② 个股盈亏 TOP/BOTTOM：单票集中风险？亏损票反复买？
 -- ③ 同票买入次数：反复买同一只亏损股的模式
@@ -57,7 +59,7 @@ FROM trade_log WHERE side='SELL' AND run_id=? GROUP BY trigger;
 
 ## 3. statistics 高级键（runs.stats_json 或 Engine.run() 返回）
 
-`trading_friction`（total_cost/annualized_cost_drag 年化磨损拖累）、`sell_source`（卖出来源归因）、`symbol_contribution`（个股贡献）、`round_trip.summary.avg_holding_days`、`benchmark_compare`（alpha/beta/information_ratio/tracking_error）、`management_complexity.max_trades_per_day`、`cost_breakdown`、`total_dividend_received`（已实现分红）/ `total_dividend_accrued`（+期末未平仓 lot 未实现分红，全口径）、`max_dd_unrecovered`（回撤未修复时 True，此时 `max_drawdown_recovery_days` 保留旧值含谷值日；report 对未修复回撤标注「未修复（距结束 N 日）」）。报告与 compare.py 的 11 行指标即源于此。
+`trading_friction`（total_cost/annualized_cost_drag 年化磨损拖累）、`sell_source`（卖出来源归因）、`symbol_contribution`（个股贡献）、`round_trip.summary.avg_holding_days`、`benchmark_compare`（alpha/beta/information_ratio/tracking_error）、`management_complexity.max_trades_per_day`、`cost_breakdown`、`total_dividend_received`（已实现分红）/ `total_dividend_accrued`（+期末未平仓 lot 未实现分红，全口径）——报告往返交易汇总两行都展示（「已实现分红」与「分红合计（含期末未平仓 lot）」）、`max_dd_unrecovered`（回撤未修复时 True，此时 `max_drawdown_recovery_days` 保留旧值含谷值日；report 对未修复回撤标注「未修复（距结束 N 日）」）。报告与 compare.py 的 11 行指标即源于此。
 
 ## 4. debug 回放（SQL 发现异常但无法解释时）
 
@@ -71,7 +73,7 @@ engine.run("20240101", "20240630")
 python scripts/replay.py results/debug.duckdb --symbol 000001.SZ --date 20240605
 python scripts/replay.py results/debug.duckdb --date 20240315 --list-symbols
 ```
-缺省 run_id 取最新 run；库中无 run 记录（**含旧库无 runs 表**）一律报错并以退出码 1 退出。
+缺省 run_id 取最新 run；`--run-id N` 不存在或库中无 run 记录一律报错（`run N 不存在`）并以退出码 1 退出。
 快照含当日账户状态、pending buy/sell/buy_conditions、每持仓明细+最多 5 个因子列。逐日回答"那天为什么买/卖这只"。
 
 ## 5. Brinson 行业归因（理解超额来源）
@@ -83,8 +85,8 @@ r = brinson_attribute("results/r3.duckdb", provider_db,   # 行情库路径：�
 # r["summary"]: total_excess_return 分解为 allocation/selection/interaction_effect + unexplained
 # r["industry_detail"]: 每行业 active_weight、各效应、total_contribution
 ```
-解读：**配置效应大** → 超额靠押行业 → 方向转行业轮动/exclude_industries；**选股效应大** → 靠个股选择 → 继续深挖因子。数据不足不抛异常，返回 {"error": 原因}——先检查 error 键。
-离线复用：`scripts/dump_brinson_data.py` 默认导 3 个 parquet（industry_map/sw_returns/benchmark_weights）；**bars.parquet 需同时给 `--result-db` 与 `--start`/`--end` 才导出**（缺它 `brinson_attribute_from_files` 抛 FileNotFoundError）。`brinson_attribute_from_files(...)` 的 run_id 默认 1 而非最新。
+解读：**配置效应大** → 超额靠押行业 → 方向转行业轮动/exclude_industries；**选股效应大** → 靠个股选择 → 继续深挖因子。数据不足不抛异常，返回 {"error": 原因}——先检查 error 键；**benchmark_weights 为空（index_code 拼错/无数据）也返回 error**（不再按基准收益 0 出伪装结果）。
+离线复用：`scripts/dump_brinson_data.py` 默认导 3 个 parquet（industry_map/sw_returns/benchmark_weights）；**指定 index 无权重数据时非零退出并报错**（不会写出空 benchmark_weights）；**bars.parquet 需同时给 `--result-db` 与 `--start`/`--end` 才导出**（缺它 `brinson_attribute_from_files` 抛 FileNotFoundError），且 bars 必须覆盖 run 起点——from_files 校验 bars 起点晚于 `runs.start_date` 时返回 error（提示重新导出全窗 bars，防止期初持仓静默丢失）。`brinson_attribute_from_files(...)` 的 run_id 默认 1 而非最新。
 
 ## 6. 结果变化归因（回测数字变了先归因再定论）
 
@@ -118,4 +120,4 @@ pytest 绿不算证据。引擎所有计算默认不可信时的核验路径：
 ## 报告与对比
 
 - 单 run：`python scripts/report.py <db> --out r3.html`（老库自动迁移重算 stats）
-- 多 run：`python scripts/compare.py <db> [--runs 1,3,5] --html cmp.html`（<2 run 报错）
+- 多 run：`python scripts/compare.py <db> [--runs 1,3,5] --html cmp.html`（<2 run 报错；`--runs` 含不存在的 run 时点名 `run N 不存在` 并以退出码 1 退出，不静默丢弃）

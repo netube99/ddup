@@ -59,15 +59,21 @@ class DataProvider:
         lookback_start: str | None = None,
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
+        # INV-02: 决策锚存在时不允许读锚后行情（引擎 preload 会临时解除锚）
+        if self._as_of_date is not None:
+            trade_date = min(trade_date, self._as_of_date)
         return self.backend.query_bars(
             symbols, lookback_start or "00000101", trade_date, columns=columns,
         )
 
     def set_as_of(self, date_str: str | None) -> None:
-        """钳制查询锚点：get_historical_bars / get_benchmark_returns 的查询端上限。
+        """钳制查询锚点：所有 provider 查询的日期上限。
 
-        引擎在回测主循环每日更新；preload 阶段（get_universe / on_start）
-        即已钳到首日前一交易日，钩子内传未来日期也拿不到未来数据。
+        get_historical_bars / get_benchmark_returns / get_engine_bars 截到
+        ≤date_str；get_calendar 截到 ≤date_str；get_dividends_on_date 对
+        date>date_str 返回 {}。引擎在策略钩子窗口内设置（preload 的
+        get_universe / on_start、每日 compute_pending），钩子内传未来日期
+        也拿不到未来数据；None = 未钳制（实盘回放的工具层视图）。
         """
         self._as_of_date = date_str
 
@@ -111,9 +117,15 @@ class DataProvider:
     # ── 透传 ──
 
     def get_calendar(self, start: str, end: str) -> list[str]:
+        # INV-02: as_of 钳制（未设置 = 实盘回放透传）
+        if self._as_of_date is not None:
+            end = min(end, self._as_of_date)
         return self.backend.get_calendar(start, end)
 
     def get_dividends_on_date(self, date_str: str) -> dict:
+        # INV-02: 未来除权除息不可见（未设置 = 实盘回放透传）
+        if self._as_of_date is not None and date_str > self._as_of_date:
+            return {}
         return self.backend.get_dividends_on_date(date_str)
 
     # ── 基准指数 ──

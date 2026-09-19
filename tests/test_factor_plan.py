@@ -97,6 +97,30 @@ class TestWindows:
         assert p["windows"]["e"] == 30        # 1 + (3*10-1)，无限记忆的工程近似
 
 
+class TestWindowBounds:
+    """FAC-06：巨窗必须在换算点 fail-fast，而非 pandas OutOfBoundsTimedelta。"""
+
+    def test_to_calendar_days_upper_bound(self):
+        assert plan.to_calendar_days(1) == 11
+        assert plan.to_calendar_days(66660) == 100_000  # 上界内最大值
+        with pytest.raises(ValueError, match="窗口过大"):
+            plan.to_calendar_days(66661)
+        with pytest.raises(ValueError, match="窗口过大"):
+            plan.to_calendar_days(10_000_000)
+
+    def test_huge_window_fails_fast_in_plan(self):
+        """ma(close, 10000000) 在 build_factor_plan 即报清晰 ValueError。"""
+        nodes = {"f": {"expr": "ma(close_hfq, 10000000)"}}
+        with pytest.raises(ValueError, match="窗口过大"):
+            plan.build_factor_plan(nodes, ["f"])
+
+    def test_huge_collapse_window_fails_fast(self):
+        """坍缩闭包同样受上界约束（compute_breadth/factor_eval 共用入口）。"""
+        nodes = {"f": {"expr": "mean(ma(close_hfq, 10000000))"}}
+        with pytest.raises(ValueError, match="窗口过大"):
+            plan.build_factor_plan(nodes, ["f"])
+
+
 def _mk_panel(dates, syms, seed=1):
     return make_factor_panel(dates, syms, seed=seed, industry=True)
 
@@ -207,6 +231,28 @@ factor_specs:
         )["industry_mom"].nunique()
         assert (same == 1).all()
 
+    def test_huge_window_fails_fast_in_engine(self, tmp_path):
+        """FAC-06：巨窗在引擎 prepare 预热换算前给出清晰 ValueError。"""
+        (tmp_path / "lib.yaml").write_text(
+            'factors:\n  huge:\n    expr: "ma(close_hfq, 10000000)"\n',
+            encoding="utf-8",
+        )
+        yaml_path = tmp_path / "s.yaml"
+        yaml_path.write_text("""\
+strategy: strategies.examples.rolling_ranker:RollingRanker
+factor_library: lib.yaml
+config:
+  top_k: 3
+  max_positions: 3
+factor_specs:
+  - factor: huge
+""", encoding="utf-8")
+        strategy = load_strategy(str(yaml_path))
+        engine = Engine(strategy, DataProvider(_IndustryBackend()),
+                        initial_capital=1_000_000, db_path=":memory:")
+        with pytest.raises(ValueError, match="窗口过大"):
+            engine.prepare("20240603", "20240628")
+
     def test_idx_ret_beta(self, tmp_path):
         """引用 idx_ret 的参照系因子：benchmark 派生列进面板，末端有值。"""
         (tmp_path / "lib.yaml").write_text(
@@ -286,16 +332,19 @@ class TestCollapseIntegrity:
         assert issues == [], f"Expected no issues, got: {issues}"
 
     def test_validate_materialization_detects_nan(self, caplog):
-        """NaN 占比超 5% 时 validate_materialization 返回 warning issue。"""
+        """真缺口（首个有值日之后的整日 NaN）超 5% 时返回 warning issue。
+
+        前导整日无值属窗口预热，走 info（FAC-08）；此处构造中段缺口。
+        """
 
         syms = ["A", "B", "C"]
         dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
 
-        # 广度面板只有部分日期有值（末尾日期），投影后主面板早日期为 NaN
+        # 广度面板中段缺 4 天（首尾有值）→ 投影后中段整日为 NaN
         main_idx = pd.MultiIndex.from_product(
             [dates, syms], names=["trade_date", "symbol"]
         )
-        breadth_dates = dates[-3:]  # 只有最后 3 天有数据
+        breadth_dates = list(dates[:3]) + list(dates[-3:])
         breadth_idx = pd.MultiIndex.from_product(
             [breadth_dates, syms], names=["trade_date", "symbol"]
         )
@@ -309,7 +358,7 @@ class TestCollapseIntegrity:
         )
         plan.materialize(main_df, breadth_df, p)
 
-        # NaN 占比 = 7/10 = 70% > 5%
+        # 缺口 NaN 占比 = 12/30 = 40% > 5%
         issues = plan.validate_materialization(main_df, p)
         assert len(issues) > 0, "Expected issues for high NaN ratio"
         assert any("NaN" in i["message"] for i in issues)
@@ -344,6 +393,75 @@ class TestValidateMaterialization:
         issues = plan.validate_materialization(main, p)
         assert len(issues) > 0
         assert any("NaN" in issue["message"] for issue in issues)
+
+    def test_warmup_prefix_is_info_not_warning(self, caplog):
+        """FAC-08：前导整日 NaN 属窗口预热，info 直落日志（「无值」文本
+        保留），不得返回 warning issue。"""
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth = _mk_panel(dates[-3:], ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(
+            {"ck": {"expr": "mean(close_hfq > 0)"}}, ["ck"]
+        )
+        plan.materialize(main, breadth, p)
+        with caplog.at_level(logging.INFO, logger="btcore.factors.plan"):
+            issues = plan.validate_materialization(main, p)
+        assert issues == [], issues
+        info_msgs = [r.message % r.args if r.args else r.message
+                     for r in caplog.records if r.levelno == logging.INFO]
+        assert any("无值" in m and "预热" in m for m in info_msgs), info_msgs
+
+    def test_mid_panel_gap_is_warning(self):
+        """FAC-08：首个有值日之后的整日 NaN 是真缺口，报 warning「无值」。"""
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth_dates = list(dates[:3]) + list(dates[-3:])
+        breadth = _mk_panel(breadth_dates, ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(
+            {"ck": {"expr": "mean(close_hfq > 0)"}}, ["ck"]
+        )
+        plan.materialize(main, breadth, p)
+        issues = plan.validate_materialization(main, p)
+        warns = [i for i in issues if i["level"] == "warning"]
+        assert warns, issues
+        assert any("无值" in i["message"] for i in warns), warns
+
+    def test_masked_rows_are_info_not_empty(self, caplog):
+        """V-FAC-02 / FAC-08：同日部分行 NaN（where 掩码）≠ 整日无值。
+
+        文案须为「掩码缺失」，不得返回 issue 或出现 warning /「无值」。
+        """
+        dates = pd.date_range("2024-01-01", periods=6).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(
+            {"ck": {"expr": "mean(close_hfq > 0)"}}, ["ck"]
+        )
+        plan.materialize(main, breadth, p)
+        # A 行全掩码：每天仍有 B/C 有值 → 部分缺失
+        a_rows = main.index.get_level_values("symbol") == "A"
+        main.loc[a_rows, "ck"] = np.nan
+        with caplog.at_level(logging.INFO, logger="btcore.factors.plan"):
+            issues = plan.validate_materialization(main, p)
+        assert issues == [], issues
+        info_msgs = [r.message % r.args if r.args else r.message
+                     for r in caplog.records if r.levelno == logging.INFO]
+        assert any("掩码" in m for m in info_msgs), info_msgs
+        assert not any("无值" in m for m in info_msgs), info_msgs
+
+    def test_all_nan_column_is_warning(self):
+        """整列 NaN（无任何有效日）按真异常报 warning。"""
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        breadth = _mk_panel(dates, ["A", "B", "C", "D", "E"], seed=2)
+        p = plan.build_factor_plan(
+            {"ck": {"expr": "mean(close_hfq > 0)"}}, ["ck"]
+        )
+        plan.materialize(main, breadth, p)
+        main["ck"] = np.nan
+        issues = plan.validate_materialization(main, p)
+        assert any(i["level"] == "warning" for i in issues), issues
+        assert any("无值" in i["message"] for i in issues), issues
 
 
 class TestProjectWarnings:

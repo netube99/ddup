@@ -38,9 +38,9 @@ _UNIVERSE_MAP = {
 
 
 def _fmt_number(x):
-    """格式化数值：四位小数，NaN/None 显示为 '-' 。"""
+    """格式化数值：四位小数，NaN/None 显示为 '—'（无数据，非 0）。"""
     if x is None or (isinstance(x, float) and pd.isna(x)):
-        return "-"
+        return "—"
     return f"{x:.4f}"
 
 
@@ -62,12 +62,15 @@ def run_eval(
     n_quantiles: int = 5,
     benchmark: str | None = None,
     exec_price: str = "close",
+    library_path: str | None = None,
 ) -> int:
     """因子评估主流程（backend 可注入，便于用 MockDataBackend 测试）。
 
     exec_price: "close"=研究口径（T 收盘买，close_t→close_{t+h}）；
         "next-open"=可交易口径（T+1 开盘买，open_{t+1}→close_{t+h}，
         与引擎 T 信号 T+1 撮合一致）。动量族因子在 next-open 下显著衰减。
+    library_path: 因子库 YAML 路径；缺省顶层 factors/library.yaml，
+        策略本地库（如 strategies/.../factors.yaml）用此评估。
     """
     # ML 模型：spec 解析（fail-fast），特征并入因子计算与请求列
     model_spec = None
@@ -92,8 +95,10 @@ def run_eval(
         print("错误：至少需要一个因子名称", file=sys.stderr)
         return 1
 
-    # 加载因子库
-    library = load_library()
+    # 加载因子库（--factor-library 可指定策略本地库；缺省顶层 factors/library.yaml）
+    library = load_library(library_path)
+    if library_path:
+        print(f"因子库: {library_path}")
     for name in factor_names:
         if name not in library:
             print(f"错误：未知因子 '{name}'，可用: {sorted(library)}", file=sys.stderr)
@@ -247,11 +252,18 @@ def run_eval(
 
     # 坍缩因子截面恒值 → corr 标准差为 0 的 RuntimeWarning，抑制噪音
     warnings.filterwarnings("ignore", category=RuntimeWarning)
+    # 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层/相关性
+    # （伪统计量是浮点噪声），只保留时序含义（docs/factor_library.md §11.4/§16.5）
+    collapse_eval = set(collapse_names)
 
     if decay:
         # ── IC 衰减模式 ──
         _print_section(f"IC 衰减曲线（前瞻: {horizons}）")
         for name in eval_names:
+            if name in collapse_eval:
+                print(f"\n  {name}:")
+                print("    坍缩因子不做截面 IC（时序含义，见 docs §16.5）")
+                continue
             factor_vals = factor_df[name]
             decay_df = calc_ic_decay(
                 factor_vals, close_hfq, horizons,
@@ -292,6 +304,10 @@ def run_eval(
         _print_section("IC 汇总")
         ic_results = {}
         for name in eval_names:
+            if name in collapse_eval:
+                print(f"  {name:<20s}  坍缩因子不做截面 IC"
+                      "（时序含义，见 docs §16.5）")
+                continue
             factor_vals = factor_df[name]
             ic, ric = calc_ic(factor_vals, fwd_ret)
             pearson = summarize_ic(ic)
@@ -318,6 +334,10 @@ def run_eval(
     # ── 分层回测（单期，forward 始终适用）──
     _print_section(f"分层回测（{n_quantiles} 档，{forward}d 前瞻）")
     for name in eval_names:
+        if name in collapse_eval:
+            print(f"  {name}: 坍缩因子不做截面分层评估"
+                  "（时序含义，见 docs §16.5）")
+            continue
         layers = calc_layered_returns(
             factor_df[name], fwd_ret_layered, n_quantiles=n_quantiles,
         )
@@ -339,8 +359,9 @@ def run_eval(
 
     # ── 3. 因子相关性 ──
     _print_section("因子相关性矩阵（截面 Pearson 均值）")
-    if len(eval_names) >= 2:
-        corr_mat = calc_factor_corr(factor_df)
+    corr_names = [n for n in eval_names if n not in collapse_eval]
+    if len(corr_names) >= 2:
+        corr_mat = calc_factor_corr(factor_df[corr_names])
         if not corr_mat.empty:
             # 打印格式化矩阵
             header = "          " + "  ".join(f"{n:>8s}" for n in corr_mat.columns)
@@ -353,6 +374,8 @@ def run_eval(
                 print(f"  {row_name:<8s}  {vals}")
         else:
             print("  数据不足，无法计算")
+    elif len(corr_names) < len(eval_names):
+        print("  需要 ≥ 2 个非坍缩因子才能计算相关性矩阵（坍缩因子无截面变异）")
     else:
         print("  需要 ≥ 2 个因子才能计算相关性矩阵")
 
@@ -434,12 +457,14 @@ def summarize_ic(ic_series: pd.Series) -> dict:
     """IC 汇总统计。
 
     Returns:
-        {ic_mean, ic_std, icir, ic_positive_ratio, n_days}
+        {ic_mean, ic_std, icir, ic_positive_ratio, n_days}。
+        空序列（无有效截面）时统计量返回 NaN（无数据，非 IC=0），n_days=0。
     """
     ic = ic_series.dropna()
     if len(ic) == 0:
-        return {"ic_mean": 0.0, "ic_std": 0.0, "icir": 0.0,
-                "ic_positive_ratio": 0.0, "n_days": 0}
+        nan = float("nan")
+        return {"ic_mean": nan, "ic_std": nan, "icir": nan,
+                "ic_positive_ratio": nan, "n_days": 0}
 
     mean_ic = float(ic.mean())
     std_ic = float(ic.std(ddof=1))

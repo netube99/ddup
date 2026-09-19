@@ -17,6 +17,8 @@ Checks that key anti-corruption invariants are not violated:
   13. btcore module graph must be acyclic (no circular imports)
   14. source layers (btcore/research/scripts/adapters) must be DuckDB-only:
       no sqlite3 import and no SQLite API residue
+  15. strategies/**/*.py must not import onnx/onnxruntime or call
+      InferenceSession (no strategy-side ONNX inference pipeline)
 """
 
 import ast
@@ -412,6 +414,41 @@ def check_no_sqlite_residue(repo_root: str) -> list[str]:
     return errors
 
 
+def check_strategies_no_onnx(repo_root: str) -> list[str]:
+    """策略不得自行加载 ONNX 逐日推理（rule 15，AGENTS.md 禁止 ML 外挂）。
+
+    strategies/**/*.py 禁止 import onnx / onnxruntime，或调用
+    InferenceSession（第二条推理管线绕过 meta v3 契约与前视保护）。
+    分数只能经引擎通道消费：panel 列 `ml_<name>` / holding bar `ml_<name>`。
+    """
+    errors = []
+    strategies_dir = os.path.join(repo_root, "strategies")
+    if not os.path.isdir(strategies_dir):
+        return errors
+    for path in _iter_py_files(strategies_dir):
+        for module, lineno in _iter_imports(path):
+            top = module.split(".")[0]
+            if top in ("onnx", "onnxruntime"):
+                errors.append(
+                    f"VIOLATION: strategies must not import '{module}' "
+                    f"(禁止自加载 ONNX): {path} line {lineno}"
+                )
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            name = None
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Attribute):
+                name = node.attr
+            if name == "InferenceSession":
+                errors.append(
+                    f"VIOLATION: strategies must not call InferenceSession "
+                    f"(禁止自加载 ONNX): {path} line {node.lineno}"
+                )
+    return errors
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     all_errors = []
@@ -429,6 +466,7 @@ def main():
     all_errors.extend(check_factors_no_infra_deps(repo_root))
     all_errors.extend(check_no_circular_imports(repo_root))
     all_errors.extend(check_no_sqlite_residue(repo_root))
+    all_errors.extend(check_strategies_no_onnx(repo_root))
 
     if all_errors:
         print("反腐检查失败:")

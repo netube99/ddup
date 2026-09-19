@@ -21,7 +21,15 @@ def nested_set(d, key_path, value):
 
 
 def expand_params(params_def):
-    """展开参数空间为笛卡尔积，返回 (param_label, param_dict) 列表。"""
+    """展开参数空间为笛卡尔积，返回 (param_label, param_dict) 列表。
+
+    params 为空是配置错误：itertools.product() 会产出 1 个空标签组合，
+    把 base 配置当扫描结果写库（TOOL-08），此处 fail-fast。
+    """
+    if not params_def:
+        raise ValueError(
+            "params 为空：没有可扫描的参数组合（至少需要一个参数路径）"
+        )
     keys = list(params_def.keys())
     values = [params_def[k] for k in keys]
     results = []

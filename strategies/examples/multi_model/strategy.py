@@ -131,7 +131,8 @@ class MultiModel(Strategy):
         self._cooldown_days = int(self.config.get("cooldown_days", 3))
         self._confirm_days = int(self.config.get("mode_confirm_days", 5))
         self._rebalance_interval = int(self.config.get("rebalance_interval", 5))
-        self._last_rebalance = 0
+        # 调仓交易日计数器（初值 = interval 保证首日调仓）
+        self._days_since_rebalance: int = self._rebalance_interval
 
         # 三套子模型的因子规格（各自独立打分）
         self._momentum_specs = [
@@ -161,16 +162,15 @@ class MultiModel(Strategy):
     # ── on_fills: 成交感知 ────────────────────────────────────────────────
     def on_fills(self, trades, provider):
         for t in trades:
-            date_int = int(t.date)
             if t.side == "BUY":
                 # 买入：记录入场价（后续 calc_conditions 可用）
                 self._entry_price[t.symbol] = t.price
                 self._holding_high[t.symbol] = t.price
             elif t.side == "SELL":
-                # 条件单卖出 → 冷却期
+                # 条件单卖出 → 冷却期（交易日计数器，成交当日为第 1 天）
                 if t.trigger in ("STOP_LOSS", "TAKE_PROFIT", "TRAILING_TP",
                                  "DYNAMIC_STOP", "TIME_STOP"):
-                    self._cooldown[t.symbol] = date_int + self._cooldown_days
+                    self._cooldown[t.symbol] = self._cooldown_days
                 # 清理跟踪状态
                 self._entry_price.pop(t.symbol, None)
                 self._holding_high.pop(t.symbol, None)
@@ -180,12 +180,11 @@ class MultiModel(Strategy):
         if not bars:
             return
 
-        # 冷却期递减
-        date_str = next(iter(bars.values())).get("trade_date", "")
-        date_int = int(date_str) if date_str else 0
-        expired = [s for s, d in self._cooldown.items() if d <= date_int]
-        for s in expired:
-            del self._cooldown[s]
+        # 冷却期递减：每个决策日 -1，跌穿 0 解除（跨月不再立即过期）
+        for sym in list(self._cooldown):
+            self._cooldown[sym] -= 1
+            if self._cooldown[sym] < 0:
+                del self._cooldown[sym]
 
         # 逐仓最高价更新（用于 trailing 等逻辑）
         for sym, h in snapshot.holdings.items():
@@ -227,15 +226,14 @@ class MultiModel(Strategy):
             return {"buy": [], "sell": []}
 
         date_str = next(iter(bars.values())).get("trade_date", "")
-        date_int = int(date_str) if date_str else 0
 
         # ── 时间门控：非调仓日不操作 ───────────────────────────────────
         # 状态机在 on_tick 中每日更新，不受调仓节奏影响。
-        is_rebalance_day = (date_int - self._last_rebalance) >= self._rebalance_interval
-        if not is_rebalance_day:
+        self._days_since_rebalance += 1
+        if self._days_since_rebalance < self._rebalance_interval:
             return {"buy": [], "sell": []}
 
-        self._last_rebalance = date_int
+        self._days_since_rebalance = 0
 
         filtered = self.filter_bars(bars, date_str)
         df = bars_to_df(filtered)

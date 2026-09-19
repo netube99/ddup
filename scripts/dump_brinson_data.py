@@ -15,13 +15,14 @@
 
 import argparse
 import os
+import sys
 
 from btcore.database import connect_result_db
 from btcore.generic_sql import connect_market_db
 from research.attribution import _load_bars_for_symbols
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="导出 Brinson 归因数据")
     parser.add_argument("provider_db", help="tushare provider 数据库路径")
     parser.add_argument("--out", default="brinson_data", help="输出目录")
@@ -47,6 +48,27 @@ def main():
 
     conn = connect_market_db(args.provider_db)
 
+    # benchmark_weights: 单指数成分股权重聚合到行业（避免多指数混入）。
+    # 先校验：index 拼错/无数据时归因必然失败，必须在写出任何 parquet 前
+    # 非零退出并给出明确提示（TOOL-01）
+    weights = conn.execute(
+        "SELECT iw.trade_date, im.l1_name, SUM(iw.weight) as weight "
+        "FROM index_weight iw "
+        "JOIN index_member_all im ON iw.con_code = im.ts_code "
+        f"WHERE iw.index_code = ?{date_filter} "
+        "GROUP BY iw.trade_date, im.l1_name",
+        [args.index, *date_params],
+    ).df()
+    if weights.empty:
+        window = f"{args.start}~{args.end}" if args.start else "全区间"
+        print(
+            f"错误: index_weight 无 {args.index} 数据（{window}）——"
+            "index 拼写错误或该指数权重未导入，归因无法计算基准",
+            file=sys.stderr,
+        )
+        conn.close()
+        return 1
+
     # industry_map: ts_code → l1_name
     df = conn.execute("SELECT ts_code, l1_name FROM index_member_all").df()
     df.to_parquet(f"{args.out}/industry_map.parquet", index=False)
@@ -64,17 +86,6 @@ def main():
     sw_wide.to_parquet(f"{args.out}/sw_returns.parquet")
     print(f"sw_returns: {sw_wide.shape}")
 
-    # benchmark_weights: 单指数成分股权重聚合到行业（避免多指数混入）
-    weights = conn.execute(
-        "SELECT iw.trade_date, im.l1_name, SUM(iw.weight) as weight "
-        "FROM index_weight iw "
-        "JOIN index_member_all im ON iw.con_code = im.ts_code "
-        f"WHERE iw.index_code = ?{date_filter} "
-        "GROUP BY iw.trade_date, im.l1_name",
-        [args.index, *date_params],
-    ).df()
-    if weights.empty:
-        print(f"警告: index_weight 无 {args.index} 数据")
     bw_wide = weights.pivot(index="trade_date", columns="l1_name", values="weight")
     # Normalize to sum=1 per date
     bw_wide = bw_wide.div(bw_wide.sum(axis=1), axis=0)
@@ -108,7 +119,8 @@ def main():
 
     conn.close()
     print("Done.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

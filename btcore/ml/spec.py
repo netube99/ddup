@@ -23,6 +23,7 @@ YAML 形态：
         # features: {factors: [...], raw: [...]}   # 仅首次训练引导用
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -39,6 +40,14 @@ SCOPE_HOLDING = "holding"
 
 SUPPORTED_STATE_FEATURES = ("hold_days", "ret_from_entry")
 POST_TRANSFORMS = ("none", "xs_rank", "xs_zscore")
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 @dataclass
@@ -146,6 +155,20 @@ class ModelSpec:
                 f"models.{name} 缺少 meta 文件: {mp} —— "
                 "先运行 scripts/ml_train.py 训练导出"
             )
+
+        # 字节完整性：meta 记录 artifact_sha256（export_model 写入）时，
+        # 加载期校验文件哈希。篡改/半写的 ONNX 会静默改变分数，且
+        # runs.config_json 仍记旧哈希——必须在加载期 fail-fast。
+        # 首训引导（meta 由上次导出残留而 artifact 尚未生成）无文件可校验，跳过。
+        expected_sha = meta.get("artifact_sha256")
+        if expected_sha and p.exists():
+            actual_sha = _file_sha256(p)
+            if actual_sha != expected_sha:
+                raise ValueError(
+                    f"models.{name} artifact 字节与 meta.artifact_sha256 不一致"
+                    f"（meta={str(expected_sha)[:12]}…, 文件={actual_sha[:12]}…）——"
+                    f"ONNX 被篡改或写入中断，请重新训练导出: {p}"
+                )
 
         if "role" in d:
             logger.warning(

@@ -2,7 +2,7 @@
 # open = 未决发现（P0/P1 是门禁 FAIL 的来源）；closed = 已修复或已 waive
 # 手工编辑请保持结构；字段：id/severity/rule/file/line/note/opened/resolved/waived
 meta:
-  last_full_audit: '2026-09-18'
+  last_full_audit: '2026-09-19'
 open:
 - id: F-FAC-03
   severity: P3
@@ -488,6 +488,18 @@ open:
     -0.08~-0.11 或 ~0；② core_lowvol_500:37,40 用 rev_yoy_z/npr_z（库描述仍写『2025H1 无效』，与策略结论二者必有一错）；③
     dv_tg_barbell:37 用 chip_support（同族 close_vs_cost50 已被撤销）。
   opened: '2026-09-16'
+- id: E2E-02
+  severity: P2
+  rule: .agents/skills/ddup-ml-research/SKILL.md:70-83 样本外复测才算数；strategies/selected/ml_alpha_300/config.yaml:5-20
+    业绩声明
+  file: strategies/selected/ml_alpha_300/config.yaml
+  line: 5
+  note: 在产 artifact models/alpha_ml.onnx 实际仅 3 棵树（early_stopping best_iter=2），meta
+    自报 holdout ic_mean=0.0024；主控复测 2025 全年 CSI300 20d next-open RankIC=-0.0106（config
+    宣称 2024H2~2026H1 四段 0.048-0.103）；实跑 20250101-20260630 净 -6.88%。2026 窗口可复现（ML 代理实测
+    20260101-0831 RankIC 0.0994 与 +1.49% vs 基线 -1.38%）。属模型治理缺口：artifact 与宣称数字脱钩、meta
+    不记树数/best_iteration。
+  opened: '2026-09-19'
 closed:
 - id: F-FAC-01
   severity: P1
@@ -1301,3 +1313,547 @@ closed:
   opened: '2026-09-18'
   resolved: '2026-09-18'
   waived: 观察项：新旧取数 dtype 差异（Int64/StringDtype）经 ops/引擎全链路验证无行为破坏，保持现状
+- id: INV-01
+  severity: P0
+  rule: AGENTS.md 设计契约·公司行为仅用分红表正确处理；btcore/factors/plan.py:44 自述交易所口径 pre_close=(前裸收-现金红利)/(1+送转比例)
+  file: btcore/corporate.py
+  line: 91
+  note: 同日现金分红+送转时 _apply_stk_div 先放大 shares，_apply_cash_div 用送转后股数计 gross；cash scale=pre_close/(pre_close+cash_div)
+    又在已应用送转 scale 的价格上二次计算。主控复现 fixture 920089.BJ 20240613（10送4派1.2，74600 股）：引擎派现
+    10026.24 vs 正确 7161.60，虚增 2864.64=cash_div*stk_div*shares*(1-tax)；entry_price
+    额外偏低约 0.36%（虚增 total_value）。真实库同日组合事件 9082 笔（183033 条分红行）。test_inv6 只测纯送转/纯现金。修复：现金按送转前股数计息并按组合除权公式缩放。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INV-02
+  severity: P3
+  rule: AGENTS.md:154『DataProvider 所有查询按当前模拟日钳制』
+  file: btcore/provider.py
+  line: 113
+  note: get_calendar/get_dividends_on_date 裸透传、get_engine_bars 无 clamp：子代理探针在模拟日 20240606
+    调 get_dividends_on_date('20240626') 返回未来事件；strategy-facing get_historical_bars/get_benchmark_returns
+    钳制正确。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INV-03
+  severity: P3
+  rule: AGENTS.md 五要素边界表『成交量不足 → entry/exit_conditions 自动跳过并 warn』
+  file: btcore/match/conditions.py
+  line: 127
+  note: 条件单被 volume cap 截断时部分成交且零告警（子代理实证 STOP_LOSS 请求 10 万股 cap 5000 → 卖 5000 无日志；entry
+    侧同理），manual 路径有『成交量约束截断卖出』告警，两条路径不对称。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INV-04
+  severity: P3
+  rule: docs/strategy_guide.md:180 sell_shares=部分减仓股数（正整数）；隐式契约：部分减仓不应静默变清仓
+  file: btcore/engine.py
+  line: 214
+  note: sell_shares 只校验键存在与正整数，不比对持仓；match/manual.py:52-54 min(desired, holding.shares)
+    静默钳制为全清。主控代码复核成立。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: E2E-01
+  severity: P1
+  rule: strategies/examples/target_allocator/config.yaml:58 等声明 rebalance_interval
+    为交易日数；docs/strategy_guide.md:423-432 官方样例即为该写法
+  file: strategies/selected/dv_lowvol_300/strategy.py
+  line: 85
+  note: 全部策略用 int(YYYYMMDD) 十进制差判调仓间隔与 min_hold：int('20240201')-int('20240122')=79，跨月跳变强插调仓；实测
+    dv_lowvol_300 买入间隔（交易日）[1,14,8,8,7,21,20,15,5,14]，名义 20 日实际约 11 日；self_managed_rank/value_momentum
+    的 min_hold 被绕过（96/79 的日历差）；冷却期 20240130+3=20240133 立即过期。项目内已有正确范式（trend_guard_bw_300
+    的交易日计数器）。主控已复核。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: E2E-03
+  severity: P3
+  rule: strategies/examples/rolling_ranker/strategy.py:100-110 自述按得分比例分配资金
+  file: strategies/examples/rolling_ranker/strategy.py
+  line: 100
+  note: buy_weights 仅在新买入名单内归一化，满仓轮动被现金护栏系统性跳过；主控实测 20240101-20240630 共 39 条『现金不足』+27
+    条『不足 100 股』，示例演示意图失效。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: E2E-04
+  severity: P3
+  rule: 隐式契约：用户输入错误的诊断可操作性（docs/audit_checklist.md:345）
+  file: btcore/engine.py
+  line: 540
+  note: start>end 与纯周末区间都报『日历为空』（误导为数据问题）；不存在 YAML/坏 YAML 裸 traceback；exit code 均
+    1 正确但定位成本高。与 INFRA-06 同族。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-01
+  severity: P1
+  rule: docs/factor_library.md:632『研究侧等价的流式入口是 compute_breadth』；.agents/skills/ddup-factor-research/SKILL.md:82『与引擎同源口径』
+  file: btcore/factors/library.py
+  line: 341
+  note: compute_breadth 与引擎 _preload_breadth 不等价且随 chunk_days 变化。主控复现：真实 Engine.prepare
+    vs compute_breadth 在 pct_above_ma20 20230101-20230630 有 44/118 日不同（max 1.148e-3）；chunk60
+    vs chunk17 有 71/118 日不同（max 2.48e-3）。根因：分块把每 symbol 历史截断到 max_window 行，停牌股复牌后
+    roc 无前收盘（300114.SZ 等），单块/引擎保留完整历史。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-02
+  severity: P2
+  rule: .agents/skills/ddup-factor-research/SKILL.md:78『t 日权重仅用 ≤t-1 日 IC』；research/composite.py:8-9
+    docstring 前视约定
+  file: research/composite.py
+  line: 58
+  note: IC 由 h 日前瞻收益算出，权重仅 shift(1)（应用 shift(h) 或仅用已实现收益）。子代理探针：只扰动 20230301 的 fwd_ret（20230308
+    实现），composite 从 20230302 起变化；标准版 RankIC/IR 0.0899/0.340 vs 严格因果版 0.0318/0.111（相关
+    0.827）。主控代码逻辑复核成立。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-03
+  severity: P3
+  rule: .agents/skills/ddup-factor-research/SKILL.md:83 坍缩因子不能算 IC；docs/factor_library.md:612-614
+  file: research/factor_eval.py
+  line: 296
+  note: factor_eval 对坍缩因子输出伪统计量：pct_sealed 常量截面下 Pearson IC 为浮点噪声（1e-16）却累计 IR=-0.0552、Win=0.4581、(203d)，空
+    IC 序列 summarize 返回 0.0 抹掉『无数据』。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-04
+  severity: P3
+  rule: AGENTS.md 接口变更须同批更新 .agents/skills/（check_skill_sync 同步承诺）
+  file: .agents/skills/ddup-factor-research/SKILL.md
+  line: 84
+  note: SKILL 称算术包装的 group_mean 坍缩「落入任意组 first() 分支静默有损」，与代码相反：子代理实测 group_mean(mom20,industry)
+    vs 1*group_mean(...) n_diff=0 maxdiff=0（ops.py:356-366 已按 collapse_kind 修复）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-05
+  severity: P3
+  rule: btcore/factors/library.py:89-90 承诺非法表达式包装为 ValueError
+  file: btcore/factors/library.py
+  line: 69
+  note: '非字符串 expr/where 抛裸 TypeError。主控复现 expr: 5 → TypeError: compile() arg 1 must
+    be a string, bytes or AST object；run.py/factor_eval 只捕 ValueError 故裸 traceback。'
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-06
+  severity: P3
+  rule: fail-fast 应给出可理解错误；ops.py:305-309 只校验正整数下界
+  file: btcore/engine.py
+  line: 556
+  note: 巨窗无上界校验。主控修正复现路径：build_factor_plan({'f':{'expr':'ma(close, 10000000)'}},['f'])
+    本身不崩（main_days=15000010），崩溃发生在 warmup 换算 pd.Timedelta(days=main_days)（engine.py:556、research/factor_eval.py:151）→
+    OutOfBoundsTimedelta。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-07
+  severity: P3
+  rule: btcore/factors/library.py:40 保留字应扩展至算子名；ops.py:314-320 依赖提取声明
+  file: btcore/factors/library.py
+  line: 41
+  note: 仅 abs/log 保留，因子可命名为 std 等算子名：主控复现 shadow_lib.yaml zzz='std(close_hfq,5)+std'
+    的 resolve_closure 只返回 {'zzz'}（依赖被静默丢弃），求值报误导性『未知列或因子引用 std』；mystd 版本正常。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: FAC-08
+  severity: P3
+  rule: docs/factor_library.md:629 存在 NaN 时告警（warmup 区不应计入）
+  file: btcore/factors/plan.py
+  line: 340
+  note: 已知 V-FAC-02 新证据：主控跑真实 Engine.prepare 得到『坍缩因子 pct_above_ma20 NaN 占比 66.4% (1515819/2281694
+    行, 360 个交易日)』，其中 2022 年 136 万行是广度面板设计不覆盖的 warmup，健康策略每次运行产生告警噪声。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: ML-01
+  severity: P2
+  rule: AGENTS.md 软回退 vs Fail-Fast：契约不一致须在加载期报错；docs/ml_guide.md:217-229 meta v3 契约
+  file: btcore/ml/spec.py
+  line: 134
+  note: artifact_sha256 只写不读（grep 全仓仅 export 写入与 run_summary 回显），ModelSpec 加载不校验文件字节；篡改/半写
+    ONNX 静默改变分数而 runs.config_json 仍记旧哈希。子代理 E2E：篡改后分数 0.4267→0.4451，回测正常跑完 58 笔。修复：meta
+    存在时校验 sha256，或 _get_session 前断言。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: ML-02
+  severity: P2
+  rule: docs/ml_guide.md:135-137 导出校验失败即失败（不应留产物）；AGENTS.md fail-fast
+  file: btcore/ml/export.py
+  line: 50
+  note: export_model 先写 onnx→meta，最后 _verify；校验失败（或进程中断）已覆盖生产 artifact 且无回滚（子代理探针强制
+    _verify 失败后目标文件已变）。重训流程正是覆盖 models/alpha_ml.onnx。修复：临时文件+校验通过后 os.replace 原子改名。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: ML-03
+  severity: P3
+  rule: docs/ml_guide.md:106 训练域=index_universe 并集 + PIT；fail-fast
+  file: scripts/ml_train.py
+  line: 128
+  note: index_universe 成分快照为空时 if snaps 为假直接全市场训练，无 print/warning（与 F-ENG-04 引擎侧同类，训练侧新证据）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: ML-04
+  severity: P3
+  rule: AGENTS.md 禁止重引入 ML 外挂模式：策略不得自行加载 ONNX
+  file: scripts/check_anticorrupt.py
+  line: 415
+  note: 14 项机械检查无 ML/onnx 项；策略可直接 import onnxruntime 推理，绕过 meta 契约与前视保护，无任何探测/告警。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-01
+  severity: P1
+  rule: docs/cli_and_research.md:290『fill/ADJUST 只落交易日』
+  file: research/live.py
+  line: 190
+  note: 显式非交易日/早于 start_date 的 fill 原样入 ledger_fills 成为永久死行（light_replay 只遍历 trade_cal
+    开市日），sync 仍 ok:true 并写 ADJUST 平现金。主控复现：init 100000/20260918，statement date 20260919
+    + BUY 1000@11.7 → ledger_fills 落 (20260919 BUY) 永不生效 + (20260918 ADJUST -11705)，warning
+    误导为出入金。修复：append 前用 get_calendar 校验 fill 日期。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-02
+  severity: P1
+  rule: scripts/live.py:59 条目非法应在写库前报错；research/live.py:119 建账校验意图
+  file: research/live.py
+  line: 119
+  note: NaN 现金穿透全部守卫（NaN<0/<=0/abs(NaN)>0.01 恒 False）。主控复现：live.py init --cash nan
+    → ok:true initial_cash=NaN；随后 sync cash=50000 → ok:true cash_derived=NaN cash_adjust=0.0，永久
+    NaN。同类 inf 未测。修复：统一 math.isfinite 校验。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-03
+  severity: P2
+  rule: .agents/skills/ddup-live-ops/SKILL.md:23 notices 语义（停牌＝无行情）
+  file: research/live.py
+  line: 629
+  note: notices 只查引擎 universe 的 day_bars，universe 外持仓（切策略/手动买入）误报『停牌？明日不可操作』；子代理实证
+    trend_guard signal 报 000006.SZ 停牌而同日 total_value 用其收盘价且实库有行情。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-04
+  severity: P2
+  rule: .agents/skills/ddup-live-ops/SKILL.md:23 t1_lock notice
+  file: research/live.py
+  line: 640
+  note: t1_lock 为死代码：live.signal 决策时点 locked 已由 compute_pending 尾部清零（btcore/engine.py:766），正常路径永不触发；子代理实证
+    20240102 有 15 笔当日 BUY 而 notices=[]。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-05
+  severity: P2
+  rule: docs/cli_and_research.md:305-306 cross_validate 可直接消费账本库
+  file: research/cross_validate.py
+  line: 218
+  note: 消费账本库时初始资金回落 1_000_000 而非账本 initial_capital（主控实测设定 1,000,000），收益/磨损数字全错。修复：识别
+    live 库 runs 表或按 account_daily 首日权益取值。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-06
+  severity: P2
+  rule: research/live.py:352-355 seed_opening 契约
+  file: scripts/live.py
+  line: 76
+  note: init 不校验开市日：--date 20260919（周六）+ 持仓 entry 20260911 → holding_days=0（应 5，seed
+    用 init_idx.get(date,0)）；同日 sync 归一化 20260918 后触发『早于账本起始日 20260919』exit 2（报错日期与用户输入不一致），当日无法完成首次
+    sync。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-07
+  severity: P2
+  rule: 与 signal 同日期的校验一致性（signal 对无行情日拒绝）
+  file: scripts/live.py
+  line: 134
+  note: sync 接受无行情数据的未来交易日 statement（子代理实证 date=20260921 → ok:true fills_applied=1），signal
+    同日则拒绝，两条命令口径不一致。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-08
+  severity: P2
+  rule: docs/cli_and_research.md:294-303 sync.yaml 字段文档
+  file: research/live.py
+  line: 63
+  note: 'sync 接受未文档化的 side: OPENING：子代理实证 ok:true fills_applied=1，现金不变、持仓回溯生效，可绕过现金记账语义。'
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-09
+  severity: P2
+  rule: fail-fast 约定（status 只读不应写库）
+  file: research/live.py
+  line: 86
+  note: status 对不存在路径静默建库并输出 null（exit 0），掩盖 typo；子代理实证 uninit.duckdb 被创建。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-11
+  severity: P3
+  rule: F-RSR-06 同根因（statement 解析错误在 JSON 错误通道之外）
+  file: scripts/live.py
+  line: 121
+  note: cash:"abc" 抛裸 ValueError、holdings 缺 shares 抛 KeyError，均非 JSON 错误通道（已知-新证据）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-12
+  severity: P3
+  rule: CLI 错误可操作性（docs/audit_checklist.md:345）
+  file: research/live.py
+  line: 555
+  note: signal 业务错误（非交易日/无行情/YAML 不存在/--out 目录不存在）全部裸 traceback。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-13
+  severity: P3
+  rule: 现金非负契约（回测侧 INV3）在实盘账本的同款约束
+  file: scripts/live.py
+  line: 176
+  note: 负现金 statement 仅 warning 即入账（ADJUST -55000 后 cash=-5000），账本可持久化负现金。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-14
+  severity: P3
+  rule: 账本 schema 版本治理（无书面契约即观察项）
+  file: research/live.py
+  line: 30
+  note: 无 schema 版本键；手工 schema_version=99 被静默忽略（status exit 0），未来迁移无锚点。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-15
+  severity: P3
+  rule: 幂等键不应改写真值
+  file: research/live.py
+  line: 200
+  note: 幂等键归一化把 price 11.12345678→11.123457、shares 1000.9→1000 后落库，账面与券商流水存在微小差异。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-01
+  severity: P2
+  rule: AGENTS.md 日期全仓 YYYYMMDD 约定；fail-fast 无声明例外即须校验
+  file: scripts/refresh_gold_db.py
+  line: 352
+  note: --since/--until 为 type=int 年份且 --until 无 help；按仓库日期惯例传 --until 20260918 会被解释为年份
+    20,260,918，range 展开约 2026 万次 API 调用（实测分钟级卡死无输出）。修复：接受 YYYY/YYYYMMDD 并加上下界校验。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-02
+  severity: P2
+  rule: scripts/refresh_gold_db.py:12-22 数据契约（交易日网格完整）
+  file: scripts/refresh_gold_db.py
+  line: 188
+  note: 刷新不与 trade_cal 对账完整性：主控实测 gold_panel 缺 20260713（SSE 开市日，上游 fund_factor_pro
+    该日 0 行），被静默复制进面板；回测跳过该日后触发已知 F-ENG-02 的 stale-pending 语义。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-03
+  severity: P2
+  rule: adapters/tushare_gold.py:11-13 与 docs/backend_guide.md:56 宣称宏观列严格早于中国交易日对齐、无前视；AGENTS.md
+    财报类按公告日对齐
+  file: scripts/refresh_gold_db.py
+  line: 224
+  note: m1_yoy/m2_yoy 按『次月 1 日』可用对齐，早于实际月中的金融数据发布。主控实测 20240603 面板 m2_yoy=7.0 = cn_m
+    202405 月值（6 月中旬才发布）。当前无消费方故为潜伏；一旦入因子/信号立即升级 P1。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-04
+  severity: P2
+  rule: adapters/tushare_gold.py:15『黄金 ETF 无分红，dividend 为空表』不可外推为无公司行为；AGENTS.md 公司行为契约
+  file: adapters/tushare_gold.py
+  line: 15
+  note: 份额合并（反向拆分）无法表达：159934.SZ 20250922 pre_close 8.251 vs 前收 7.823（+5.5%）、fund_adj
+    1.0→0.948、dividend 表空、引擎只支持 stk_div>0 正向送转。主控实测 gold_159934.duckdb：20250922 account_daily
+    daily_pnl +78799（+7.34%），复权口径应 +1.89%，虚增约 5.5pp。任何多标的黄金策略都会静默错账（主标的 518880 adj=1
+    不受影响）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-05
+  severity: P3
+  rule: AGENTS.md 价格体系（基准口径一致）；GOLD_FORM 省略 benchmark_adj_factor
+  file: adapters/tushare_gold.py
+  line: 56
+  note: benchmark 未接复权：159934/518800 adj≠1（0.948/0.942），改 benchmark 为这些标的时基准含拆分跳空；当前
+    518880 adj=1 不受影响。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-06
+  severity: P3
+  rule: AGENTS.md 策略设计五要素：说明书充当回测审查核对底稿（宣称须可复现）
+  file: strategies/exploring/gold_mid_term/config.yaml
+  line: 13
+  note: config 头三子区间收益与当前数据/代码不可复现（2019H2-2021 宣称 +13.7%/16.3% 实测 +16.18%/15.95%；2024-2026
+    宣称 +94.2%/17.6% 实测 +98.51%/16.37%），主窗与基准精确吻合，疑似 tick 修正时只重算主窗。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-07
+  severity: P3
+  rule: 同目录文档一致性
+  file: strategies/exploring/gold_mid_term/strategy.py
+  line: 18
+  note: docstring 仍是 tick 修正前数字（+194.9%/1.03/21.2），与 config.yaml:9-11（+204.3%/1.07/20.2）矛盾；两套数字子代理均复现。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: GOLD-08
+  severity: P3
+  rule: AGENTS.md 关键机制索引：factor_eval 因子评估；策略本地 factor_library 机制
+  file: research/factor_eval.py
+  line: 96
+  note: factor_eval 只加载顶层 factors/library.yaml，无 --factor-library；黄金策略目录 factors.yaml
+    的因子无法评估（未知因子 gold_ma200）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-01
+  severity: P1
+  rule: 'docs/cli_and_research.md:512『数据不足时不抛异常，返回 {error: 原因}，调用方需先检查 error 键』'
+  file: research/attribution.py
+  line: 611
+  note: benchmark 指数无数据/拼错时 _load_benchmark_weights 只 warning 返回空 df；空 df 经 ffill/dropna（0
+    列 dropna 不丢行）公共日期检查失效，归因静默按基准收益 0 计算。主控复现 index_code=999999.XX：has error False，total_benchmark_return=0.0，total_excess_return=0.2295（=组合收益），allocation=0.0984
+    非零。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-02
+  severity: P1
+  rule: .agents/skills/ddup-backtest-analysis/SKILL.md:15 net_amount 对 SELL 是成交净额，禁止直接
+    SUM 当盈亏；docs/cli_and_research.md:182 承诺『按 trigger 分组的总盈亏』
+  file: research/cross_validate.py
+  line: 196
+  note: 卖出分类统计 total_pnl=("net_amount","sum") 实为卖出净额。主控复现：audit.duckdb run1 输出 MANUAL
+    total_pnl=573655.19（=sum(net_amount) SELL），真实 round_trip.total_realized_pnl=75010.18，偏差
+    7.6 倍。建议改按 trigger 聚合 trip_detail 盈亏。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-03
+  severity: P2
+  rule: docs/cli_and_research.md:519『持仓自 run 起点重建（期初建仓不被丢失）』
+  file: research/attribution.py
+  line: 840
+  note: brinson_attribute_from_files 日期轴只取 bars，bars 被 --start 截断时期初持仓静默丢失；子代理实测同窗
+    from_files 0.1224 vs direct DB 0.1420（低估 1.96pp，无告警）。修复：校验 bars 起点 ≤ run.start
+    或拒绝。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-04
+  severity: P2
+  rule: docs/cli_and_research.md:210 失败组合 FAIL 并跳过（全失败未定义）；误导性成功输出
+  file: scripts/sweep.py
+  line: 146
+  note: 全组合失败仍 exit 0 并打印『结果已保存到 <不存在的库>』。主控复现 sweep_allfail.yaml：FAIL 后 exit 0、库不存在。修复：失败计数全失败非零退出、置于
+    exists 判断后打印。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-05
+  severity: P3
+  rule: .agents/skills/ddup-backtest-analysis/SKILL.md:60 分红 received/accrued 双口径；btcore/stats.py:24-25
+  file: research/report.py
+  line: 343
+  note: 报告只展示 total_dividend_received，遗漏 total_dividend_accrued（全口径含期末未平仓 lot，子代理
+    run1 为 15585.381 vs 展示 1900.80）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-06
+  severity: P3
+  rule: sweep FAIL 应可见真实错误
+  file: scripts/sweep.py
+  line: 102
+  note: 'FAIL 消息截断到 200 字符，真正错误（ValueError: max_positions 必须是正整数: 0）被切掉。'
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-07
+  severity: P3
+  rule: AGENTS.md 接口变更须同批更新 docs/
+  file: docs/cli_and_research.md
+  line: 168
+  note: 文档写 --capital 兜底 40000，代码 research/cross_validate.py:147/218 兜底 1_000_000；兜底资金档位改变磨损阈值（3%
+    vs 0.5%）与 WARN/INFO 降级。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-08
+  severity: P3
+  rule: sweep 空参数应报错而非运行 base
+  file: research/sweep.py
+  line: 23
+  note: 'params: {} 经 itertools.product() 产 1 个空标签组合（dry-run 显示 1 组），实跑把 base 配置当扫描结果写库。'
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-09
+  severity: P3
+  rule: 错误通道一致性（不存在的 run-id 应报 run 不存在）
+  file: research/replay.py
+  line: 98
+  note: replay --run-id 99 报『无匹配快照』；compare --runs 1,99 静默丢弃 99 后报『至少需要 2 个 run』，均不提示
+    99 不存在。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: TOOL-10
+  severity: P3
+  rule: 本地工作区配置卫生（strategies/selected 被 .gitignore 忽略，非分发契约）
+  file: strategies/selected/dv_lowvol_300/sweep_ab.yaml
+  line: 1
+  note: 3 份本地 sweep 配置 base 指向已不存在的 strategies/exploring/dv_lowvol_300/config.yaml，dry-run
+    exit 1。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-01
+  severity: P3
+  rule: AGENTS.md 自述权威契约（关键入口 file:line 锚点）
+  file: AGENTS.md
+  line: 118
+  note: 16 个锚点 7 个漂移（主控复跑 check_anchors.py）：engine.py run 419/step 646/compute_pending
+    754（文档 404/624/732）；ops.py eval_op_expr 372（370）；plan.py materialize 294（287）；conditions.py
+    entry_conditions 196（199）；database.py init_backtest_db 136（132）。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-02
+  severity: P3
+  rule: ARCHITECTURE.md 应与代码/AGENTS.md 一致
+  file: ARCHITECTURE.md
+  line: 23
+  note: 539 测试 vs 实际 708；41 顶层测试文件 vs 60；test_ml.py 54 vs 58；engine.py 987 行 vs 1007；scripts/cross_validate.py:213
+    越界（该文件仅 111 行）等多处陈旧。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-03
+  severity: P3
+  rule: docs/index.md 应反映实际 skill 数
+  file: docs/index.md
+  line: 54
+  note: 写『共 7 个（研究 6 + 实盘 1）』，实际 8 个（含 ddup-review-gate）；同文件 :74 又自述 8 个。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-04
+  severity: P2
+  rule: AGENTS.md 命令段『从真实数据库重新生成测试 fixtures』
+  file: scripts/dump_fixtures.py
+  line: 177
+  note: _dump_bars 为 exclude_loss 联表 bak_basic 后 SELECT ts_code 未加 s. 前缀，DuckDB 报
+    Ambiguous reference。主控在仓库副本复现 exit 1（未写任何文件）；fixtures 再生成通道断裂，只能手工修补。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-05
+  severity: P2
+  rule: scripts/live.py:59『任何条目非法在写库前报错』；sync 有日期校验
+  file: scripts/live.py
+  line: 93
+  note: init --date 零校验（主控复现 abc/空/2024-01-01/20261301 均 exit 0 并持久化 start_date="abc"），此后
+    sync/signal 永久被字符串比较拦截（exit 2）且重 init 报『已初始化』，无 CLI 恢复出口；同类 run.py --start 14
+    位日期被静默接受。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-06
+  severity: P3
+  rule: CLI 动态验证须确认退出码与输出可操作性（docs/audit_checklist.md:345）
+  file: scripts/ml_train.py
+  line: 79
+  note: 用户输入类错误裸 traceback 9 例（ml_train 顶层 list YAML AttributeError、sweep 空/标量 YAML
+    TypeError、compare --runs a,b ValueError、run.py 坏日期『日历为空』、输出不可写 IOException 等）；对照
+    factor_eval/replay/cross_validate/review_gate 均打印可读消息。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: INFRA-07
+  severity: P3
+  rule: docs/audit_checklist.md:339 已记录 export 无直接测试（新证据：0% 覆盖）
+  file: btcore/ml/export.py
+  line: 21
+  note: 全量覆盖率 92%，export.py 40/40 行零执行（唯一 <80% 模块）；手工探针合成面板 train→export→load 可用，但无回归网。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+- id: LIVE-10
+  severity: P2
+  rule: .agents/skills/ddup-live-ops/SKILL.md:23-24 每日流程（signal/status 应反映持仓）
+  file: research/live.py
+  line: 270
+  note: 生产账本持仓 ETF 512880.SH，股票后端无基金行情 → signal『20260918 无行情数据』exit 1；ledger_holdings
+    永不刷新，sync 对账 9400 股成功后 status 仍显示空持仓。strategy config 注释已声明『待实施』，实盘流程当前对 ETF 账本不可用。
+  opened: '2026-09-19'
+  resolved: '2026-09-19'
+  waived: 用户决策：系统只保留 A 股个股，不引入 ETF/基金行情后端

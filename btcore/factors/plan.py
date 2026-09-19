@@ -167,8 +167,22 @@ def ensure_pseudo_columns(
 
 # 交易日窗口 → 日历天的工程换算（×1.5 + 缓冲）
 # 公开：library.compute_breadth 跨模块消费同一换算，避免两份逻辑漂移
+#
+# 上界（FAC-06）：换算结果供 pd.Timedelta(days=...) 消费，pandas 的
+# 可表示上限约 106751 天（int64 纳秒），留余量取 100000；巨窗必须在此
+# fail-fast，否则下游抛 OutOfBoundsTimedelta 掩盖真实原因
+# （ma(close, 10000000) → 15000010 天）。
+MAX_CALENDAR_DAYS = 100_000
+
+
 def to_calendar_days(trading_rows: int) -> int:
-    return int(trading_rows * 1.5) + 10
+    if trading_rows > MAX_CALENDAR_DAYS:
+        # 先挡超大整数，避免 ×1.5 触发 int→float 溢出
+        raise ValueError(f"窗口过大: {trading_rows}")
+    days = int(trading_rows * 1.5) + 10
+    if days > MAX_CALENDAR_DAYS:
+        raise ValueError(f"窗口过大: {trading_rows}")
+    return days
 
 
 def build_factor_plan(nodes: dict[str, dict], entry_names: list[str]) -> dict:
@@ -319,14 +333,78 @@ def materialize(
             breadth_df.drop(columns=tmp, inplace=True, errors="ignore")
 
 
+def _nan_day_stats(col: pd.Series) -> dict:
+    """按交易日分解坍缩列 NaN 形态（FAC-08 / V-FAC-02）。
+
+    区分三种语义：
+      - 前导整日全 NaN（lead_*）：窗口预热区，首个有值日之前，属设计内
+      - 整日全 NaN 缺口（gap_*）：首个有值日之后（或无任何有值日）——
+        真无值，需要告警
+      - 部分行 NaN（partial_*）：同日仍有其他有效值——where 掩码或面板
+        网格缺行，不是「整日无值」
+
+    返回 dict：rows/total_rows/all_days/all_rows/lead_days/lead_rows/
+    gap_days/gap_rows/gap_dates/partial_rows/partial_days。
+    """
+    total = len(col)
+    mask = col.isna()
+    stats = {
+        "total_rows": total,
+        "rows": int(mask.sum()),
+        "all_days": 0, "all_rows": 0,
+        "lead_days": 0, "lead_rows": 0,
+        "gap_days": 0, "gap_rows": 0, "gap_dates": [],
+        "partial_rows": 0, "partial_days": 0,
+    }
+    if not stats["rows"]:
+        return stats
+
+    days = col.index.get_level_values("trade_date")
+    by_day = (
+        pd.DataFrame({"nan": mask.to_numpy()}, index=days)
+        .groupby(level=0)["nan"].agg(["sum", "size"])
+    )
+    all_nan = by_day["sum"] == by_day["size"]
+    stats["all_days"] = int(all_nan.sum())
+    stats["all_rows"] = int(by_day.loc[all_nan, "sum"].sum())
+    partial = (by_day["sum"] > 0) & ~all_nan
+    stats["partial_rows"] = int(by_day.loc[partial, "sum"].sum())
+    stats["partial_days"] = int(partial.sum())
+
+    valid = by_day.index[by_day["sum"] < by_day["size"]]
+    if len(valid):
+        lead = all_nan & (by_day.index < valid[0])
+        gap = all_nan & (by_day.index > valid[0])
+    else:
+        # 全列无值：不当作预热，整体按真异常处理
+        lead = pd.Series(False, index=by_day.index)
+        gap = all_nan
+    stats["lead_days"] = int(lead.sum())
+    stats["lead_rows"] = int(by_day.loc[lead, "sum"].sum())
+    gap_dates = by_day.index[gap]
+    stats["gap_days"] = int(gap.sum())
+    stats["gap_rows"] = int(by_day.loc[gap, "sum"].sum())
+    stats["gap_dates"] = list(gap_dates)
+    return stats
+
+
 def validate_materialization(
     main_df: pd.DataFrame,
     plan: dict,
 ) -> list[dict]:
     """物化后验证：检查坍缩因子的完整性和数据质量（唯一验证入口）。
 
+    NaN 语义区分（FAC-08）：
+      - 前导整日 NaN = 窗口预热 → info 直接落日志（不进 issues）
+      - 首个有值日之后的整日 NaN = 真缺口 → warning issue（占比 > 5%）
+      - 部分行 NaN = where 掩码 / 面板网格缺行 → info「掩码缺失」直接落
+        日志（不进 issues，避免引擎 issue 通道把 info 当 warning 刷屏）
+
+    info 类发现直接 logger.info，不经 issues 返回——引擎的 issue
+    通道白名单只有 warning/error，返回 info 会被降级为 warning 噪声。
+
     Returns:
-        list of dicts with keys: level (info/warning/error), message
+        list of dicts with keys: level (warning/error), message
     """
     issues = []
 
@@ -337,21 +415,27 @@ def validate_materialization(
             logger.warning(msg)
             issues.append({"level": "warning", "message": msg})
             continue
-        nan_count = col.isna().sum()
-        nan_pct = nan_count / len(col) if len(col) > 0 else 0
-        nan_dates = (
-            main_df.index[col.isna()].get_level_values("trade_date").nunique()
-        )
-        if nan_pct > 0.05:
-            msg = (f"坍缩因子 {name!r} NaN 占比 {nan_pct:.1%} "
-                   f"({nan_count}/{len(col)} 行, {nan_dates} 个交易日)")
-            logger.warning(msg)
-            issues.append({"level": "warning", "message": msg})
-        elif nan_count:
-            msg = (f"坍缩因子 {name!r} 有 {nan_count} 行 NaN "
-                   f"({nan_dates} 个交易日)")
+        st = _nan_day_stats(col)
+        if not st["rows"]:
+            continue
+        if st["lead_days"]:
+            msg = (f"坍缩因子 {name!r} 在 {st['lead_days']} 个交易日无值"
+                   f"（窗口预热区, {st['lead_rows']} 行 NaN）")
             logger.info(msg)
-            issues.append({"level": "info", "message": msg})
+        if st["gap_days"]:
+            pct = st["gap_rows"] / st["total_rows"] if st["total_rows"] else 0.0
+            msg = (f"坍缩因子 {name!r} 在 {st['gap_days']} 个交易日无值"
+                   f"（{st['gap_rows']}/{st['total_rows']} 行 NaN, "
+                   f"占比 {pct:.1%}）")
+            if pct > 0.05:
+                logger.warning(msg)
+                issues.append({"level": "warning", "message": msg})
+            else:
+                logger.info(msg)
+        if st["partial_rows"]:
+            msg = (f"坍缩因子 {name!r} 掩码缺失 {st['partial_rows']} 行 NaN"
+                   f"（{st['partial_days']} 个交易日部分行有值, 非整日缺失）")
+            logger.info(msg)
 
     return issues
 
@@ -412,14 +496,25 @@ def _project(
     逐行 reindex 保留 where 后置掩码的 NaN——groupby.first() 会跳过 NaN
     把未掩码值泄漏给已掩码 symbol（docs/factor_library.md §8）。
     """
-    main_dates = main_df.index.get_level_values("trade_date")
     if kind != "market" and group_col not in breadth_df.columns:
         raise ValueError(
             f"坍缩因子 {name!r} 分组投影需要组键列 {group_col!r}，"
             "但广度面板无此列——请检查伪列附着需求"
         )
     main_df[name] = breadth_df[name].reindex(main_df.index).to_numpy()
-    missing = main_dates[main_df[name].isna()].unique()
-    if len(missing):
-        logger.warning("坍缩因子 %r 在 %d 个交易日无值: %s ...",
-                       name, len(missing), missing[:5].tolist())
+    # FAC-08 / V-FAC-02：只有「首个有值日之后的整日全 NaN」才是真无值；
+    # 前导 NaN（窗口预热）与部分行 NaN（where 掩码 / 网格缺行）不报
+    # 「N 个交易日无值」——后者交给 validate_materialization 的掩码文案
+    st = _nan_day_stats(main_df[name])
+    if st["gap_days"]:
+        gap_dates = st["gap_dates"]
+        logger.warning(
+            "坍缩因子 %r 在 %d 个交易日无值: %s ...",
+            name, st["gap_days"], gap_dates[:5],
+        )
+    elif st["rows"]:
+        logger.debug(
+            "坍缩因子 %r 投影 NaN 属预热/掩码（预热 %d 日, 掩码 %d 行），"
+            "不计入无值告警",
+            name, st["lead_days"], st["partial_rows"],
+        )

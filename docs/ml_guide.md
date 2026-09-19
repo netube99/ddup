@@ -104,7 +104,9 @@ completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
 先于买卖处理，红利计入在持回合 pnl。
 
 训练域：`filter_rules.index_universe` 成分在训练窗口内的并集；未配置则全市场。
-面板自动向 start 之前延伸 warmup 天数（按因子闭包推导），标签窗口不会缺数据。
+配置了但窗口内解析不到任何成分快照（成分表未同步等）→ 打印警告并回退
+全市场训练，不会静默改变训练域。面板自动向 start 之前延伸 warmup 天数
+（按因子闭包推导），标签窗口不会缺数据。
 
 切分纪律：
 
@@ -133,8 +135,13 @@ completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
 - `<name>.onnx` — XGBoost ONNX 模型（panel 回归 / holding 二分类）
 - `<name>.meta.json` — meta v3：特征契约 + scaler + 评估指标 + sha256（勿手写）
 
-导出时自动做 sklearn 原始模型 vs 导出 ONNX 的输出一致性校验（含 scaler 路径，
-max diff > 1e-4 则导出失败）。
+导出采用**原子写**：onnx/meta 先写同目录 `.tmp`，sklearn 原始模型 vs 导出
+ONNX 的输出一致性校验（含 scaler 路径，max diff > 1e-4 即失败）通过后才
+`os.replace` 落位——校验失败或中断时旧 artifact 原样保留，不留半写文件。
+
+meta 的 `artifact_sha256` 不只用于追溯：加载 ModelSpec 时若 meta 含该键且
+artifact 存在，会重算文件 sha256 并比对，不符（篡改/半写）直接 `ValueError`。
+首训引导（`require_meta=False`、artifact 尚不存在）跳过该校验。
 
 ### 2.4 策略消费
 
@@ -175,7 +182,7 @@ trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
 
 | 键 | 类型 | 必需 | 说明 |
 |----|------|------|------|
-| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），训练输出写这里（首次训练可不存在） |
+| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），训练输出写这里（首次训练可不存在）；加载时按 meta 的 `artifact_sha256` 校验文件字节，不符报错 |
 | `meta` | str | 否 | meta 路径，缺省 = artifact 同名 `.meta.json` |
 | `features` | dict | 训练引导 | 见下表；meta 存在时以 meta 为准，YAML 内联值必须一致或省略 |
 | `role` | str | 否 | **已废弃**：仅告警忽略。scope 由 state_features 推导，阈值写在策略侧 |
@@ -226,7 +233,9 @@ conditions:
 | `metrics` | 测试集评估指标（见 §2.3） |
 | `n_train` / `n_test` | 切分后的样本数 |
 | `scaler_mean` / `scaler_std` | StandardScaler 参数，推理时自动应用；维度与特征契约不符时加载期 `ValueError`（meta 与特征不一致 = 静默错分，请重新训练导出） |
-| `artifact_sha256` | ONNX 文件哈希（版本追溯，随 runs.config_json 落盘） |
+| `artifact_sha256` | ONNX 文件字节哈希。写入用于版本追溯（随 runs.config_json 落盘）；加载 ModelSpec 时若 artifact 存在且 meta 含该键，重算 sha256 比对，不符 `ValueError`（篡改/半写 fail-fast） |
+| `n_trees` | 可选（E2E-02 治理）：导出到 ONNX 的树数；early stopping 模型为 `best_iteration + 1`（onnxmltools 只导出最优轮次之前的树），非早停为 booster 总轮数 |
+| `best_iteration` | 可选：early stopping 选中的轮次（0-based）；仅早停模型有。用于识别 artifact 是否被早停截断（对比宣称的树数/表现） |
 
 ### 3.4 `scripts/ml_train.py` 参数
 

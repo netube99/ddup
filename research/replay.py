@@ -22,12 +22,21 @@ _FACTOR_EXCLUDE = {
 
 
 def resolve_run_id(conn: duckdb.DuckDBPyConnection, run_id: int | None) -> int:
-    """run_id 解析：显式值优先，缺省取最新 run；无 runs 表/无记录 → ValueError。
+    """run_id 解析：显式值优先（校验存在），缺省取最新 run；异常 → ValueError。
 
-    旧 SQLite 结果库在 connect_result_db 即被拒（不保留兼容），
-    因此不再有"无 runs 表回退 run 1"路径。
+    显式 run_id 不存在时报「run N 不存在」（而非让后续快照查询静默返回空）；
+    旧 SQLite 结果库在 connect_result_db 即被拒（不保留兼容），因此不再有
+    "无 runs 表回退 run 1"路径。
     """
     if run_id is not None:
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM runs WHERE run_id = ?", [run_id]
+            ).fetchone()
+        except duckdb.CatalogException:
+            row = None
+        if row is None:
+            raise ValueError(f"run {run_id} 不存在")
         return run_id
     try:
         rid = latest_run_id(conn)

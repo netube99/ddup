@@ -41,6 +41,46 @@ def test_as_of_clamps_future_end_date():
     assert dates.min() >= "20240603"
 
 
+# ── INV-02: 透传方法的 as_of 钳制（未设置 = 实盘回放，保持透传）──
+
+
+def test_as_of_clamps_calendar():
+    provider = DataProvider(MockDataBackend())
+    full = provider.get_calendar("20240603", "20240630")
+    assert max(full) > "20240606"
+
+    provider.set_as_of("20240606")
+    clamped = provider.get_calendar("20240603", "20240630")
+
+    assert clamped
+    assert max(clamped) <= "20240606"
+    assert clamped == [d for d in full if d <= "20240606"]
+
+
+def test_as_of_clamps_dividends():
+    provider = DataProvider(MockDataBackend())
+    future = "20240613"  # fixture: 920089.BJ 送转+派现
+    assert provider.get_dividends_on_date(future)  # 未钳制可见未来
+
+    provider.set_as_of("20240606")
+    assert provider.get_dividends_on_date(future) == {}
+    # 当日（== as_of）不钳
+    same_day = provider.get_dividends_on_date("20240606")
+    assert same_day == MockDataBackend().get_dividends_on_date("20240606")
+
+
+def test_as_of_clamps_engine_bars_end():
+    provider = DataProvider(MockDataBackend())
+    full = provider.get_engine_bars(None, "20240630")
+    assert full.index.get_level_values("trade_date").max() > "20240606"
+
+    provider.set_as_of("20240606")
+    clamped = provider.get_engine_bars(None, "20240630")
+
+    assert clamped.index.get_level_values("trade_date").max() <= "20240606"
+    assert not clamped.empty
+
+
 def test_sql_fallback_without_attach():
     """未 attach 时维持原 SQL 路径（独立使用 provider 的场景）。"""
     provider = DataProvider(MockDataBackend())

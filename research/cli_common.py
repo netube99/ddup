@@ -1,4 +1,4 @@
-"""CLI 公共样板 — provider 构建与最新 run 解析。
+"""CLI 公共样板 — provider 构建、run_id 解析与用户输入错误通道。
 
 research 层可 import 的薄 helper，供 scripts/* 薄壳 CLI 共享，
 消除各入口重复的 backend 构建与 run_id 解析样板。
@@ -6,17 +6,33 @@ research 层可 import 的薄 helper，供 scripts/* 薄壳 CLI 共享，
 
 import importlib
 import os
+import sys
 
 import duckdb
 
 DEFAULT_BACKEND = "adapters.tushare:TushareBackend"
 
 
+def fail(message: str) -> int:
+    """用户输入错误的统一通道：打印到 stderr，返回退出码 1。"""
+    print(f"错误：{message}", file=sys.stderr)
+    return 1
+
+
+def validate_date_range(start: str, end: str) -> str | None:
+    """校验 YYYYMMDD 起止区间；合法返回 None，否则返回错误消息。"""
+    for label, value in (("--start", start), ("--end", end)):
+        if len(value) != 8 or not value.isdigit():
+            return f"{label} 日期须为 8 位数字 YYYYMMDD，实际: {value!r}"
+    if start > end:
+        return f"起止日期颠倒：--start {start} > --end {end}"
+    return None
+
+
 def _load_backend():
     """按 DDUP_BACKEND='module:Class' 构建后端实例；缺省 = 股票后端。
 
-    数据源按项目切换：股票策略用 adapters.tushare:TushareBackend，
-    黄金策略用 adapters.tushare_gold:TushareGoldBackend。
+    数据源按项目切换：缺省 adapters.tushare:TushareBackend（A 股个股）。
     """
     spec = os.environ.get("DDUP_BACKEND", DEFAULT_BACKEND).strip()
     module_name, _, class_name = spec.partition(":")

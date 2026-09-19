@@ -40,7 +40,8 @@ def main():
     print("\n" + "=" * 60)
     print("交易验证")
     print("=" * 60)
-    trade_issues, trade_notes = validate_trades(trades, config, args.strategy, args.capital)
+    trade_issues, trade_notes = validate_trades(trades, config, args.strategy,
+                                                args.capital, stats=stats)
     for note in trade_notes:
         print(f"  [INFO] {note}")
     for issue in trade_issues:
