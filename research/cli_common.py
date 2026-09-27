@@ -13,6 +13,20 @@ import duckdb
 DEFAULT_BACKEND = "adapters.tushare:TushareBackend"
 
 
+def _setup_console_utf8() -> None:
+    """Windows 下管道/重定向输出默认 GBK，✓⚠═ 等字符会 UnicodeEncodeError；
+    重配置为 UTF-8 输出（POSIX 上幂等无害）。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_setup_console_utf8()
+
+
 def fail(message: str) -> int:
     """用户输入错误的统一通道：打印到 stderr，返回退出码 1。"""
     print(f"错误：{message}", file=sys.stderr)

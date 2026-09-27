@@ -27,6 +27,14 @@ import re
 import sys
 from collections import defaultdict, deque
 
+# Windows 管道输出默认 GBK，✓/✗ 等字符会 UnicodeEncodeError；重配置为 UTF-8
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def check_factors_no_builtin(repo_root: str) -> list[str]:
     errors = []
@@ -58,7 +66,7 @@ def check_holding_no_last_adj_factor(repo_root: str) -> list[str]:
     types_path = os.path.join(repo_root, "btcore", "types.py")
     if not os.path.exists(types_path):
         return errors
-    with open(types_path) as f:
+    with open(types_path, encoding="utf-8") as f:
         content = f.read()
     tree = ast.parse(content)
     for node in ast.walk(tree):
@@ -85,7 +93,7 @@ def check_strategy_no_behavior_switches(repo_root: str) -> list[str]:
     strategy_path = os.path.join(repo_root, "btcore", "strategy.py")
     if not os.path.exists(strategy_path):
         return errors
-    with open(strategy_path) as f:
+    with open(strategy_path, encoding="utf-8") as f:
         content = f.read()
     tree = ast.parse(content)
     for node in ast.walk(tree):
@@ -107,7 +115,7 @@ def check_factors_no_old_api(repo_root: str) -> list[str]:
     init_path = os.path.join(repo_root, "btcore", "factors", "__init__.py")
     if not os.path.exists(init_path):
         return errors
-    with open(init_path) as f:
+    with open(init_path, encoding="utf-8") as f:
         content = f.read()
     forbidden = {
         "StrategyAdapter",
@@ -138,7 +146,7 @@ def check_factors_no_old_api(repo_root: str) -> list[str]:
 
 def _iter_imports(path: str, expand_btcore: bool = False):
     """Yield (目标模块, lineno)。expand_btcore 时额外展开 `from btcore import x` 为 btcore.x。"""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -224,7 +232,7 @@ def check_types_constants_zero_dep(repo_root: str) -> list[str]:
         path = os.path.join(repo_root, "btcore", filename)
         if not os.path.exists(path):
             continue
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level > 0:
@@ -316,7 +324,7 @@ def check_no_circular_imports(repo_root: str) -> list[str]:
     adj: dict[str, set[str]] = defaultdict(set)
     for module, path in module_of.items():
         parts = module.split(".")
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in tree.body:
             if isinstance(node, ast.ImportFrom):
@@ -401,15 +409,15 @@ def check_no_sqlite_residue(repo_root: str) -> list[str]:
                 if module == "sqlite3" or module.startswith("sqlite3."):
                     errors.append(
                         f"VIOLATION: sqlite3 import in DuckDB-only layer: "
-                        f"{path} line {lineno}"
+                        f"{path.replace(os.sep, "/")} line {lineno}"
                     )
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 for lineno, line in enumerate(f, start=1):
                     for token in _SQLITE_API_TOKENS:
                         if token in line:
                             errors.append(
                                 f"VIOLATION: sqlite residue '{token}': "
-                                f"{path} line {lineno}"
+                                f"{path.replace(os.sep, "/")} line {lineno}"
                             )
     return errors
 
@@ -433,7 +441,7 @@ def check_strategies_no_onnx(repo_root: str) -> list[str]:
                     f"VIOLATION: strategies must not import '{module}' "
                     f"(禁止自加载 ONNX): {path} line {lineno}"
                 )
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
             name = None

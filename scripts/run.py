@@ -64,6 +64,8 @@ def main() -> int:
         return cli_common.fail(f"策略配置错误 ({args.yaml}): {exc}")
 
     provider = cli_common.make_provider()
+    if args.out:
+        Path(args.out).resolve().parent.mkdir(parents=True, exist_ok=True)
     try:
         engine = Engine(strategy, provider, initial_capital=args.capital, db_path=args.out)
 

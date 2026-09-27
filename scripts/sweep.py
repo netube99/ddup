@@ -42,7 +42,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        with open(args.sweep_config) as f:
+        with open(args.sweep_config, encoding="utf-8") as f:
             config = yaml.safe_load(f)
     except yaml.YAMLError as e:
         parser.error(f"sweep 配置 YAML 非法: {e}")
@@ -85,7 +85,7 @@ def main():
             print(f"\n[{i+1}/{len(combinations)}] {label}")
 
             # 生成临时 config
-            with open(base_path) as f:
+            with open(base_path, encoding="utf-8") as f:
                 base_config = yaml.safe_load(f)
 
             for key_path, value in params.items():
@@ -100,7 +100,7 @@ def main():
                 )
 
             tmp_config = tmpdir / f"config_{i}.yaml"
-            with open(tmp_config, "w") as f:
+            with open(tmp_config, "w", encoding="utf-8") as f:
                 yaml.dump(base_config, f, allow_unicode=True)
 
             # 运行回测：每组参数作为标准 run 写入同一输出库（runs 表，

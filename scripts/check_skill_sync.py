@@ -35,7 +35,7 @@ def check_cli_flags(skills: dict[str, str], errors: list[str]) -> None:
     """skill 中出现的 --flag 必须存在于某个 scripts/*.py 的 add_argument。"""
     valid: set[str] = set()
     for src in SCRIPTS_DIR.glob("*.py"):
-        valid.update(re.findall(r"add_argument\(\s*[\"']--([a-z0-9-]+)[\"']", src.read_text()))
+        valid.update(re.findall(r"add_argument\(\s*[\"']--([a-z0-9-]+)[\"']", src.read_text(encoding="utf-8")))
     # skill 中故意提及的不存在 flag（否定式说明），豁免
     allowed_mentions = {"debug"}
     for name, text in skills.items():
@@ -110,8 +110,8 @@ def check_ml_contract(skills: dict[str, str], errors: list[str]) -> None:
 
 def check_config_defaults(skills: dict[str, str], errors: list[str]) -> None:
     """config 键在 engine/costs 源码中存在；engine 内字面默认值对账（costs 常数值跳过）。"""
-    engine_src = (ROOT / "btcore" / "engine.py").read_text()
-    costs_src = (ROOT / "btcore" / "costs.py").read_text()
+    engine_src = (ROOT / "btcore" / "engine.py").read_text(encoding="utf-8")
+    costs_src = (ROOT / "btcore" / "costs.py").read_text(encoding="utf-8")
     all_src = engine_src + costs_src
     defaults = {
         m.group(1): m.group(2).strip().strip("\"'").replace("_", "")

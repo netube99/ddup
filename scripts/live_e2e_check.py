@@ -161,8 +161,8 @@ def main():
         day_trades = trades_on(d)
 
         # 1) sync：每日全量 statement（含当日成交）
-        sfile = f"/tmp/live_sync_{d}.yaml"
-        with open(sfile, "w") as f:
+        sfile = os.path.join(tempfile.gettempdir(), f"live_sync_{d}.yaml")
+        with open(sfile, "w", encoding="utf-8") as f:
             yaml.safe_dump(make_sync(d, cash, holdings,
                                      fills_from(day_trades, d)), f,
                            allow_unicode=True, sort_keys=False)
@@ -215,15 +215,15 @@ def main():
     bad = dict(holdings)
     dropped = next(iter(bad))
     del bad[dropped]
-    sfile = "/tmp/live_sync_bad.yaml"
-    with open(sfile, "w") as f:
+    sfile = os.path.join(tempfile.gettempdir(), "live_sync_bad.yaml")
+    with open(sfile, "w", encoding="utf-8") as f:
         yaml.safe_dump(make_sync(d, cash, bad, fills_from(trades_on(d), d)), f,
                        allow_unicode=True, sort_keys=False)
     r = cli("sync", LEDGER, sfile)
     assert r and not r["ok"], "bad sync should be rejected"
     assert dropped in r["holding_diffs"], r
     print(f"[reject] ok: 缺 {dropped} → 拒绝, diffs={r['holding_diffs']}")
-    with open(sfile, "w") as f:
+    with open(sfile, "w", encoding="utf-8") as f:
         yaml.safe_dump(make_sync(d, cash, holdings, fills_from(trades_on(d), d)),
                        f, allow_unicode=True, sort_keys=False)
     r = cli("sync", LEDGER, sfile)
@@ -242,8 +242,8 @@ def main():
     lb = LB
     d = days[3]
     cash, holdings, entry = account_state(d)
-    pos_file = "/tmp/live_e2e_positions.yaml"
-    with open(pos_file, "w") as f:
+    pos_file = os.path.join(tempfile.gettempdir(), "live_e2e_positions.yaml")
+    with open(pos_file, "w", encoding="utf-8") as f:
         yaml.safe_dump({"positions": [
             {"symbol": s, "shares": v, "entry_date": entry[s]["entry_date"],
              "entry_price": round(entry[s]["price"], 4)}
