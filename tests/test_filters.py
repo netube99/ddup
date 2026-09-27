@@ -2,7 +2,7 @@
 
 import logging
 
-from btcore.filters import StockFilter
+from btcore.filters import StockFilter, audit_loss_coverage
 
 
 class StubBackend:
@@ -348,3 +348,119 @@ class TestExcludeLoss:
                           "eps": -1.0, "pe_ttm": 41099.0},
         }
         assert f.filter(bars, "20240603") == {}
+
+
+class TestExcludeLossMissingValues:
+    """exclude_loss 在数据缺失时的行为与可感知性。"""
+
+    def _filter(self):
+        return StockFilter(StubBackend(), "20240601", {
+            "exclude_st": False,
+            "exclude_new_stock": False,
+            "exclude_loss": True,
+            "exclude_boards": [],
+            "min_price": 0,
+        })
+
+    def test_eps_nan_row_falls_back_to_pe_ttm(self):
+        """单行 eps=NaN（bak_basic 缺行，如北交所/新股）与"缺列"同口径回退。"""
+        f = self._filter()
+        bars = {
+            # eps 缺行 + 负 PE → 仍判定为亏损（旧实现直接放行）
+            "600001.SH": {"symbol": "600001.SH", "close": 10.0,
+                          "eps": float("nan"), "pe_ttm": -3.0},
+            # eps 缺行 + 正 PE → 无法判定，保留（失败开放）
+            "600002.SH": {"symbol": "600002.SH", "close": 10.0,
+                          "eps": float("nan"), "pe_ttm": 15.0},
+            # pe_ttm 也缺 → 保留
+            "600003.SH": {"symbol": "600003.SH", "close": 10.0,
+                          "eps": None, "pe_ttm": None},
+        }
+        result = f.filter(bars, "20240603")
+        assert "600001.SH" not in result
+        assert set(result) == {"600002.SH", "600003.SH"}
+
+    def test_missing_both_columns_warning_is_actionable(self, caplog):
+        """两列都缺时不指责用户"没声明"，而是给出两条可执行修法。"""
+        f = self._filter()
+        bars = {"600001.SH": {"symbol": "600001.SH", "close": 10.0}}
+        with caplog.at_level(logging.WARNING):
+            f.filter(bars, "20240603")
+        assert "本次不做亏损过滤" in caplog.text
+        assert "filter_rules" in caplog.text
+
+    def test_pe_ttm_fallback_warning_states_ineffectiveness(self, caplog):
+        """有 pe_ttm 无 eps 时明说回退口径等价于不过滤（tushare 无负 PE）。"""
+        f = self._filter()
+        bars = {"600001.SH": {"symbol": "600001.SH", "close": 10.0, "pe_ttm": 8.0}}
+        with caplog.at_level(logging.WARNING):
+            f.filter(bars, "20240603")
+        assert "回退 pe_ttm<=0" in caplog.text
+        assert "不做亏损过滤" in caplog.text
+
+
+class TestLossCoverageAudit:
+    """preload 覆盖审计：只报"列在但个别行 eps 缺失"，不逐行告警。"""
+
+    @staticmethod
+    def _bars(rows):
+        import pandas as pd
+
+        frame = pd.DataFrame(rows, columns=["trade_date", "symbol", "close", "eps"])
+        return frame.set_index(["trade_date", "symbol"]).sort_index()
+
+    def test_reports_gap_once_with_counts(self, caplog):
+        """有行情行缺 eps 才计数：close 为空的行（停牌/无行情补行）不算。"""
+        bars = self._bars([
+            ("20240603", "600001.SH", 10.0, -0.5),
+            ("20240603", "600002.SH", 10.0, None),
+            ("20240603", "830001.BJ", 5.0, float("nan")),
+            ("20240604", "600001.SH", 10.0, 0.3),
+            # 无行情补行：eps 缺但不计入（不可交易）
+            ("20240604", "600009.SH", float("nan"), float("nan")),
+        ])
+        with caplog.at_level(logging.WARNING):
+            audit_loss_coverage(bars, {"exclude_loss": True}, "20240603", "20240604")
+        assert "2 行有行情样本 eps 缺失" in caplog.text
+        assert "2 只股票" in caplog.text
+        assert "北交所 1 行" in caplog.text
+
+    def test_no_close_column_counts_all_rows(self, caplog):
+        """非引擎路径（无 close 列）退化为不区分行情，仍报缺失量。"""
+        import pandas as pd
+
+        bars = pd.DataFrame(
+            [("20240603", "600002.SH", None)],
+            columns=["trade_date", "symbol", "eps"],
+        ).set_index(["trade_date", "symbol"])
+        with caplog.at_level(logging.WARNING):
+            audit_loss_coverage(bars, {"exclude_loss": True}, "20240603", "20240604")
+        assert "1 行有行情样本 eps 缺失" in caplog.text
+
+    def test_silent_when_rule_off_or_no_gap(self, caplog):
+        bars = self._bars([("20240603", "600001.SH", 10.0, -0.5)])
+        with caplog.at_level(logging.WARNING):
+            audit_loss_coverage(bars, {}, "20240603", "20240604")
+            audit_loss_coverage(bars, {"exclude_loss": True}, "20240603", "20240604")
+        assert caplog.text == ""
+
+    def test_silent_when_column_absent(self, caplog):
+        """列整列缺失由 StockFilter 运行时告警负责，审计不重复出声。"""
+        import pandas as pd
+
+        bars = pd.DataFrame(
+            [("20240603", "600001.SH", 10.0)], columns=["trade_date", "symbol", "close"]
+        ).set_index(["trade_date", "symbol"])
+        with caplog.at_level(logging.WARNING):
+            audit_loss_coverage(bars, {"exclude_loss": True}, "20240603", "20240604")
+        assert caplog.text == ""
+
+    def test_window_filter_excludes_lookback_rows(self, caplog):
+        """窗口外的预载行（lookback）不计入缺失量。"""
+        bars = self._bars([
+            ("20240501", "600001.SH", 10.0, None),
+            ("20240603", "600002.SH", 10.0, 0.3),
+        ])
+        with caplog.at_level(logging.WARNING):
+            audit_loss_coverage(bars, {"exclude_loss": True}, "20240603", "20240604")
+        assert caplog.text == ""

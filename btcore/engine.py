@@ -10,7 +10,7 @@ import pandas as pd
 from btcore import corporate, database, limits, match, stats, types
 from btcore.costs import make_costs_fn
 from btcore.factors import plan as factor_plan
-from btcore.filters import filter_required_columns
+from btcore.filters import audit_loss_coverage, filter_required_columns
 from btcore.ml import runtime as ml_runtime
 from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL
 from btcore.provider import DataProvider, benchmark_price_column
@@ -623,6 +623,11 @@ class Engine:
                     raise ValueError(
                         "factor_universe 裁切后无数据：交易域符号均不在因子计算域内"
                     )
+            # exclude_loss 的 eps 列覆盖审计：列整列缺失由 StockFilter 运行时告警
+            # 负责，这里汇总"列在但个别行缺"——那些行不做亏损过滤且不逐行告警
+            audit_loss_coverage(
+                bars_df, getattr(self.strategy, "FILTER_RULES", None), start, end
+            )
         finally:
             self.provider.set_as_of(anchor)
         self.bars_df = bars_df

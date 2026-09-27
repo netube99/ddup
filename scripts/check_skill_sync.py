@@ -35,7 +35,8 @@ def check_cli_flags(skills: dict[str, str], errors: list[str]) -> None:
     """skill 中出现的 --flag 必须存在于某个 scripts/*.py 的 add_argument。"""
     valid: set[str] = set()
     for src in SCRIPTS_DIR.glob("*.py"):
-        valid.update(re.findall(r"add_argument\(\s*[\"']--([a-z0-9-]+)[\"']", src.read_text(encoding="utf-8")))
+        pattern = r"add_argument\(\s*[\"']--([a-z0-9-]+)[\"']"
+        valid.update(re.findall(pattern, src.read_text(encoding="utf-8")))
     # skill 中故意提及的不存在 flag（否定式说明），豁免
     allowed_mentions = {"debug"}
     for name, text in skills.items():

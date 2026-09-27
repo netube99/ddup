@@ -368,7 +368,7 @@ factor_specs:
 |---|---|---|---|---|
 | `exclude_st` | `bool` | `False` | `st_symbol` | 排除 ST（日频快照：当日有记录才是 ST，摘帽次日恢复可买）。未声明 = 不过滤 |
 | `exclude_new_stock` | `bool` | `False` | `listing_date` | 排除上市 60 日内的新股。未声明 = 不过滤 |
-| `exclude_loss` | `bool` | `False` | `eps` 列 | 排除亏损股（`eps < 0`；后端无 `eps` 列时回退 `pe_ttm <= 0`）。未声明 = 不过滤。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数，`eps` 才是可靠信号（2026-08 修复） |
+| `exclude_loss` | `bool` | `False` | `eps` 列 | 排除亏损股（`eps < 0`；该行无 `eps` 时退回 `pe_ttm <= 0`）。未声明 = 不过滤。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数（从不发布负 PE），`eps` 才是可靠信号（2026-08 修复）；`eps` 缺失时 preload 汇总告警一次 |
 | `exclude_boards` | `list[str]` | `[]` | — | 排除板块：`"BJ"`（北交所）、`"688"`（科创板）、`"300"`/`"301"`（创业板） |
 | `exclude_industries` | `list[str]` | `[]` | `industry_name` | 排除指定行业名 |
 | `min_price` | `float` | `0.0` | — | 最低收盘价过滤 |
@@ -378,7 +378,7 @@ factor_specs:
 要点：
 
 - 未知键 → WARNING 并被忽略（不报错）。
-- `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启后后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时告警一次、该规则不生效（软回退）。
+- `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启后后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时告警一次、该规则不生效（软回退）。`exclude_loss` 的 `eps` 缺个别行（非整列）时，引擎在 preload 汇总告警一次（含缺失行数与北交所行数），这些行不做亏损过滤。
 - `index_universe` / `factor_universe` 可用的指数代码取决于后端数据库已有的成分数据；后端无 `get_index_members` 能力或对应指数无数据时，告警一次、规则不生效（软回退）。
 - `StockFilter` 是策略侧工具：引擎不过滤，策略在 `select()` 中自行调用 `self._filter.filter(bars, date_str)`。
 

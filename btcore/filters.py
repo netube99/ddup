@@ -3,9 +3,17 @@ import weakref
 from bisect import bisect_right
 from datetime import date, datetime, timedelta
 
+import pandas as pd
+
 from btcore.types import bar_get
 
 logger = logging.getLogger(__name__)
+
+
+def _is_missing(value) -> bool:
+    """bar 字段缺失统一判定：缺键（None）与 NaN/pd.NA 同口径。"""
+    return value is None or bool(pd.isna(value))
+
 
 # index_universe 成分快照是月频的，加载时向前多取一段，
 # 保证回测首日也有 ≤ 当日的快照可用
@@ -85,6 +93,35 @@ def filter_required_columns(rules: dict) -> set[str]:
     return set()
 
 
+def audit_loss_coverage(bars_df, rules: dict | None, start: str, end: str) -> None:
+    """exclude_loss 的 eps 列覆盖审计：窗口内有行情行缺 eps 时汇总告警一次。
+
+    列整列缺失（后端表单未提供、引擎列协商让位）由 StockFilter 的运行时告警
+    负责，这里只报"列在但有洞"：那些行不参与亏损过滤，且不触发逐行告警。
+    只统计有行情（close 非空）的行——FULL OUTER JOIN 会给停牌/无行情日补出
+    空行（stk_limit 停牌日有行等），它们本就不可交易；北交所行数单独列出，
+    其基本面长期缺行，通常由 exclude_boards 另拦。
+    """
+    if not (rules or {}).get("exclude_loss") or "eps" not in bars_df.columns:
+        return
+    dates = bars_df.index.get_level_values("trade_date")
+    window = bars_df.loc[(dates >= start) & (dates <= end)]
+    if window.empty:
+        return
+    gap = window["eps"].isna()
+    if "close" in window.columns:
+        gap &= window["close"].notna()
+    if not gap.any():
+        return
+    symbols = window.index.get_level_values("symbol")[gap.to_numpy()]
+    logger.warning(
+        "exclude_loss: 窗口 %s~%s 内 %d 行有行情样本 eps 缺失（%d 只股票，北交所 %d 行）"
+        "→ 这些行不做亏损过滤",
+        start, end, int(gap.sum()), symbols.nunique(),
+        int(symbols.str.endswith(".BJ").sum()),
+    )
+
+
 class StockFilter:
     """One-time preload of ST list + recent listings, O(n) in-memory filtering.
 
@@ -108,7 +145,7 @@ class StockFilter:
         self._industry_map: dict[str, str] | None = None
         self._idx_map: dict[str, set[str]] = {}
         self._idx_dates: list[str] = []
-        self._pe_checked = False
+        self._loss_col_warned = False
 
         if rules.get("exclude_st"):
             if hasattr(backend, "get_st_map"):
@@ -229,33 +266,39 @@ class StockFilter:
             if exclude_loss:
                 eps = bar_get(bar, "eps")
                 pe = bar_get(bar, "pe_ttm")
-                if not self._pe_checked:
-                    # exclude_loss 依赖 eps/pe_ttm; 列裁剪下未显式声明
-                    # exclude_loss: true 不会 preload 该列, 告警一次
-                    self._pe_checked = True
-                    if eps is None and pe is None:
-                        logger.warning(
-                            "exclude_loss 生效但 bars 无 eps/pe_ttm 列，亏损过滤不生效；"
-                            "请在 filter_rules 显式声明 exclude_loss: true 以 preload 该列"
-                        )
-                    elif eps is None:
-                        # 后端缺 eps（如 tushare 填表法）→ 引擎列协商让位后走旧口径；
-                        # 亏损股 pe_ttm 为 NULL/正数，该口径对目标人群近乎失效，须告警
-                        logger.warning(
-                            "exclude_loss: 后端无 eps 列，回退 pe_ttm<=0 旧口径；"
-                            "tushare 口径下亏损股 pe_ttm 常为 NULL/正数，过滤可能漏判"
-                        )
+                if not self._loss_col_warned:
+                    self._loss_col_warned = True
+                    self._warn_loss_columns(eps, pe)
                 # 亏损判定：eps<0 可靠（tushare 亏损股 pe_ttm 为 NULL 或正数）；
-                # 后端无 eps 列时回退 pe_ttm<=0（旧口径）
-                if eps is not None:
+                # 该行无 eps（缺列或 NaN）时退回 pe_ttm<=0（仅对发布负 PE 的后端
+                # 有效，tushare 恒不触发）；两列都不可判定 → 保留该行
+                if not _is_missing(eps):
                     if eps < 0:
                         continue
-                elif pe is not None and pe <= 0:
+                elif not _is_missing(pe) and pe <= 0:
                     continue
 
             filtered[symbol] = bar
 
         return filtered
+
+    def _warn_loss_columns(self, eps, pe) -> None:
+        """exclude_loss 列缺失的一次性告警（列整列缺失，非单行缺失）。
+
+        单行缺失（NaN）不逐行告警：覆盖量由引擎 preload 的 audit_loss_coverage
+        汇总一次（列整列缺失时该审计不触发，两条告警互斥）。
+        """
+        if eps is None and pe is None:
+            logger.warning(
+                "exclude_loss 生效但 bars 无 eps/pe_ttm 列 → 本次不做亏损过滤；"
+                "规则来自 YAML filter_rules 时需后端表单提供 eps 列，"
+                "在策略代码里临时开启时需先写进 filter_rules 由引擎 preload"
+            )
+        elif eps is None:
+            logger.warning(
+                "exclude_loss: bars 无 eps 列，回退 pe_ttm<=0；该口径仅对发布负 PE "
+                "的后端有效（tushare 从不发布负 PE）→ 事实等价于不做亏损过滤"
+            )
 
 
 def _get_board(symbol: str) -> str:

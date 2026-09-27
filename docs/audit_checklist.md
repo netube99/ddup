@@ -185,8 +185,9 @@
 - [ ] **F-IND-01** exclude_industries — 懒加载行业映射（`filters.py:116-126`）；`industry=None`（未分类）**软通过**（`filters.py:142-145`）。
   边界：探针 A-14 统计行业映射缺失的 symbol 数；缺失票在规则开启时静默放行。
 - [ ] **F-PRC-01** min_price — 按裸价 close 过滤，close 缺失默认 0.0 被过滤（`filters.py:151-153`）。
-- [ ] **F-LOS-01** exclude_loss — eps<0 判定；无 eps 回退 pe_ttm<=0 并告警一次（`filters.py:155-173`）。🛰
-  边界：tushare 亏损股 pe_ttm 为 NULL 或**正数**（可达 4e4），pe_ttm<=0 结构性失效（2026-08-02 修复的 bug）；探针 A-15 验证真实分布：亏损股（eps<0）中 pe_ttm<=0 的占比应极低。列裁剪下未声明规则不 preload eps（`filters.py:14-24`）。
+- [ ] **F-LOS-01** exclude_loss — eps<0 判定；该行无 eps（缺列或 NaN）退回 pe_ttm<=0（`filters.py:271-278`）。🛰
+  边界：tushare 亏损股 pe_ttm 为 NULL 或**正数**（从不发布负 PE），pe_ttm<=0 结构性失效（2026-08-02 修复的 bug）；探针 A-15 验证真实分布：亏损股（eps<0）中 pe_ttm<=0 的占比应极低（2024 实测 0/1,297,000）。列裁剪下未声明规则不 preload eps（`filters.py:14-24`）。
+  可感知性两道告警互斥：列整列缺失 → StockFilter 运行时告警一次（`filters.py:284-299`，明说等价于不做亏损过滤）；列在但个别行缺 → preload 汇总告警一次（`filters.audit_loss_coverage`，只计有行情样本，北交所行数单列）。
 - [ ] **F-IDX-01** index_universe — 只管入场白名单；快照机制见 `D-IDX-01`。
   边界：无成分→告警+规则不生效（fail-open 全量，`filters.py:82-86`）——配置错指数代码时静默全市场选股，动态验证必须确认告警被注意。
 - [ ] **F-FUN-01** factor_universe — 因子计算域可宽于交易域，引擎裁回交易域（`engine.py:246-254`；裁后空→ValueError）。

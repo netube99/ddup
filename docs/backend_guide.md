@@ -216,7 +216,7 @@ MY_FORM = {
 >
 > | 字段 | 依赖方 | 缺失行为 |
 > |---|---|---|
-> | `eps` | `exclude_loss` 过滤规则 | 告警一次，亏损过滤不生效（显式声明 `exclude_loss: true` 可让引擎 preload 该列；后端无 `eps` 时回退 `pe_ttm<=0`）。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数，`eps<0` 才是可靠亏损信号 |
+> | `eps` | `exclude_loss` 过滤规则 | 告警一次，本次不做亏损过滤（规则来自 YAML `filter_rules` 时需后端表单提供 `eps` 列；在策略代码里临时开启时需写进 `filter_rules` 由引擎 preload）。注：tushare 亏损股 `pe_ttm` 为 NULL 或正数，`eps<0` 才是可靠亏损信号；`pe_ttm<=0` 回退只对发布负 PE 的后端有效 |
 > | `total_mv` | `log_mktcap` 伪列 | 因子表达式引用 `log_mktcap` 时 preload 报错 |
 > | `turnover_rate` 等任意列 | 策略 `select()` / `on_tick()` 命令式访问 | 未声明进 `REQUIRED_FIELDS` 时列被裁掉（示例见 `strategies/examples/multi_model`） |
 
@@ -401,7 +401,7 @@ FROM financials;
 | 基准行情 `benchmark_close` | `get_benchmark_bars` | 报告基准对比列为空，不报错；因子表达式引用 `idx_ret` → preload 报错 |
 | 列供给能力 | `backend_bar_columns` | 不实现 = 过滤规则依赖列全部照常请求，缺列由后端 `query_bars` 自行处理；实现后，`exclude_loss` 等过滤依赖列先与后端能力取交集，缺列走逐 bar 软回退 |
 
-另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。`exclude_loss` 在后端缺 `eps` 但有 `pe_ttm` 时也会告警一次（回退 `pe_ttm<=0` 旧口径）。
+另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。`exclude_loss` 的两类缺失各有独立告警：**列整列缺失**（后端表单未提供、引擎列协商让位）→ StockFilter 运行时告警一次，明说等价于不做亏损过滤；**列在但个别行缺**（`bak_basic` 无该股该日行）→ 引擎 preload 汇总告警一次（`filters.audit_loss_coverage`，只计有行情样本，北交所行数单独列出），单行不再回退 `pe_ttm<=0`（tushare 从不发布负 PE，该回退恒不触发）。
 
 ### 10.1 数据卫生检查与空值语义（fail-fast）
 

@@ -76,7 +76,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 6. filter_rules 全集（全部可选，软回退：后端缺数据告警一次继续）
 
-`exclude_st`、`exclude_new_stock`（上市 60 日内）、`exclude_boards`（如 ["BJ","688","300","301"]）、`exclude_industries`（[行业名]）、`min_price`（close< 剔）、`exclude_loss`（eps<0 剔，后端无 eps 列时回退 pe_ttm≤0；声明才 preload eps+pe_ttm。tushare 亏损股 pe_ttm 为 NULL 或正数，eps 才是可靠信号——2026-08 修复）、`index_universe`（指数池白名单，只管入场）、`factor_universe`（只决定因子计算域，不过滤交易）。未知键仅 WARNING。
+`exclude_st`、`exclude_new_stock`（上市 60 日内）、`exclude_boards`（如 ["BJ","688","300","301"]）、`exclude_industries`（[行业名]）、`min_price`（close< 剔）、`exclude_loss`（eps<0 剔，该行无 eps 时回退 pe_ttm≤0；声明才 preload eps+pe_ttm。tushare 亏损股 pe_ttm 为 NULL 或正数（从不发布负 PE），eps 才是可靠信号——2026-08 修复；eps 缺失分两类告警：整列缺→运行时告警一次，个别行缺→preload 汇总一次，两者都意味这些行不过滤）、`index_universe`（指数池白名单，只管入场）、`factor_universe`（只决定因子计算域，不过滤交易）。未知键仅 WARNING。
 
 ## 7. 代码层禁令
 
