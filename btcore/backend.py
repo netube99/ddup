@@ -32,6 +32,9 @@ B) 手写实现（非 SQL 数据源：内存、API、parquet、CSV 等）
 │   get_stock_industries    行业分类 → industry 分组、行业过滤        │
 │   get_recent_listings     近期新股 → exclude_new_stock 过滤                  │
 │   get_index_members       指数成分 → index_universe / factor_universe        │
+│   backend_bar_columns     可供给 bars 列（canonical 名）→ 引擎 preload 列     │
+│                           协商：过滤规则依赖列与后端能力取交集，缺列（如 eps） │
+│                           由 filters 逐 bar 软回退；不实现 = 全部照常请求     │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 引擎通过 getattr(backend, "方法名", None) 检测能力是否存在，不存在时相关

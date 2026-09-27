@@ -75,6 +75,8 @@ def filter_required_columns(rules: dict) -> set[str]:
 
     只统计显式开启的规则: exclude_loss 未声明即不过滤、不 preload;
     显式开启但后端缺 eps 列时才告警（软回退）。
+    返回列必须为基础列：引擎在 expand_columns 派生展开之前做能力交集，
+    派生列会被交集裁掉且无法回退到其基础列。
     """
     if rules.get("exclude_loss"):
         # eps 是亏损判定的可靠信号（tushare 亏损股 pe_ttm 为 NULL 或正数，
@@ -235,6 +237,13 @@ class StockFilter:
                         logger.warning(
                             "exclude_loss 生效但 bars 无 eps/pe_ttm 列，亏损过滤不生效；"
                             "请在 filter_rules 显式声明 exclude_loss: true 以 preload 该列"
+                        )
+                    elif eps is None:
+                        # 后端缺 eps（如 tushare 填表法）→ 引擎列协商让位后走旧口径；
+                        # 亏损股 pe_ttm 为 NULL/正数，该口径对目标人群近乎失效，须告警
+                        logger.warning(
+                            "exclude_loss: 后端无 eps 列，回退 pe_ttm<=0 旧口径；"
+                            "tushare 口径下亏损股 pe_ttm 常为 NULL/正数，过滤可能漏判"
                         )
                 # 亏损判定：eps<0 可靠（tushare 亏损股 pe_ttm 为 NULL 或正数）；
                 # 后端无 eps 列时回退 pe_ttm<=0（旧口径）

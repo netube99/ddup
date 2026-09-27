@@ -137,7 +137,7 @@ class TestBackendColumnsContract:
 def _run(strategy, monkeypatch=None, full_columns=False) -> dict:
     if full_columns:
         monkeypatch.setattr(
-            "btcore.engine.required_bar_columns", lambda s, fplan=None: None
+            "btcore.engine.required_bar_columns", lambda s, fplan=None, backend_columns=None: None
         )
     engine = Engine(strategy, DataProvider(MockDataBackend()),
                     initial_capital=1_000_000, db_path=":memory:")
@@ -187,3 +187,31 @@ class TestEndToEnd:
         # materialize_only 的 low_turnover 仍然在列中
         assert "low_turnover" in engine.bars_df.columns
         assert "mom20" in engine.bars_df.columns
+
+
+class TestBackendColumnNegotiation:
+    """backend_columns 能力协商：交集只让位过滤规则依赖列，
+    策略显式声明列保持 fail-fast（跨后端兼容，见 backend_guide §3.2）。"""
+
+    def test_missing_eps_dropped_but_pe_ttm_kept(self):
+        """后端无 eps 列：exclude_loss 的 eps 被剔除、pe_ttm 保留（软回退口径）。"""
+        s = _strategy()
+        full = required_bar_columns(s)
+        assert {"eps", "pe_ttm"} <= set(full)
+        trimmed = required_bar_columns(
+            s, backend_columns=set(full) - {"eps"})
+        assert "eps" not in trimmed
+        assert "pe_ttm" in trimmed
+
+    def test_required_fields_never_intersected(self):
+        """策略 REQUIRED_FIELDS 显式声明的列不受交集影响：缺列仍请求。"""
+        s = _strategy()
+        s.REQUIRED_FIELDS = {"eps"}
+        cols = required_bar_columns(s, backend_columns=set())
+        assert "eps" in cols
+
+    def test_none_matches_legacy_signature(self):
+        """backend_columns=None（后端未实现能力方法）输出与旧签名完全一致。"""
+        s = _strategy()
+        assert required_bar_columns(s) == required_bar_columns(
+            s, backend_columns=None)

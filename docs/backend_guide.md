@@ -154,6 +154,7 @@ MY_FORM = {
 | `get_stock_industries` | `(ts_codes: list[str]) -> dict[str, str]` | `{symbol: 行业名称}`，未找到的不出现在结果中 | `industry` 分组伪列、`exclude_industries` 过滤 |
 | `get_recent_listings` | `(cutoff_days: int = 60, as_of: str \| None = None) -> set[str]` | 上市日距 `as_of` ≤ `cutoff_days` 的股票代码集合；`as_of=None` 取当前日期 | `exclude_new_stock` 过滤 |
 | `get_index_members` | `(index_codes: list[str], start: str, end: str) -> dict[str, set[str]]` | `{date: {symbol, ...}}`，多指数并集；快照可为月频，引擎按"最近一期 ≤ 当日"取值 | `index_universe` / `factor_universe` 股票池限定 |
+| `backend_bar_columns` | `() -> set[str]` | 后端可供给的 bars 列名（canonical 名，与 `query_bars` 校验口径一致）；不实现 = 引擎按"全部可供给"处理 | preload 列裁剪：`exclude_loss` 等过滤规则依赖列与后端能力取交集，缺列（如 `eps`）时由 filters 逐 bar 软回退（见 §10） |
 
 ### 3.3 完整示例
 
@@ -398,8 +399,9 @@ FROM financials;
 | 上市日期 `listing_date` | `get_recent_listings` | `exclude_new_stock: true` → 告警一次，新股过滤不生效，回测继续 |
 | 指数成分 `index_code` + `index_member` | `get_index_members` | `index_universe` → 告警一次，白名单不生效；`factor_universe` → 告警一次，因子计算域回退为交易域 |
 | 基准行情 `benchmark_close` | `get_benchmark_bars` | 报告基准对比列为空，不报错；因子表达式引用 `idx_ret` → preload 报错 |
+| 列供给能力 | `backend_bar_columns` | 不实现 = 过滤规则依赖列全部照常请求，缺列由后端 `query_bars` 自行处理；实现后，`exclude_loss` 等过滤依赖列先与后端能力取交集，缺列走逐 bar 软回退 |
 
-另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。
+另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。`exclude_loss` 在后端缺 `eps` 但有 `pe_ttm` 时也会告警一次（回退 `pe_ttm<=0` 旧口径）。
 
 ### 10.1 数据卫生检查与空值语义（fail-fast）
 

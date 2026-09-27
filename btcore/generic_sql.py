@@ -198,6 +198,15 @@ class GenericSQLBackend(DataBackend):
     def close(self):
         self._conn.close()
 
+    def backend_bar_columns(self) -> set[str]:
+        """后端可供给的 bars 列（canonical 名）；引擎 preload 列裁剪的能力协商。
+
+        填表法后端的可用列集合即表单 panel 全集：策略显式声明（REQUIRED_FIELDS）
+        的列仍走 fail-fast 校验，仅过滤规则依赖列（如 exclude_loss 的 eps）
+        按"软回退"文档语义让位。"""
+        c = self._c
+        return {k for cols in c["panel"].values() for k in cols}
+
     # ═══════════════════════════════════
     # 核心 — DataBackend ABC 方法
     # ═══════════════════════════════════

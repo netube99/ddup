@@ -270,19 +270,27 @@ def _validate_select_actions(actions, on_tick_result, holdings=None):
 
 # 数据契约必需列（REQUIRED_BAR_COLUMNS）已下沉至 btcore.factors.plan，
 # 与训练侧/研究脚本共享同一定义
-def required_bar_columns(strategy, fplan: dict | None = None) -> list[str]:
+def required_bar_columns(strategy, fplan: dict | None = None,
+                         backend_columns: set[str] | None = None) -> list[str]:
     """静态推导主面板请求列（preload 列裁剪）。
 
     来源: REQUIRED_BAR_COLUMNS ∪ strategy.REQUIRED_FIELDS ∪
     FILTER_RULES 显式依赖 ∪ 因子闭包基础列（fplan.main_columns）；
     派生列替换为派生基础列，伪列与物化因子列不请求。
     策略在 select() 里命令式访问的列必须声明进 REQUIRED_FIELDS。
+
+    backend_columns 非 None 时（后端实现 backend_bar_columns 能力方法），
+    FILTER_RULES 依赖列与之取交集：后端缺 eps 等列时让位，由 filters
+    逐 bar 软回退兜底；策略显式声明列不受影响，保持 fail-fast。
     """
     cols = set(factor_plan.REQUIRED_BAR_COLUMNS)
     cols |= set(getattr(strategy, "REQUIRED_FIELDS", None) or [])
-    cols |= filter_required_columns(
+    filt_cols = filter_required_columns(
         getattr(strategy, "FILTER_RULES", None) or {}
     )
+    if backend_columns is not None:
+        filt_cols &= backend_columns
+    cols |= filt_cols
     if fplan:
         cols |= fplan["main_columns"]
     return factor_plan.expand_columns(cols)
@@ -569,11 +577,15 @@ class Engine:
         # 解除 as_of；策略钩子（on_start）在下方恢复锚点后运行
         anchor = self.provider.get_as_of()
         self.provider.set_as_of(None)
+        backend_cols_fn = getattr(self.provider.backend, "backend_bar_columns", None)
         try:
             bars_df = self.provider.get_engine_bars(
                 load_symbols, calendar[-1],
                 lookback_start=preload_start,
-                columns=required_bar_columns(self.strategy, fplan),
+                columns=required_bar_columns(
+                    self.strategy, fplan,
+                    backend_columns=backend_cols_fn() if backend_cols_fn else None,
+                ),
             )
             bars_df.sort_index(inplace=True)
             factor_plan.validate_required_columns(bars_df)
