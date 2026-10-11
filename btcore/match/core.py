@@ -77,9 +77,11 @@ LIMIT_UP = "LIMIT_UP"  # 买侧封涨停
 LIMIT_DOWN = "LIMIT_DOWN"  # 卖侧封跌停
 
 
-def check_tradable(side: str, price, up, down) -> str | None:
+def check_tradable(side: str, price, up, down, *, slip_fn=None,
+                   slip_ticks: int = 0) -> str | None:
     """可成交校验：涨跌停可判定 + 价格合法 + 未封板（涨停不买 / 跌停不卖）。
 
+    slip_fn 存在时同时校验滑点后成交价；拒单发生在现金/持仓变动之前。
     返回 None 表示可成交，否则返回原因代码；日志由调用点按原因各自输出。
     """
     if up is None or down is None:
@@ -90,6 +92,9 @@ def check_tradable(side: str, price, up, down) -> str | None:
         return LIMIT_UP
     if side == "SELL" and price <= down:
         return LIMIT_DOWN
+    if slip_fn is not None:
+        slipped = slip_fn(price, slip_ticks, 1 if side == "BUY" else -1)
+        return check_tradable(side, slipped, up, down)
     return None
 
 

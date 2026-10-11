@@ -272,7 +272,7 @@
 ### 6.1 主循环与配置
 
 - [ ] **E-LOOP-01** step 日序 — 除权除息→TARGET 调仓或（手动卖→手动买）→离场条件单→入场条件单→结算落库→compute_pending（`engine.py:382-454`）；异常回滚账户状态（`_save_state/_restore_state:759-782`）。
-- [ ] **E-LOOP-02** 无行情日跳过 + WARNING（`engine.py:280-284`）；首日播种用首日前一交易日截面（:276-278）。
+- [ ] **E-LOOP-02** 加载池无行情日仍处理公司行为与结算 + WARNING，清空 pending/持仓条件单，不调用决策钩子；交易日计数/T+1 解锁照常；整窗无行情 fail-fast（`Engine.run` / `compute_pending`）。首日播种用首日前一交易日截面。回归：`tests/test_review_calculation_boundaries.py`。
 - [ ] **E-CFG-01** 配置校验覆盖表 — 已校验：slippage_ticks/condition_slippage_ticks（:110-126）、order_volume_ratio（:141-149）、execution_price（:151-155）。**未校验缺口**：`initial_capital` 无正数/有限校验（:100-103）、`max_positions` 无 ≥0 校验（:105-108，≤0 时 manual_buy 静默返回[]）、**费率四键无校验**（`costs.py:10-13`，负费率/NaN 静默虚增收益）。
   静态：确认缺口仍存在或已修；动态：构造负费率 config 观察是否静默（若静默=P1 缺口）。
 - [ ] **E-CFG-02** benchmark 推导 — 未配置时 index_universe 单指数，否则 000300.SH；空串=无基准（`engine.py:128-139`）。

@@ -4,7 +4,7 @@
 审查产出必须是 findings YAML，本脚本验收：
 - P0/P1（阻塞）→ 门禁 FAIL，唯二出口：修复后 close，或用户 close --waive 记录决策
 - P2/P3（非阻塞）→ 自动登记 docs/review_backlog.yaml，不要求本轮修复
-- 收敛判据：一轮 check 无未决 P0/P1 且无新增发现 → 该范围审查终止
+- 收敛判据：约定范围验收无未决 P0/P1 → 该范围审查终止，P2/P3 不延长循环
 - done-bar：可用的定义 = 机械检查全绿 + 测试全绿 + 交叉验证/对账干净
 
 用法：
@@ -148,13 +148,24 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 2
 
     backlog = load_backlog(args.backlog)
-    open_ids = {item["id"] for item in backlog["open"]}
+    if args.scope == "full":
+        last = backlog["meta"].get("last_full_audit")
+        if last and _days_since(last) < COOLDOWN_DAYS:
+            print(f"ERROR: 全量审查冷却期未过（上次 {last}）；请用 --scope diff 验收改动")
+            return 2
+    open_by_id = {item["id"]: item for item in backlog["open"]}
     closed_by_id = {item["id"]: item for item in backlog["closed"]}
     new_items: list[dict] = []
+    updated: list[str] = []
     skipped: list[str] = []
     for f in doc["findings"]:
-        if f["id"] in open_ids:
-            skipped.append(f["id"])
+        if f["id"] in open_by_id:
+            prev = open_by_id[f["id"]]
+            if all(prev.get(k) == f.get(k) for k in _FINDING_FIELDS):
+                skipped.append(f["id"])
+            else:
+                prev.update(f)
+                updated.append(f["id"])
         else:
             prev = closed_by_id.get(f["id"])
             if prev is not None and all(
@@ -166,9 +177,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     backlog["open"].extend(new_items)
 
     if args.scope == "full":
-        last = backlog["meta"].get("last_full_audit")
-        if last and _days_since(last) < COOLDOWN_DAYS:
-            print(f"WARN: 全量审查冷却期未过（上次 {last}）——建议 --scope diff 只审改动")
         backlog["meta"]["last_full_audit"] = _today()
     elif backlog["meta"].get("last_full_audit"):
         days = _days_since(backlog["meta"]["last_full_audit"])
@@ -180,6 +188,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"跳过 {len(skipped)} 条（已在 open 或已处理且内容未变）：{', '.join(skipped)}")
     if new_items:
         print(f"登记 {len(new_items)} 条新发现")
+    if updated:
+        print(f"更新 {len(updated)} 条发现：{', '.join(updated)}")
     blocking = [item for item in backlog["open"] if item["severity"] in BLOCKING]
     new_blocking = sum(1 for item in new_items if item["severity"] in BLOCKING)
     if blocking:
@@ -189,13 +199,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"      {item['note']}")
         print("处置：修复后 close <ID>；用户决策不修则 close <ID> --waive <原因>")
         return 1
-    if new_items:
-        print("PASS: 未决阻塞 0 条")
-        print("未收敛：连续两轮 check 无 P0/P1 且新增=0 即终止该范围审查")
-    else:
-        print("PASS: 未决阻塞 0 条，本轮无新增发现")
-        print("CONVERGED: 该范围审查已收敛——停止审查，进入 done-bar：")
-        print("  python scripts/review_gate.py done")
+    print("PASS: 未决阻塞 0 条；P2/P3 留在 backlog，不要求继续审查")
+    print("CONVERGED: 已提交范围的发现验收通过；范围覆盖与复现证据须见审查记录")
+    print("停止该范围审查，进入 done-bar：python scripts/review_gate.py done --full")
     return 0
 
 
@@ -241,6 +247,11 @@ def cmd_close(args: argparse.Namespace) -> int:
 
 def cmd_done(args: argparse.Namespace) -> int:
     """done-bar：可用的定义。机械检查自动跑，真实库验收打印指引。"""
+    backlog = load_backlog(args.backlog)
+    blocking = [item for item in backlog["open"] if item["severity"] in BLOCKING]
+    if blocking:
+        print("done-bar FAIL: 未决阻塞 " + ", ".join(item["id"] for item in blocking))
+        return 1
     failed = 0
     for name in ("check_anticorrupt.py", "check_skill_sync.py"):
         r = subprocess.run(
@@ -271,11 +282,13 @@ def cmd_done(args: argparse.Namespace) -> int:
     print("可用的剩余验收（需真实库，手动执行）：")
     print("  python scripts/cross_validate.py <最新 result.duckdb> --strategy <策略名>")
     print("    --run-id 1")
-    print("  python scripts/live.py sync live/main.duckdb sync.yaml")
+    print("  实盘：检查已有 sync 对账记录或在账本副本执行对账；不得为验收改写真账本")
     if failed:
         print(f"done-bar FAIL: {failed} 项失败")
         return 1
-    print("done-bar PASS: 机械检查全绿（+测试全绿）；真实库验收通过后即视为可用")
+    tests = "全量测试通过" if args.full else "测试未执行（需 --full）"
+    print(f"自动检查 PASS: 机械检查通过；{tests}；真实库/实盘验收尚需单独证据")
+    print("此退出码仅代表本次已执行检查，不代表完整 done-bar 或实盘可用认证")
     return 0
 
 

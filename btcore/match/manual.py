@@ -44,7 +44,8 @@ def manual_sell(account, bars: dict, sell_symbols: list,
         trade_date = bar_get(bar, "trade_date", "")
 
         up, down = limits_fn(symbol, bar, trade_date)
-        reason = check_tradable("SELL", exec_px, up, down)
+        reason = check_tradable("SELL", exec_px, up, down,
+                                slip_fn=slip_fn, slip_ticks=account.slippage_ticks)
         if reason is not None:
             _warn_skip_reason(reason, "SELL", _warn, trade_date, symbol)
             continue
@@ -103,7 +104,8 @@ def manual_buy(account, bars: dict, buy_symbols: list,
         trade_date = bar_get(bar, "trade_date", "")
 
         up, down = limits_fn(symbol, bar, trade_date)
-        reason = check_tradable("BUY", exec_px, up, down)
+        reason = check_tradable("BUY", exec_px, up, down,
+                                slip_fn=slip_fn, slip_ticks=account.slippage_ticks)
         if reason is not None:
             _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue
@@ -174,7 +176,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         trade_date = bar_get(bar, "trade_date", "")
 
         up, down = limits_fn(symbol, bar, trade_date)
-        reason = check_tradable("SELL", exec_px, up, down)
+        reason = check_tradable("SELL", exec_px, up, down,
+                                slip_fn=slip_fn, slip_ticks=account.slippage_ticks)
         if reason is not None:
             _warn_skip_reason(reason, "SELL", _warn, trade_date, symbol)
             continue
@@ -212,7 +215,8 @@ def rebalance_to_targets(account, bars: dict, targets: dict,
         trade_date = bar_get(bar, "trade_date", "")
 
         up, down = limits_fn(symbol, bar, trade_date)
-        reason = check_tradable("BUY", exec_px, up, down)
+        reason = check_tradable("BUY", exec_px, up, down,
+                                slip_fn=slip_fn, slip_ticks=account.slippage_ticks)
         if reason is not None:
             _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue

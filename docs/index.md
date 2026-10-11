@@ -70,6 +70,7 @@ scripts/     — CLI 入口：回测、报告、评估、扫描、回放
 - **[CLI 与研究工具](./cli_and_research.md)** — 全部 CLI 参数表、研究库 API（因子评估/报告/合成/Brinson）、典型工作流、速查表
 - **[全功能核查列表](./audit_checklist.md)** — 三层核查（静态/动态/边界扫描）逐项验证功能与设计意图一致；真实数据探针速查
 - **[开发收敛协议](./review_protocol.md)** — 审查发现分级（P0-P3）、门禁流程、backlog 管理、done-bar 可用性定义
+- **[2026-10-12 维护期审查基线](./review_record_20261012.md)** — 实际验收证据、两项计算问题的修复验收、复现方式与范围限制
 
 Agent 自主研究指导在 `.agents/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill、实盘操作 skill（`ddup-live-ops`）与审查收敛门禁（`ddup-review-gate`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
 

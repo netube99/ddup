@@ -1,0 +1,35 @@
+meta:
+  date: 2026-10-12
+  commit: c97f19e
+  scope: "仓库维护基线与关键计算链路；覆盖和限制见 docs/review_record_20261012.md"
+findings:
+  - id: F-MAT-02
+    severity: P1
+    rule: "docs/strategy_guide.md §5.4 涨停不买；§3.5 Trade.price 为已含滑点的成交价"
+    file: btcore/match/core.py
+    line: 142
+    note: "历史 P2 升级：.venv/bin/python docs/review_evidence_20261012.py 可复现正常 manual_buy 路径，open=10.99、up_limit=11.00、slippage_ticks=2，actual_price=11.01。独立边界期望：声明为实际成交价的 Trade.price 不应超过 11.00；滑点前 check_tradable 通过，滑点后无护栏。影响成交价、费用、股数预算和现金；不因仅在接近涨跌停时触发而降级。本轮审查不改金融语义，待有边界的修复与回归。"
+  - id: F-ENG-02
+    severity: P1
+    rule: "docs/strategy_guide.md §5.4 pending 每日重算、卖单不顺延；§5.2.2 条件买单单日有效；AGENTS.md 数据流：交易日先处理公司行为"
+    file: btcore/engine.py
+    line: 462
+    note: "历史 P2 升级：.venv/bin/python docs/review_evidence_20261012.py 经 Engine.run 复现，日历含 20240604，但加载池当日无 bar。持有 100 股、每股派 0.5、持有不足 30 天，应到账 100×0.5×0.8=40 元，实际 DIV=0、现金少 40；account_daily 缺该日；20240603 声明次日卖出的单在 20240605 仍成交，期望单日失效后不成交。仅需加载池缺行情，不必全市场缺失；影响现金/公司行为、日频统计和订单有效期。本轮保留阻塞，不自动修复。"
+  - id: GATE-20261012-01
+    severity: P1
+    rule: "AGENTS.md 开发收敛协议：未决 P0/P1 使门禁 FAIL；docs/review_protocol.md done-bar 需零未决阻塞"
+    file: scripts/review_gate.py
+    line: 150
+    note: "旧 check 对已 open ID 一律跳过，已有 P2 即便新证据升为 P1 仍保持 P2 并 PASS；旧 done 不读 backlog，可绕过未决阻塞输出 PASS。回归 tests/test_review_gate.py::test_new_evidence_upgrades_open_finding 与 test_done_cannot_bypass_open_blockers，旧逻辑分别返回 0 而独立期望为 1。本轮已修：同 ID 更新证据/等级，done 先检查阻塞；两项测试通过。"
+  - id: GATE-20261012-02
+    severity: P3
+    rule: "AGENTS.md 开发收敛协议：实际运行的检查与未验证范围必须分别报告"
+    file: scripts/review_gate.py
+    line: 289
+    note: "旧 done 未加 --full 不运行 pytest，却输出机械检查全绿（+测试全绿）；真实 sync 写账命令作为检查指引也缺少只读界限。本轮改成明确测试未执行、真实数据未验证、退出码仅代表实际检查；实盘使用已有证据或副本。test_done_runs_mechanical_checks 验证输出，代码验收通过。"
+  - id: GATE-20261012-03
+    severity: P3
+    rule: "AGENTS.md 开发收敛协议：14 天 full 冷却与非阻塞待办不延长循环"
+    file: scripts/review_gate.py
+    line: 151
+    note: "旧 full 冷却只 WARN 后继续写时间；旧协议写两轮、代码空新增一轮即 CONVERGED，新增 P2/P3 又提示继续检查，驱动重复循环。本轮冷却返回 2 且不写 backlog，统一为范围完成且无未决 P0/P1 停止；新增 P2/P3 不延长循环。test_full_scope_cooldown_rejects_without_writing 与 test_nonblocking_findings_do_not_require_another_review 验收通过。"

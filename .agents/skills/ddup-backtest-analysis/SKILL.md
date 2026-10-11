@@ -106,16 +106,18 @@ r = brinson_attribute("results/r3.duckdb", provider_db,   # 行情库路径：�
 - **相对结论仍有效**：历史轮次实验在同一 bug 行为下进行时，轮次间相对比较不受影响；只有绝对数字和交付声明作废
 - **修复后变差 ≠ 修错了**：策略 alpha 可能依赖 bug 行为（如快切阈值实际 1）；可选 A/B 把语义参数化，属策略决策
 
-## 7. 引擎结果核验（不信任引擎输出时的影子重算）
+## 7. 引擎结果核验（有明确范围的影子重算）
 
-pytest 绿不算证据。引擎所有计算默认不可信时的核验路径：
+pytest 通过是测试覆盖范围内的证据，不是全量正确性证明。仅对本轮改动或具体异常涉及的
+计算链路增加独立重算，不因“仍可能有 bug”扩展全仓审计。遵守 AGENTS.md 收敛协议：
 
 - **确定性验证先行**：同配置跑两次 debug，trade_log/account_daily/debug_snapshots 逐字段零差异——否则一切 diff 无意义
 - **锚点导出**：`Engine(..., debug=True)` → debug_snapshots 表（每日 pending/bars/holdings/account 内部状态）+ trade_log + account_daily
 - **影子重算**：手写 pandas+duckdb 从行情库原始表独立重算（**禁止 import btcore**，按 factors/library.yaml + docs 公式实现——文档与实现漂移本身就是核查对象），与引擎锚点逐字段 diff
 - **三方闭环**：stats_json ↔ trade_log 重建 ↔ account_daily 重建完全一致
 - **核心原则**：成交的票必须通过全部过滤器（一笔违规买入即 bug）；成交价=裸价±滑点、因子=复权口径
-- 完整 7 层 40 项清单见 `docs/audit_checklist.md`；核验后数字变化 → 走 §6 归因
+- 完整 7 层 40 项清单见 `docs/audit_checklist.md`，仅作范围选择参考，不是每次使用的必跑要求；
+  核验后数字变化 → 走 §6 对受影响范围归因。达到本轮验收条件即停止；缺真实数据明确记未验证。
 
 ## 报告与对比
 

@@ -453,6 +453,12 @@ class Engine:
                     status="running",
                 )
 
+            if not any(self.bars_by_date.get(d) is not None for d in calendar):
+                raise ValueError(
+                    f"回测区间内无任何行情数据（{start} ~ {end}）。"
+                    "请检查数据覆盖范围或区间设置"
+                )
+
             prev_day = self.provider.prev_trading_day(calendar[0])
             if prev_day:
                 self.compute_pending(prev_day)
@@ -460,8 +466,8 @@ class Engine:
             for today in calendar:
                 day_bars = self.bars_by_date.get(today)
                 if day_bars is None:
-                    logger.warning("[%s] 无行情数据, 跳过", today)
-                    continue
+                    logger.warning("[%s] 无行情数据，仅处理公司行为与结算；当日订单失效", today)
+                    day_bars = self.bars_df.iloc[:0].droplevel("trade_date")
                 self.step(today, day_bars, conn)
 
             # CONS-02: 统一经 read_run_data 读取（trade_log ORDER BY date, id，
@@ -470,7 +476,7 @@ class Engine:
             account_daily_df, trade_log_df, _ = database.read_run_data(
                 conn, self.run_id
             )
-            # 整段区间零行情 = 明确失败（部分日期缺失仍按 E-LOOP-02 逐日跳过）：
+            # 空结算结果不能落 completed（整段区间零行情已在日循环前拒绝）：
             # 落 completed 会让 ML 标签/批量脚本选中空 run
             if account_daily_df.empty:
                 raise ValueError(
@@ -807,9 +813,14 @@ class Engine:
 
             if bars_dict is None:
                 day_bars_view = self.bars_by_date.get(calc_date)
-                if day_bars_view is None:
-                    return
-                bars_dict = bars_to_dict(day_bars_view, calc_date)
+                bars_dict = (
+                    bars_to_dict(day_bars_view, calc_date) if day_bars_view is not None else {}
+                )
+            if not bars_dict:
+                self.pending_actions = {"buy": [], "sell": []}
+                for holding in self.account.holdings.values():
+                    holding.conditions = []
+                return
 
             # holding scope 模型：账户态特征只能在决策时点计算，分数注入持仓
             # 的 bar dict——策略在 on_tick/select/calc_conditions 中像读普通列

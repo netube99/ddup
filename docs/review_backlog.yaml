@@ -2,7 +2,7 @@
 # open = 未决发现（P0/P1 是门禁 FAIL 的来源）；closed = 已修复或已 waive
 # 手工编辑请保持结构；字段：id/severity/rule/file/line/note/opened/resolved/waived
 meta:
-  last_full_audit: '2026-09-19'
+  last_full_audit: '2026-10-12'
 open:
 - id: F-FAC-03
   severity: P3
@@ -21,15 +21,6 @@ open:
   note: 算子路径 BoolOp 以 (v != 0) 归一操作数，NaN != 0 为 True；纯表达式路径 numexpr 直接拒绝浮点 BoolOp——两路径接受域与
     NaN 语义不对称。现库所有 BoolOp 操作数均为比较式，无实际触发面，仅登记观察。
   opened: '2026-09-13'
-- id: F-MAT-02
-  severity: P2
-  rule: 'docs/strategy_guide.md §5.4: ''涨停不买：fill_price >= up_limit → 买单跳过''，且 §3.5
-    Trade 表定义 fill price 为''成交价（已含滑点）'''
-  file: btcore/match/core.py
-  line: 72
-  note: check_tradable 校验滑点前 exec_px，落库 trade.price 是滑点后价格：exec_px=10.99（up_limit=11.0）+2
-    tick → trade.price=11.01 越过涨停价落库。仅当 exec 价距涨跌停 ≤ slippage_ticks 时触发；改用滑点后价校验属产品决策。
-  opened: '2026-09-13'
 - id: F-MAT-03
   severity: P2
   rule: 'docs/strategy_guide.md §5.4: ''涨跌停无法判定（缺失且无法推导）→ 买卖双双跳过'''
@@ -44,15 +35,6 @@ open:
   file: btcore/match/core.py
   line: 52
   note: holding.shares=0 或 sold=0 时 ZeroDivisionError；当前所有调用点保证 shares ≥ 100 且 ≤ holding.shares，不可达，防御性观察项。
-  opened: '2026-09-13'
-- id: F-ENG-02
-  severity: P2
-  rule: docs/strategy_guide.md §5.4 '卖出单不会顺延到次日重试——pending 每日由 select() 重算'；§5.2.2
-    条件买单 '单日有效，未触发自动失效'
-  file: btcore/engine.py
-  line: 442
-  note: run() 主循环对无行情日 continue——不调 compute_pending，前一日 pending_actions（sell 与 buy_conditions）原样滞留并在下一有行情日按隔日价格执行（陈旧信号隔日成交，违背'不重试/单日有效'）；且被跳过日
-    corporate.adjust 不运行，当日除息分红不入账。仅全市场缺数据日触发；建议：跳过日清空 pending_actions 并补跑公司行为，属设计决策。
   opened: '2026-09-13'
 - id: F-ENG-03
   severity: P3
@@ -1857,3 +1839,53 @@ closed:
   opened: '2026-09-19'
   resolved: '2026-09-19'
   waived: 用户决策：系统只保留 A 股个股，不引入 ETF/基金行情后端
+- id: GATE-20261012-01
+  severity: P1
+  rule: AGENTS.md 开发收敛协议：未决 P0/P1 使门禁 FAIL；docs/review_protocol.md done-bar 需零未决阻塞
+  file: scripts/review_gate.py
+  line: 150
+  note: 旧 check 对已 open ID 一律跳过，已有 P2 即便新证据升为 P1 仍保持 P2 并 PASS；旧 done 不读 backlog，可绕过未决阻塞输出
+    PASS。回归 tests/test_review_gate.py::test_new_evidence_upgrades_open_finding 与 test_done_cannot_bypass_open_blockers，旧逻辑分别返回
+    0 而独立期望为 1。本轮已修：同 ID 更新证据/等级，done 先检查阻塞；两项测试通过。
+  opened: '2026-10-12'
+  resolved: '2026-10-12'
+- id: GATE-20261012-02
+  severity: P3
+  rule: AGENTS.md 开发收敛协议：实际运行的检查与未验证范围必须分别报告
+  file: scripts/review_gate.py
+  line: 289
+  note: 旧 done 未加 --full 不运行 pytest，却输出机械检查全绿（+测试全绿）；真实 sync 写账命令作为检查指引也缺少只读界限。本轮改成明确测试未执行、真实数据未验证、退出码仅代表实际检查；实盘使用已有证据或副本。test_done_runs_mechanical_checks
+    验证输出，代码验收通过。
+  opened: '2026-10-12'
+  resolved: '2026-10-12'
+- id: GATE-20261012-03
+  severity: P3
+  rule: AGENTS.md 开发收敛协议：14 天 full 冷却与非阻塞待办不延长循环
+  file: scripts/review_gate.py
+  line: 151
+  note: 旧 full 冷却只 WARN 后继续写时间；旧协议写两轮、代码空新增一轮即 CONVERGED，新增 P2/P3 又提示继续检查，驱动重复循环。本轮冷却返回
+    2 且不写 backlog，统一为范围完成且无未决 P0/P1 停止；新增 P2/P3 不延长循环。test_full_scope_cooldown_rejects_without_writing
+    与 test_nonblocking_findings_do_not_require_another_review 验收通过。
+  opened: '2026-10-12'
+  resolved: '2026-10-12'
+- id: F-MAT-02
+  severity: P1
+  rule: docs/strategy_guide.md §5.4 涨停不买、跌停不卖；Trade.price 为已含滑点的成交价
+  file: btcore/match/core.py
+  line: 80
+  note: 已修复并验收：原价 10.99、涨停 11.00、2 tick 滑点，旧成交为 11.01，现拒单且现金/持股不变；卖侧原价 9.01、跌停 9.00
+    也拒绝 8.99 越界成交。tests/test_review_calculation_boundaries.py 的 18 个边界案例覆盖 manual/target/condition
+    买卖、达到/越过边界和仍在界内的成交费用；其中 12 例旧实现失败，新实现通过。docs/review_evidence_20261012.py 输出 order_rejected=true、within_limit=true。真实
+    dv_lowvol_300 20240603-28 修复前后 19 行账户与 17 行事件一致、独立费用/现金/市值重算通过。
+  opened: '2026-09-13'
+  resolved: '2026-10-12'
+- id: F-ENG-02
+  severity: P1
+  rule: docs/strategy_guide.md §5.4 公司行为照常入账、单日订单有效期与交易日结算
+  file: btcore/engine.py
+  line: 468
+  note: 已修复并验收：缺行情日仍 step，公司行为与结算执行；compute_pending 清空 pending/条件单，持仓交易日计数和解锁照常，不调决策钩子。100
+    股派 0.5、短持税后应到账 40 元，旧为 0，现为 40；account_daily 连续包含 20240604，旧卖单不在 20240605 成交。tests/test_review_calculation_boundaries.py
+    覆盖现金+送转、sell/target/条件订单失效、恢复交易与截断一致；其中 9 例旧实现失败，新实现通过。整窗无行情仍 ValueError 且 run=failed，现有加固测试通过。
+  opened: '2026-09-13'
+  resolved: '2026-10-12'

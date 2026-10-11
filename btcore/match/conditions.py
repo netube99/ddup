@@ -118,11 +118,17 @@ def exit_conditions(account, bars: dict, limits_fn, costs_fn, slip_fn,
                     "[%s] %s 条件单 %s 成交价非法 (%s), 顺延",
                     trade_date, symbol, cond["type"], fill_price)
                 break
-            if fill_price <= down:
+            ticks = account.slippage_ticks if slip_ticks is None else slip_ticks
+            slipped_price = slip_fn(fill_price, ticks, -1)
+            if not is_valid_price(slipped_price):
+                _warn("[%s] %s 条件单 %s 滑点后成交价非法 (%s), 跳过",
+                      trade_date, symbol, cond["type"], slipped_price)
+                break
+            if fill_price <= down or slipped_price <= down:
                 _warn(
                     "[%s] %s 跌停无法卖出, 条件单 %s 顺延 "
                     "(fill=%s limit_down=%s)",
-                    trade_date, symbol, cond["type"], fill_price, down)
+                    trade_date, symbol, cond["type"], slipped_price, down)
                 break
             shares = cap_by_volume(bar, holding.shares, account)
             if shares < 100:
@@ -226,7 +232,10 @@ def entry_conditions(account, bars: dict, orders: list[dict],
             continue
 
         up, down = limits_fn(symbol, bar, trade_date)
-        reason = check_tradable("BUY", fill_price, up, down)
+        reason = check_tradable(
+            "BUY", fill_price, up, down, slip_fn=slip_fn,
+            slip_ticks=account.slippage_ticks if slip_ticks is None else slip_ticks,
+        )
         if reason is not None:
             _warn_skip_reason(reason, "BUY", _warn, trade_date, symbol)
             continue

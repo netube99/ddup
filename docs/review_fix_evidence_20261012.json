@@ -1,0 +1,36 @@
+{
+  "reproduction": {
+    "F-MAT-02": {
+      "actual_price": null,
+      "up_limit": 11.0,
+      "order_rejected": true,
+      "within_limit": true
+    },
+    "F-ENG-02": {
+      "shares": 100,
+      "expected_dividend": 40.0,
+      "actual_dividend": 40.0,
+      "cash_delta": 0.0,
+      "settled_dates": [
+        "20240603",
+        "20240604",
+        "20240605"
+      ],
+      "stale_sell_dates": [],
+      "expected_stale_sell_dates": []
+    }
+  },
+  "real_window_shadow": {
+    "days": 19,
+    "events": 17,
+    "max_cash_error": 0.0,
+    "max_value_error": 0.0,
+    "max_fee_error": 0.0,
+    "max_net_error": 0.0,
+    "return_error": 0.0,
+    "max_dividend_error": 0.0,
+    "dividend_events": 2,
+    "max_manual_price_error": 0.0,
+    "drawdown_error": 4.163336342344337e-17
+  }
+}

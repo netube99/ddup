@@ -108,7 +108,7 @@ def test_duplicate_id_in_file_rejected(tmp_path):
     assert _run(tmp_path, "check", str(bad)) == 2
 
 
-def test_full_scope_cooldown_warns(tmp_path, capsys):
+def test_full_scope_cooldown_rejects_without_writing(tmp_path, capsys):
     backlog = tmp_path / "b.yaml"
     backlog.write_text(
         yaml.safe_dump(
@@ -117,14 +117,48 @@ def test_full_scope_cooldown_warns(tmp_path, capsys):
         ),
         encoding="utf-8",
     )
+    before = backlog.read_bytes()
     f = _write(tmp_path, "f.yaml", _findings([]))
-    assert _run(tmp_path, "check", str(f), "--scope", "full") == 0
-    assert "WARN" in capsys.readouterr().out
-    assert _load(tmp_path)["meta"]["last_full_audit"] == date.today().isoformat()
+    assert _run(tmp_path, "check", str(f), "--scope", "full") == 2
+    assert "冷却期" in capsys.readouterr().out
+    assert backlog.read_bytes() == before
+    assert _run(tmp_path, "check", str(f), "--scope", "diff") == 0
 
 
-def test_done_runs_mechanical_checks(tmp_path):
+def test_done_runs_mechanical_checks(tmp_path, capsys):
     assert _run(tmp_path, "done") == 0
+    out = capsys.readouterr().out
+    assert "测试未执行" in out
+    assert "完整 done-bar" in out
+
+
+def test_nonblocking_findings_do_not_require_another_review(tmp_path, capsys):
+    f = _write(tmp_path, "f.yaml", _findings([_item("A-01", severity="P2")]))
+    assert _run(tmp_path, "check", str(f)) == 0
+    assert "CONVERGED" in capsys.readouterr().out
+
+
+def test_new_evidence_upgrades_open_finding(tmp_path):
+    f = _write(tmp_path, "f.yaml", _findings([_item("A-01", severity="P2")]))
+    assert _run(tmp_path, "check", str(f)) == 0
+    opened = _load(tmp_path)["open"][0]["opened"]
+    f = _write(tmp_path, "f.yaml", _findings([_item("A-01", severity="P1")]))
+    assert _run(tmp_path, "check", str(f)) == 1
+    assert len(_load(tmp_path)["open"]) == 1
+    assert _load(tmp_path)["open"][0]["opened"] == opened
+    assert _load(tmp_path)["open"][0]["severity"] == "P1"
+
+
+def test_done_cannot_bypass_open_blockers(tmp_path, monkeypatch, capsys):
+    f = _write(tmp_path, "f.yaml", _findings([_item("A-01", severity="P1")]))
+    assert _run(tmp_path, "check", str(f)) == 1
+
+    def unexpected_run(*args, **kwargs):
+        raise AssertionError("有阻塞项时应直接失败")
+
+    monkeypatch.setattr(rg.subprocess, "run", unexpected_run)
+    assert _run(tmp_path, "done", "--full") == 1
+    assert "done-bar FAIL" in capsys.readouterr().out
 
 
 def test_close_unknown_id_fails(tmp_path):

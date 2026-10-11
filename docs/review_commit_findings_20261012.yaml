@@ -1,0 +1,8 @@
+meta:
+  date: 2026-10-12
+  base_commit: c97f19e
+  scope: "提交前工作区 diff：两项计算修复、门禁、回归、文档/skill 与证据记录"
+  coverage: "检查现金/持仓变更前的成交边界校验、缺行情日公司行为/结算/订单失效、整窗失败状态、门禁分级更新/冷却/停止条件，以及记录与实现的一致性；不重新审查未改动模块。"
+  validation: "本轮最终代码已有完整测试 856 passed；提交前重跑门禁与计算边界测试 43 passed，Ruff/反破坏/skill 同步/git diff --check 通过；未决 P0/P1 为 0。"
+  limitations: "真实券商对账未验证；此前固定真实窗口独立重算的覆盖限制仍适用，见 review_record_20261012.md。"
+findings: []

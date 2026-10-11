@@ -30,7 +30,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 
 ## 2. Strategy 接口（btcore/strategy.py）
 
-每日时序（有 bar 的交易日）：公司行为调整 → 撮合昨日信号 → NAV 结算 → `on_fills` → `on_tick` → `select` → `calc_conditions` → 生成明日 pending。**无 bar 日整日跳过、昨日 pending 保留到下一交易日执行；"select 每日运行"仅指交易日，非日历日。**
+每日时序（有 bar 的交易日）：公司行为调整 → 撮合昨日信号 → NAV 结算 → `on_fills` → `on_tick` → `select` → `calc_conditions` → 生成明日 pending。**加载池无 bar 日仍处理公司行为和 NAV 结算，持仓交易日计数/T+1 解锁照常，清空 pending/持仓条件单；不调用决策钩子、不生成次日信号。整窗无行情 fail-fast。**
 
 - `on_start(provider, first_date, end_date=None)`：preload 后调一次。**覆盖必须 super()**（基类接线 StockFilter/ConditionBuilder，否则 filter_bars 报 RuntimeError）；自定义 handler 在此注册
 - `select(bars, account_snapshot, provider) -> dict`：abstractmethod，每日调用（含首日前一日预跑播种）；bars=当日截面 dict-of-dicts
@@ -53,7 +53,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
   - **互斥是同日全量校验**：on_tick 返回的 buy_conditions 会与同日 select 的 buy 名单合并校验——若 on_tick 对某 symbol 挂了条件单，select 必须从 buy_list 排除同一 symbol（否则 ValueError）。
     惯用模式（见 condition_hunter）：on_tick 把已挂单 symbol 记入 `self._breakout_symbols`，select 里 `buy_list = [s for s in buy_list if s not in self._breakout_symbols]`，调仓日再重置该集合。
   - **未触发 = 不成交 = 空仓**：条件单 T+1 没碰到触发价就自动失效，该标的要等下个调仓日才重新评估。入场换条件单会系统性漏掉次日高开的强势股——对截面选股型策略（alpha 在选股不在择时）通常是负贡献，改入场方式前先想清楚 alpha 来源
-- 空返回 {"buy": [], "sell": []} 合法（示例惯例）；空 bars 时引擎不调 select、pending 保持上一日
+- 空返回 {"buy": [], "sell": []} 合法（示例惯例）；空 bars 时引擎不调 select、pending 清空
 - **条件买单最后执行**：同日 sell 释放的现金可供 buy_conditions 使用（引擎撮合顺序：手动卖 → 手动买 → 条件单）
 
 ## 4. YAML config 引擎键（默认值）
@@ -67,6 +67,7 @@ description: ddup 策略编写权威规程：五要素填空、L0-L4 阶梯与�
 - 成交规则：open 越价按 open，否则按触发价；首条触发 break（推荐顺序：止损→止盈→移动止盈→自定义）
 - T+1：当日买入最早次日可触发（撮合 exit 先于 entry + 条件单前一日末附着）
 - 涨跌停：涨停不买/跌停不卖（跌停卖单告警 break，条件单次日由 calc_conditions 重算——**策略须继续声明才离场，无引擎级顺延**）；量 cap、100 股整手、现金不足跳过不缩股
+- 手动、target 和条件买卖都校验原价及滑点后成交价；滑点后买价 >= 涨停、卖价 <= 跌停或非正即拒单并告警，现金/持股不变。条件单用 condition_slippage_ticks（None 沿用账户滑点）
 - target_value target=0 清仓：零碎股一并卖出、**不受 100 股整手与成交量 cap 约束**（与普通卖出不同）
 - 红利税预扣：现金分红按除息日持股时长预扣——≤30 天 20%、≤365 天 10%、>365 天免征（btcore/corporate.py；预扣方向保守，真实规则卖出时按最终持有期补扣/退还）
 - 除权除息日 trailing 锚点（持仓期最高收盘价）按除权比例同步缩放（corporate.adjust 后同步 ConditionBuilder），避免价格台阶被误判为回撤而误触发移动止盈
