@@ -1,77 +1,53 @@
-# ddup 文档
+# ddup 文档导航
 
-面向 A 股的日频量化研究与回测引擎。因子以 YAML 声明，策略以 Python 子类编写，行情数据以表单映射接入自有数据库。引擎负责撮合、费用、滑点、统计与全链路前视屏蔽；研究与回测共享同一因子计算路径。
+从任务进入，只读所需主题。接口规则以专题指南为准；架构解释跨模块不变式；
+skill 提供操作流程；历史记录只证明其标注版本和样本。
 
-## 目录分工
+## 按任务阅读
 
-```
-btcore/      — 引擎内核（机制，不直接编辑）
-adapters/    — 数据后端：你的数据库接在这里
-factors/     — 因子定义：纯 YAML，无类、无注册表
-strategies/  — 策略实现：Python 子类 + YAML 配置
-research/    — 研究工具：纯函数 API，不依赖引擎
-scripts/     — CLI 入口：回测、报告、评估、扫描、回放
-```
-
-## 使用者必须知道的行为契约
-
-以下契约决定回测结果如何产生，编写数据后端、因子或策略前应先理解。
-
-| 契约 | 规则 |
-| --- | --- |
-| 价格体系 | 撮合、成本、估值用裸价（open/close/high/low）；因子计算、排名用后复权（`*_hfq`，由裸价 × adj_factor 派生）。两套价格不可混用 |
-| T+1 锁定 | 买入当日持仓锁定，次日解锁；锁定期间条件单跳过该持仓 |
-| T 日信号 T+1 执行 | select() 当日产出名单，次日按 execution_price（open/close）撮合；条件单 T 日声明，T+1 盘中触发 |
-| 前视屏蔽 | 因子在回测启动时一次性物化为因果列（仅用 ≤ 当日数据）；数据查询按当前模拟日钳制；研究工具与回测共用同一计算路径 |
-| 软回退 vs Fail-Fast | 可选数据能力缺失（ST/行业/指数成分/基准）→ 告警一次，对应规则不生效，继续运行；明确声明的依赖缺失（因子名不存在、引用的伪列无后端支持、必需列缺失）→ 加载阶段直接报错 |
-| 能力开关 | 辅助能力（ST 标记、行业、上市日期、指数成分、基准）以后端是否提供对应数据为开关，无需额外配置 |
-
-## 能力全景
-
-| 我要做什么 | 位置 | 文档 |
+| 任务 | 起点 | 深入 |
 | --- | --- | --- |
-| 对接行情数据库 | `adapters/` 填表（或实现 DataBackend） | [后端对接指南](./backend_guide.md) |
-| 接入财报/资金流等扩展字段 | 表单 `extra_fields` | [后端对接指南](./backend_guide.md) |
-| 定义因子 | `factors/library.yaml` | [因子库指南](./factor_library.md) |
-| 因子 IC / 分层 / 相关性 / 衰减评估 | `scripts/factor_eval.py`、`research.factor_eval` | [因子库指南](./factor_library.md) |
-| 多因子合成（等权 / IC / ICIR 加权） | `research.composite` | [CLI 与研究工具](./cli_and_research.md) |
-| 编写策略买卖逻辑 | `strategies/` 继承 Strategy | [策略设计指南](./strategy_guide.md) |
-| 过滤股票（ST/新股/板块/行业/价格/指数池） | YAML `filter_rules` | [策略设计指南](./strategy_guide.md) |
-| 止损止盈 / 移动止盈 / 自定义离场 | YAML `conditions` + ConditionBuilder | [策略设计指南](./strategy_guide.md) |
-| 条件买入（限价回踩 / 突破追涨） | select 返回 `buy_conditions` | [策略设计指南](./strategy_guide.md) |
-| 目标仓位精确调仓 / 部分减仓 | select 返回 `target_value` / `sell_shares` | [策略设计指南](./strategy_guide.md) |
-| 配置费率、滑点、基准、成交量约束 | YAML `config` 引擎键 | [策略设计指南](./strategy_guide.md) |
-| 训练 ML 模型打分（截面 / 持仓双 scope） | YAML `models` 节 + `scripts/ml_train.py` | [ML 子系统指南](./ml_guide.md) |
-| 运行回测 | `scripts/run.py` | [CLI 与研究工具](./cli_and_research.md) |
-| 参数扫描批量回测 | `scripts/sweep.py` | [CLI 与研究工具](./cli_and_research.md) |
-| HTML 报告 / 多 run 对比 | `scripts/report.py`、`scripts/compare.py` | [CLI 与研究工具](./cli_and_research.md) |
-| 交易合理性交叉验证 | `scripts/cross_validate.py` | [CLI 与研究工具](./cli_and_research.md) |
-| 审查循环收敛门禁（分级/验收/backlog） | `scripts/review_gate.py` | [开发收敛协议](./review_protocol.md) |
-| 交易决策回放调试 | debug 模式 + `scripts/replay.py` | [策略设计指南](./strategy_guide.md) |
-| Brinson 行业归因 | `research.attribution` | [CLI 与研究工具](./cli_and_research.md) |
-| 程序化 API（Python 驱动回测） | `Engine(strategy, provider).run()` | [策略设计指南](./strategy_guide.md) |
-| 实盘账本 / 每日信号操作单 | `scripts/live.py`、`research.live` | [CLI 与研究工具](./cli_and_research.md) |
-| 让 Agent 自主做策略研究 | `.agents/skills/` 研究 skills（随仓库分发） | `.agents/skills/` 共 8 个（研究 6 + 实盘操作 1 + 审查门禁 1），agent 按任务触发加载 |
+| 首次运行 | [README](../README.md) | [回测 CLI](cli_and_research.md#run) |
+| 理解系统 | [架构](../ARCHITECTURE.md) | [目录归属](repository_layout.md) |
+| 接入行情、财报、行业与指数 | [后端指南](backend_guide.md) | [公告日对齐与数据限制](backend_guide.md#alignment) |
+| 写因子、查算子、构建 DAG | [因子机制](factor_library.md) | [物化与计算域](factor_library.md#materialization) |
+| 评估因子、多因子合成 | [因子研究](factor_research.md) | [评估命令](cli_and_research.md#factor-eval) |
+| 设计交易规则 | [五要素与策略模式](strategy_patterns.md) | [钩子和 YAML 参考](strategy_guide.md) |
+| 配仓、条件买卖、自定义退出 | [select 协议](strategy_guide.md#select) | [条件单](strategy_guide.md#conditions)、[执行口径](strategy_guide.md#execution) |
+| 训练/使用 ML 模型 | [ML 指南](ml_guide.md) | [训练](ml_guide.md#training)、[观测](ml_guide.md#observability) |
+| 回测、扫描、报告、回放 | [CLI 参考](cli_and_research.md) | [实验方法](factor_research.md#experiments) |
+| 解释收益和交易 | [结果分析](results_analysis.md) | [统计](results_analysis.md#statistics)、[Brinson](results_analysis.md#attribution) |
+| 实盘建账、对账、操作单 | [实盘指南](live_guide.md) | [排错](live_guide.md#troubleshooting)、[回放验收](live_guide.md#verification) |
+| 修改代码与维护文档 | [开发指南](development.md) | [AGENTS](../AGENTS.md)、[审查协议](review_protocol.md) |
+| 有边界审查/独立核算 | [核查矩阵](audit_checklist.md) | [backlog](review_backlog.yaml)、[历史证据](reviews/README.md) |
 
-## 标准工作流
+## 设计信息地图
 
-1. **对接数据**（一次性）：在 `adapters/` 填表映射自有数据库 → [后端对接指南](./backend_guide.md)
-2. **定义因子**：在 `factors/library.yaml` 登记表达式，用 `factor_eval.py` 验证 IC 与分层区分力 → [因子库指南](./factor_library.md)
-3. **编写策略**：在 `strategies/` 建 YAML + Python 子类，从 `strategies/examples/` 的逐级示例起步 → [策略设计指南](./strategy_guide.md)
-4. **（可选）训练 ML 模型**：YAML 声明 `models`，`ml_train.py` 训练，策略消费 `ml_<name>` 分数 → [ML 子系统指南](./ml_guide.md)
-5. **回测迭代**：`run.py` 运行 → `cross_validate.py` 检查交易合理性 → `report.py` / `compare.py` 分析绩效 → [CLI 与研究工具](./cli_and_research.md)
+| 设计问题 | 权威位置 |
+| --- | --- |
+| 一天内的执行顺序、首日信号、整日缺行情 | [引擎生命周期](../ARCHITECTURE.md#lifecycle) |
+| 裸价/后复权、T+1、前视、软回退和 fail-fast | [跨模块契约](../ARCHITECTURE.md#contracts) |
+| 21 算子、布尔运算、where、warmup | [因子表达式与算子](factor_library.md#expressions) |
+| CSE、全市场广度、交易域/计算域 | [因子物化](factor_library.md#materialization) |
+| 普通单/条件单、滑点、涨跌停、量 cap、零股 | [撮合执行](strategy_guide.md#execution) |
+| 财报 PIT、静态行业、新股名单、指数快照边界 | [数据对齐](backend_guide.md#alignment) |
+| panel/holding、meta v3、同源特征与模型解释权 | [ML 契约](ml_guide.md#configuration) |
+| 多 run、事件语义、费用与归因残差 | [结果库与分析](results_analysis.md) |
+| 账本唯一来源、衍生表重建与回测复用 | [实盘账本](live_guide.md) |
 
-## 文档索引
+<a id="skills"></a>
+## Agent 任务入口
 
-- **[后端对接指南](./backend_guide.md)** — 填表法表单结构、十三必需接口、辅助能力空位、扩展字段、tables 节、能力缺失行为速查
-- **[因子库指南](./factor_library.md)** — 因子定义格式、两条求值路径、算子全集、命名引用与 DAG、where 子句、可用列速查、策略消费、因子评估
-- **[策略设计指南](./strategy_guide.md)** — Strategy 接口参考、YAML 完整参考、条件单系统、撮合与执行、Level 0-4 教程、进阶模式、结果库 schema、速查表全集
-- **[ML 子系统指南](./ml_guide.md)** — panel/holding 双 scope、models 配置、训练命令、meta 契约、model_exit、可观测性
-- **[CLI 与研究工具](./cli_and_research.md)** — 全部 CLI 参数表、研究库 API（因子评估/报告/合成/Brinson）、典型工作流、速查表
-- **[全功能核查列表](./audit_checklist.md)** — 三层核查（静态/动态/边界扫描）逐项验证功能与设计意图一致；真实数据探针速查
-- **[开发收敛协议](./review_protocol.md)** — 审查发现分级（P0-P3）、门禁流程、backlog 管理、done-bar 可用性定义
-- **[2026-10-12 维护期审查基线](./review_record_20261012.md)** — 实际验收证据、两项计算问题的修复验收、复现方式与范围限制
+| skill | 何时加载 |
+| --- | --- |
+| [ddup-research-loop](../.agents/skills/ddup-research-loop/SKILL.md) | 多轮研究、恢复研究状态、决定下一轮或收官 |
+| [ddup-factor-research](../.agents/skills/ddup-factor-research/SKILL.md) | 因子设计、IC/分层/衰减、合成、广度 |
+| [ddup-strategy-craft](../.agents/skills/ddup-strategy-craft/SKILL.md) | 编写/修改策略、仓位和条件单 |
+| [ddup-experiment-design](../.agents/skills/ddup-experiment-design/SKILL.md) | 对照实验、参数扫描、样本外验证 |
+| [ddup-backtest-analysis](../.agents/skills/ddup-backtest-analysis/SKILL.md) | 解释回测、独立核算、定位异常交易 |
+| [ddup-ml-research](../.agents/skills/ddup-ml-research/SKILL.md) | 模型训练、评估及策略消费 |
+| [ddup-live-ops](../.agents/skills/ddup-live-ops/SKILL.md) | 已授权的实盘账本操作与排错 |
+| [ddup-review-gate](../.agents/skills/ddup-review-gate/SKILL.md) | 代码审查、发现登记与修复验收 |
 
-Agent 自主研究指导在 `.agents/skills/`（随仓库分发）：`ddup-research-loop` 元流程入口，路由至因子/策略/实验/分析/ML 五个专题 skill、实盘操作 skill（`ddup-live-ops`）与审查收敛门禁（`ddup-review-gate`）；与代码的事实同步由 `scripts/check_skill_sync.py` 强制。
-
-开发相关规范（架构分层、依赖规则、测试）见项目根目录 `AGENTS.md` 与 `ARCHITECTURE.md`。
+普通开发不必加载研究流程；单一专题任务不必遍读所有 skills。操作流程引用上面的
+专题文档，避免维护两份算子表、参数表或协议表。

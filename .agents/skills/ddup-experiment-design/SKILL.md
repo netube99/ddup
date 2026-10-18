@@ -1,70 +1,29 @@
 ---
 name: ddup-experiment-design
-description: ddup 回测实验设计与执行：单变量/极端值/反向假设三原则、run.py 执行事实（--out 缺省不落盘、并行写锁）、sweep.py 网格语法与串行机制、两阶段验证防过拟合、结果判读纪律。设计实验、参数扫描、批量回测、验证过拟合时使用。
+description: 设计和执行 ddup 对照回测、参数扫描及样本外验证，控制变量、写库与结果可比性；用于实验和过拟合诊断。
 ---
 
-# ddup 实验设计与执行
+# 回测实验
 
-假设 → 最小实验 → 证据。每轮研究只回答一个问题。CLI 全集见 `docs/cli_and_research.md`。
+先读[实验方法](../../../docs/factor_research.md#experiments)，固定假设、对照、评价指标、
+训练/选择窗口与最终检验窗口。优先单变量；极端值和反向假设用于区分解释，不是每次必跑项目。
 
-## 实验三原则
+## 执行
 
-1. **单变量**：每轮只改一个东西（止损 0.08→无止损 ✓；同时改止损+频率+top_k ✗）
-2. **极端值**：找到有效参数后测极端确认方向（止损 8% → 5%/15%/无；top_k=4 → 2 和 8；月频 → 周频和日频）
-3. **反向假设**：有效设计必须测反面（"低波好"→高波组合显著更差？"不止损好"→加止损更差？一个指数池好→换其他指数池？）
+1. 记录 commit/diff、完整策略/因子配置、模型哈希、数据来源/窗口与费用口径。
+   runs.config_json 不等于完整配置快照。
+2. 单次实验用[run](../../../docs/cli_and_research.md#run)，扫描用
+   [sweep](../../../docs/cli_and_research.md#sweep)。先用 --dry-run 检查组合数与字段路径。
+3. run 必须显式 --out 才落盘。共享 DuckDB 不并发写；sweep 本身串行，
+   独立进程需要不同结果库。报告路径也应防覆盖。
+4. sweep 的列表索引形如 factor_specs.0.weight；base 相对工作目录解析。
+   模型 artifact/meta 使用绝对路径，避免临时 YAML 改变相对路径含义。
+5. 用[交叉验证](../../../docs/results_analysis.md#cross-validation)解释逐项告警，再对比收益、
+   回撤、超额、换手、费用、持仓集中度与交易负担。测试错误与经济性差分开报告。
+6. 在未用于选择参数的时间段检验方向和稳定性，保留失败实验；大量尝试增加选择偏差。
 
-## 工具选择
+## 完成条件
 
-| 场景 | 工具 |
-|---|---|
-| 新想法是否有效 | run.py 单点 |
-| 方向已有效找最优参数 / 敏感性 | sweep.py 网格 |
-| 引擎/因子机制改动后回归 | `pytest tests/ -q`（引擎改动另跑 `python scripts/check_anticorrupt.py`） |
-
-## run.py 执行事实（易踩）
-
-```bash
-python scripts/run.py strategies/.../config.yaml --start 20240101 --end 20250630 \
-    --out results/exploring_r3.duckdb [--capital 200000] [--no-report] [--report [path]]
-```
-- **`--out` 不显式给 → :memory: 不落盘，结果蒸发**（研究必须显式 --out；此警示仅 run.py——sweep.py 缺省落盘 `cwd/sweep_result.duckdb`）
-- 报告 auto 路径 = `<策略目录>/reports/<yaml名>_<起>_<止>.html`；迭代期 `--no-report` 加速，最终阶段补：`python scripts/report.py <db> --out r3.html`（`--run-id` 缺省最新）
-- 同一 db 多次 run 按 run_id 累积（多 run 结果库）
-- **同一 db 文件禁止并行写**（DuckDB 单写者：写连接排他，读连接与写连接跨进程互斥，冲突直接报错）：多个独立策略并行跑必须各自不同 --out；同库累积只能串行；sweep 子进程写库期间父进程不得持有同库连接
-
-## sweep.py 网格
-
-```yaml
-# sweep.yaml
-base: strategies/my_strategy/config.yaml
-params:
-  config.top_k: [2, 3, 4, 6, 8]
-  config.conditions.stop_loss_pct: [0.05, 0.08, 0.12]
-  config.rebalance_interval: [1, 5, 22]
-```
-```bash
-python scripts/sweep.py sweep.yaml --start 20240101 --end 20250630 --out results/sweep_r3.duckdb [--dry-run]
-```
-- params 点路径覆写 base，值列表做**笛卡尔积**（示例 5×3×3=45 组）；`--dry-run` 预览组合；**`params: {}` 报错退出码 2**（不得把 base 当扫描结果运行）
-- 路径段支持**列表整数下标**：如 `config.factor_specs.0.weight: [0.5, 0.8]` 可扫 factor_specs 权重；仅当路径段对 list 用非整数段（如漏索引的 `config.factor_specs.weight`）才报错
-- **值必须是列表**：标量 int/float → TypeError 直接崩溃；字符串 → product 静默逐字符拆开（`"abc"` 得 3 组、每组一个字符）静默写坏 config——最常见的低级错误
-- **CLI 只有 yaml/--start/--end/--out/--capital/--dry-run 六个参数，不接受 `--no-report`**——它内部调 run.py 时已强制带 `--no-report`，手动加会 usage error
-- 单次调用 = 一个窗口；多窗口网格需外层 shell 循环分次调用（每次独立 --out 或同库串行累积）
-- 执行 = subprocess **串行**调 run.py（共享 --out，规避并行锁）；失败组合打印 FAIL（保留 stderr 末尾真实异常）并跳过；**全组合失败 → 退出码 1 且不打印「结果已保存到」**
-- 结果写同库 runs + sweep_results 表（label/params/stats），末尾打印收益/Sharpe/MDD 汇总行，直接 grep 即可
-- 多 run 横向对比：`python scripts/compare.py results/sweep_r3.duckdb --html cmp.html`（11 项指标表 + 归一化净值叠加）
-
-## 两阶段验证（防过拟合）
-
-```
-阶段 1 快速筛选：近 ~18 个月（经验值，约覆盖单边市）
-  通过标准：收益 > 基准 或 Sharpe > 0
-阶段 2 长周期确认：~3.5 年以上窗口（经验值，约覆盖牛熊转换）
-  仅对阶段 1 通过者运行；短期好+长期垮 = 过拟合，标记并回溯哪段失效
-```
-
-## 结果判读纪律
-
-- 单点/网格数字只是入场券：通过阶段 1 后必须深度分析（ddup-backtest-analysis）再定论
-- sweep 最优组合警惕"网格噪声冠军"：最优与次优差距 < 噪声水平时选参数高原而非尖峰（相邻参数组都好的区域）
-- 参数敏感性本身就是结论：sharpe 对 top_k∈[3,6] 平坦 = 策略稳健；只在 top_k=4 好 = 疑似过拟合
+回答预先声明的问题就结束，不自动继续网格细化。交付参数/DB/run_id、可比性条件、
+样本内外差异和结论可信范围。没有独立检验窗口时明确写“尚未样本外验证”。
+旧引擎结果若受计算修复影响，先判断是否要重跑；不能假设绝对收益错但相对排名仍可靠。

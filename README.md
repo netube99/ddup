@@ -1,62 +1,52 @@
 # ddup
 
-面向 A 股的日频量化研究与回测引擎。
+A 股个股日频量化研究与回测引擎。用 YAML 定义因子，用 Python 策略表达交易意图，
+引擎处理因果物化、T+1 撮合、公司行为、费用与多 run 结果记录。
 
-ddup 覆盖从数据接入、因子定义、策略表达到回测执行、绩效分析和 HTML 报告生成的完整工作流。策略与因子均以声明式配置（YAML + Python 子类）描述，引擎负责调度、撮合与结果持久化。支持因子 IC 评估、多因子滚动 IC/ICIR 合成、分层回测、Brinson 行业归因和交叉验证等研究工具，并提供面向 LLM agent 的程序化 API。
+[文档导航](docs/index.md) · [架构与设计契约](ARCHITECTURE.md) · [开发指南](docs/development.md)
 
-本项目推荐搭配数据库管理软件 [tushare_db](https://github.com/netube99/tushare_db) 一起使用
+## 开始使用
 
-## 核心模块
+需要 Python 3.12+ 和 uv。从仓库根目录执行：
 
-### 数据接口
+```bash
+uv sync --extra dev
+uv run pytest tests/ -q
+```
 
-* 填表法后端，仅需声明"表名.字段名"映射，无需编写 SQL
-* 引擎自动完成多表外并集、列对齐和列裁剪
-* 内建支持涨跌停价格、复权因子、分红、ST 标记、行业分类、指数成分等数据契约
-* 前视防护门面约定性隔离当日数据与历史数据，防止未来信息泄漏
+测试使用仓库 fixtures，不需要真实行情库。实际回测另需配置后端与因子库；
+本机配置不随仓库分发，已有文件请直接编辑，不要覆盖：
 
-### 因子库
+```bash
+cp -n adapters/tushare.py.template adapters/tushare.py
+cp -n factors/library.yaml.template factors/library.yaml
+```
 
-* 因子以纯 YAML 表达式定义，表达式算子在安全的 ast 求值器内运行
-* 数十种时序（ma、roc、ewm、std）与截面（zscore、rank、group_mean）算子可组合嵌套
-* 引擎自动解析依赖 DAG，规划物化链路并消除公共子表达式（CSE）
-* 因子值以列形式注入回测面板，策略直接读列使用，无需重复计算
+按[后端指南](docs/backend_guide.md)填写数据库路径和表单；也可实现自己的 DataBackend。
+默认 CLI 后端为 `adapters.tushare:TushareBackend`，通过 `DDUP_BACKEND=module:Class`
+切换。支持与 [tushare_db](https://github.com/netube99/tushare_db) 管理的行情库配合使用。
 
-### 复杂策略
+```bash
+uv run python scripts/run.py strategies/examples/bare_bones/config.yaml \
+  --start 20240603 --end 20240628 --out results/first.duckdb --no-report
+uv run python scripts/cross_validate.py results/first.duckdb --run-id 1
+uv run python scripts/report.py results/first.duckdb --run-id 1 --out results/first.html
+```
 
-* 以 Python 类继承 Strategy ABC 表达交易逻辑，逻辑表达不受限制，可构建应对复杂市场环境的策略行为，而非仅限于生成买卖请求
-* YAML 配置文件声明因子规格、调仓频率和条件单参数
-* select() 方法仅返回订单意图，引擎处理调仓调度与资金分配
-* 支持 target_value 目标市值调仓、buy/sell 名单手动下单和 buy_conditions 条件买单三套下单协议
-* 止损、止盈、移动止盈等条件单以声明式 handler 注册，统一 dispatch
+`run.py` 不传 `--out` 只使用内存库；默认另生成 HTML 报告。
+示例展示机制，不代表通过收益验证的策略。
 
-### 回测引擎
+## 能做什么
 
-* 日频逐笔撮合，内置涨跌停跳过、T+1 锁定、滑点模型（tick=0.01）和可配置费率
-* 现金校验与成交量上限裁剪自动执行，拒单不静默
-* 全量成交日志与逐日账户快照写入 DuckDB 结果库，支持多 run 累积存储与对比
+| 工作 | 入口 |
+| --- | --- |
+| DuckDB 填表接入、扩展列、公告日对齐 | [数据后端](docs/backend_guide.md) |
+| 表达式算子、DAG、全市场广度、CSE | [因子定义与物化](docs/factor_library.md) |
+| IC、分层、衰减、滚动 IC/ICIR 合成 | [因子研究](docs/factor_research.md) |
+| 名单、目标市值、条件买卖、自管理调仓 | [策略接口](docs/strategy_guide.md)与[示例模式](docs/strategy_patterns.md) |
+| panel / holding 模型训练与 ONNX 分数消费 | [ML](docs/ml_guide.md) |
+| 扫描、绩效、交易回放、Brinson 归因 | [命令](docs/cli_and_research.md)与[结果分析](docs/results_analysis.md) |
+| 成交账本、对账、次日操作单 | [实盘账本](docs/live_guide.md) |
+| Agent 按任务执行研究与维护 | [Skill 路由](docs/index.md#skills) |
 
-### 报告
-
-* 纯 Python 生成单文件离线 HTML，无第三方前端依赖
-* 内联 SVG 绘制权益曲线、回撤序列、月度收益热力图和持仓集中度
-* 多 run 对比报告将多次回测叠加于同一坐标系下对比分析
-
-### 研究工具
-
-* 独立的纯函数工具集，不依赖回测引擎
-* 因子评估：Pearson IC / Spearman Rank IC、分层回测、因子相关性矩阵
-* 多因子合成：滚动 IC/ICIR 加权，对因子截面进行符号敏感的加权组合
-* Brinson 行业归因：超额收益分解为配置效应与选股效应
-* 交叉验证：交易行为一致性检查与异常检测
-
-### Agent 研究友好
-
-* 引擎、策略加载器、因子库和所有研究工具均提供 Python 程序化 API
-* 策略可通过 `build_strategy()` 以纯 dict 构造，无需 YAML 文件
-* 回测结果以结构化 dict 返回（stats / trades / daily）
-* 支持在内存中完成定义、回测、分析、迭代的闭环，适合 LLM agent 驱动的自动化量化研究
-
-## 风险声明
-
-本软件仅用于量化策略研究与历史回测，不构成任何形式的投资建议。历史回测结果不代表未来表现。策略实盘前应充分考虑容量、滑点、交易成本与市场冲击等因素。使用者应自行承担交易决策的全部风险与责任。
+软件用于研究和历史回测；历史收益不代表未来表现。账本与操作单功能不连接券商自动下单。

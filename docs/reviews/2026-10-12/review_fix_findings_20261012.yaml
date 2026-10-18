@@ -8,7 +8,7 @@ findings:
     rule: "docs/strategy_guide.md §5.4 涨停不买、跌停不卖；Trade.price 为已含滑点的成交价"
     file: btcore/match/core.py
     line: 80
-    note: "已修复并验收：原价 10.99、涨停 11.00、2 tick 滑点，旧成交为 11.01，现拒单且现金/持股不变；卖侧原价 9.01、跌停 9.00 也拒绝 8.99 越界成交。tests/test_review_calculation_boundaries.py 的 18 个边界案例覆盖 manual/target/condition 买卖、达到/越过边界和仍在界内的成交费用；其中 12 例旧实现失败，新实现通过。docs/review_evidence_20261012.py 输出 order_rejected=true、within_limit=true。真实 dv_lowvol_300 20240603-28 修复前后 19 行账户与 17 行事件一致、独立费用/现金/市值重算通过。"
+    note: "已修复并验收：原价 10.99、涨停 11.00、2 tick 滑点，旧成交为 11.01，现拒单且现金/持股不变；卖侧原价 9.01、跌停 9.00 也拒绝 8.99 越界成交。tests/test_review_calculation_boundaries.py 的 18 个边界案例覆盖 manual/target/condition 买卖、达到/越过边界和仍在界内的成交费用；其中 12 例旧实现失败，新实现通过。scripts/diagnostics/review_evidence_20261012.py 输出 order_rejected=true、within_limit=true。真实 dv_lowvol_300 20240603-28 修复前后 19 行账户与 17 行事件一致、独立费用/现金/市值重算通过。"
   - id: F-ENG-02
     severity: P1
     rule: "docs/strategy_guide.md §5.4 公司行为照常入账、单日订单有效期与交易日结算"

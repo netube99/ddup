@@ -1,18 +1,30 @@
+# Python 环境与可再生缓存
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# 本机行情与回测产物（数据库、研究状态、报告）
 *.db
 *.duckdb
 *.duckdb.wal
 backtest_output/
 results/
-.pytest_cache/
-market.db
 tushare_db
+market.db
+full_db_test/
+
+# 测试 fixtures 即使命中上述数据库模式也要入库
+!tests/fixtures/*.parquet
+
+# 本机后端与因子配置；对应 .template 随仓库分发
 adapters/tushare.py
 factors/library.yaml
-!tests/fixtures/*.parquet
-.coverage
 
 # 用户策略目录（不含官方示例）
 strategies/exploring/
@@ -28,16 +40,8 @@ strategies/**/reports/
 # 开发过程文档（内部记录，不开源）
 docs/devlog/
 
-# VitePress 构建产物
-docs/node_modules/
-docs/.vitepress/dist/
-docs/.vitepress/cache/
-
 # 实盘账本（账户隐私数据）
 live/
 
 # 运行日志（上游维护/本地运行产物）
 logs/
-
-# 本机回测产物（隐私）
-full_db_test/

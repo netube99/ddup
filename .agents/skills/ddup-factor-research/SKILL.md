@@ -1,105 +1,33 @@
 ---
 name: ddup-factor-research
-description: ddup 因子研究全流程：数据资产地图（契约/派生/伪列与后端扩展字段）、因子 YAML 定义规则、21 算子加工梯度、factor_eval 评估、多因子合成、坍缩因子 compute_breadth 口径与四大陷阱。设计新因子、评估 IC/分层/衰减、多因子合成、诊断 IC 失真时使用。
+description: 设计和评估 ddup YAML 因子，分析 IC、分层、衰减、相关性、多因子合成及市场广度；用于因子研究或因子计算口径排错。
 ---
 
-# ddup 因子研究
+# 因子研究
 
-因子是纯 YAML 数据（`factors/library.yaml`），引擎只提供表达式机制。API 细节见 `docs/factor_library.md`（按需切片读）。
+先读[数据列与伪列](../../../docs/factor_library.md#columns)和与目标相关的
+[后端对齐约束](../../../docs/backend_guide.md#alignment)，确认字段、单位、可得日期与股票域。
 
-## 研究流水线（严格按序）
+## 从假设到证据
 
-```
-1. 查名录：通读 factors/library.yaml 现状（分类注释/命名），避免重造、找灵感
-   （仓库只分发模板 factors/library.yaml.template；实际名录是本地资产，以文件为准）
-2. 写表达式：library.yaml 登记（格式见下；自定义因子库可参考 strategies/examples/multi_model/factors.yaml）
-3. 验证：pytest tests/ -q（因子库/物化机制由测试全量覆盖，改 library.yaml 后必跑）
-4. 评估：factor_eval.py 测 IC/分层/衰减（下文）
-5. 合成：多因子用 research.combine_factors 找权重（不直接手填 YAML 权重）
-6. 入策略：factor_specs 引用（ddup-strategy-craft）
-```
+1. 明确预测对象、方向、持有期和价格口径；排名通常用后复权，财报按公告日对齐。
+2. 按[定义/表达式](../../../docs/factor_library.md#definition)写 YAML，用
+   [算子表](../../../docs/factor_library.md#operators)组合已有机制。不要注册新因子类或运行时算子。
+3. 核对依赖闭包、warmup、where 与缺失值；布尔计数按
+   [显式算术化](../../../docs/factor_library.md#boolean-score)处理。
+4. 用[评估命令](../../../docs/cli_and_research.md#factor-eval)固定窗口/股票域/前瞻期，
+   查看 IC、分层、衰减、相关性和覆盖率；再用独立时间段复测。
+5. 多因子合成先读[合成 API](../../../docs/factor_research.md#composite)。IC 权重的
+   延迟须覆盖标签 horizon；研究 zscore 合成与策略百分位排名不是同一得分。
 
-## 数据资产地图（因子灵感来源）
+## 特殊路径
 
-- **契约列**（9，必有）：`open` `high` `low` `close` `vol`(手) `adj_factor` `pre_close` `up_limit` `down_limit`
-- **派生列**（引擎自动）：`open_hfq` `high_hfq` `low_hfq` `close_hfq`（裸价×adj_factor）、`pct_chg`
-- **伪列**（引擎按需附着）：`industry`、`log_mktcap`（=log(total_mv)，自动补请求 total_mv）、`idx_ret`（需 benchmark）
-- **扩展字段**：以 `adapters/` 后端表单 `extra_fields` 登记为准（未登记列运行期拒绝）——日频基本面/资金流/筹码/两融/涨跌停等数据类皆走此通道；**先做因子前先看后端登记了什么**
-- **研究侧数据资产**（行情库原生表，非因子列）：`idx_factor_pro`（指数日频，大小盘相对强弱/基准点位）、`sw_daily`（申万行业日线，行业分化/动量）、`index_member_all`/`index_weight`（行业映射/基准成分权重，Brinson 归因）——市场状态刻画与行业归因直接消费，见 ddup-research-loop 第 0 步
-- 排名/因子一律用 hfq 口径（表达式里写 `close_hfq` 等），裸价排名会因除权跳空产生假信号
+- collapse/广度先读[物化域](../../../docs/factor_library.md#materialization)：全市场标量
+  无横截面区分力；group_mean 在行业间仍可不同，不能笼统宣布所有 collapse 的 IC 都为零。
+- compute_breadth 的 group_mean 返回行业等权聚合标量，不是引擎广播后的行业分组面板。
+  分块查询保留完整历史前缀，不保证内存随 chunk_size 有界。
+- 明确声明的伪列、因子或原始字段缺失应定位数据依赖，不能以填零绕过。
+- IC 异常先核对 forward 标签、next-open 对齐、股票域与 PIT；共享计算函数不证明样本域相同。
 
-## 因子 YAML 格式（load_library 校验）
-
-```yaml
-factors:
-  my_factor:
-    expr: "ma(close_hfq, 20) / close_hfq - 1"   # 必填；纯表达式或算子表达式；可引用其他因子名（DAG，成环报错）
-    where: "pct_chg > -0.095"                   # 可选；后置掩码置 NaN 不删行；条件值 NaN/0/False 也掩码该行；where 含算子仅当 expr 含算子（expr 纯表达式 + where 算子 → 加载报错）
-    description: "..."                          # 可选，加载器忽略
-```
-规则：算子参数必须位置传、尾部标量必须数字常量；**算子路径禁 `&` `|` `not`（求值期报错，用 and/or；纯表达式路径 `&` `|` `not` 与 and/or 均可用）**；因子名禁撞保留字（契约 9 + `amount` + 派生 5 + 伪列 3 + `abs`/`log`，共 20 个）；YAML 重复键 fail-fast。
-
-## 21 算子梯度（btcore/factors/ops.py 白名单）
-
-| 层 | 算子 |
-|---|---|
-| TS 时序（按 symbol 因果滚动） | `delay` `delta` `roc` `ma` `ema` `std` `sum` `max` `min` |
-| TS 双序列（独立因子类别，勿忽略） | `corr`(x,y,n) 价量相关 / `beta`(x,y,n) / `resid_std`(x,y,n) 特质波动 |
-| 截面保形（按日） | `abs` `log` `rank`(百分位∈(0,1]) `zscore` `winsorize`(x,p∈(0,0.5)) |
-| 分组 | `group_rank`(x,g) 组内百分位 / `neutralize`(x,g,size) 行业+市值 OLS 残差 |
-| 坍缩（同日广播） | `mean`(x) 全市场标量 / `group_mean`(x,g) 组均值 map 回个股 |
-
-设计原则：每次只加一层变换，每层用 factor_eval 验证 IC 变化；先验证裸列有无 alpha，不要起手堆满算子。
-
-## factor_eval.py 评估（CLI，纯终端无落盘）
-
-```bash
-python scripts/factor_eval.py mom20,vol_z --start 20240101 --end 20250630 \
-    [--universe CSI500] [--forward 5 | --decay 1,3,5,10] [--n-quantiles 5] \
-    [--exec-price close|next-open] [--model path.onnx] [--benchmark 000300.SH] \
-    [--factor-library strategies/.../factors.yaml]
-```
-- 输出三段：IC 汇总（Pearson/RankIC + IR + 胜率 + n_days）、分层回测（**Q1=最低档**，含多空 Qmax−Qmin）、≥2 因子加相关性矩阵
-- `--universe`：指数别名 → 成分快照回溯并集 + PIT 逐日过滤；**研究股票池必须与策略候选池一致**
-- `--exec-price next-open`：前瞻从 T+1 开盘计（引擎同款执行时序）——**策略化前必须复核**；动量族因子在可交易口径下显著衰减
-- `--factor-library PATH`：评估策略本地因子库（缺省顶层 `factors/library.yaml`）；策略目录自带 `factors.yaml` 的因子必须用此评估
-- `--decay` 与显式 `--forward`≠5 互斥；`--model` 仅 panel scope（ddup-ml-research）；坍缩因子自动走全市场 compute_breadth，且自动跳过截面 IC/分层/相关性并打印提示（空序列统计量返回 NaN，表格显示 `—`，不再输出伪 IR/Win）
-- 失败均 stderr+退出码 1（未知因子/无成分/窗口无数据/嵌套坍缩…）
-- warmup 自动前伸：start − max(365, int(最大窗口×1.5)+10) 日历天（引擎同源）
-- ⚠ 2026-08-07 修复：前瞻收益改用显式 groupby shift（此前 pct_change().shift() 链
-  在 date-major 面板跨 symbol 污染，此前的 IC 数字全部作废需重测）
-
-程序化 API（research/factor_eval.py，纯函数）：`calc_ic` / `summarize_ic` / `calc_layered_returns` / `calc_factor_corr` / `calc_ic_decay`。输入均为 (trade_date, symbol) MultiIndex 面板。
-
-## 多因子合成（research/composite.py）
-
-```python
-comp = combine_factors(factor_df, fwd_ret, method="icir", window=60, horizon=5)  # equal|ic|icir
-ev = evaluate_composite(comp, fwd_ret)   # → {"ic":…, "rank_ic":…, "layered":…}
-```
-前视保护与引擎一致：t 日权重仅用截至 t-horizon 日已实现的 IC（rolling 后 shift(max(1, horizon))）；**`horizon` 必须等于 forward_returns 的实际前瞻期**（如 5 日前瞻传 `horizon=5`；缺省 1 只适用于日频前瞻，误用会造成前视）；前 ~window 日 NaN；每因子先截面 zscore，权重按 |w| 归一化。对比三种 method 后，按最优设定策略 factor_specs 的 weight/ascending。
-
-## 坍缩因子特例
-
-- 研究侧 `compute_factors` 的聚合口径 = 传入 df 的股票池（窄池 ≠ 引擎全市场口径）；评估坍缩因子**必须**用 `compute_breadth(name, backend, lib, start, end, benchmark=...)`（全市场流式分块，与引擎同源口径；`lib` 为 load_library() 结果，`benchmark` 在因子引用 `idx_ret` 时必传）
-- 坍缩因子同日全市场同值，无截面变异：不能算 IC/分层，改时序维度（与基准收益比对 / 择时门控信号）；factor_eval 对坍缩因子自动跳过截面 IC/分层/相关性并打印提示（空 IC 序列统计量为 NaN 而非 0，表格显示 `—`）
-- `group_mean` 坍缩的日频标量 = 当日各行业组值的等权平均（compute_breadth 按 date×industry 组取 first 后对组均值；依赖 industry 列，缺失即报错——2026-08 修复 F-BRD-03）。**分支判定按 `collapse_kind` 结构识别（ops.py:356-366），顶层裸 `group_mean(x, g)` 与算术/算子包装（如 `1 * group_mean(x, g)`）都走等权均值分支，无漏判**（2026-09 实测 n_diff=0）；仍须避免在坍缩表达式里嵌套**组内可变**的保形项（如 `group_mean(x,g) + zscore(y)`）——组内取值不恒定，取组 first 采样才有损
-
-## 四大陷阱（每轮因子工作前过一遍）
-
-| # | 陷阱 | 症状 | 修复 |
-|---|---|---|---|
-| 1 | warmup 不足 | 前 N 天全 NaN，IC 失真 | 引擎/factor_eval 自动前伸 max(365, 窗口×1.5+10)；研究侧自行保证同等前伸 |
-| 2 | 口径自负 | 全市场 IC 高，回测 IC 低 | 研究池=策略候选池（`--universe` 限定），不外推 |
-| 3 | ascending 语义 | 排序方向反 | IC 正 → `ascending: false`（值大排前，默认）；IC 负 → true |
-| 4 | 坍缩截面评估 | calc_ic 全 NaN | 改 `compute_breadth` + 时序评估 |
-| 5 | 前瞻收益口径 | 研究 RankIR 高、回测亏损 | ①策略化前必用 `--exec-price next-open` 复核（T+1 开盘买 vs T 收盘买，动量族差异巨大）；②**勿用 `pct_change().shift()` 链构造前瞻**——扁平 shift 在 (trade_date, symbol) 面板跨 symbol 污染（2026-08-07 事故：全部 IC 虚高，重测后动量/筹码族 IC≈0，仅低拥挤簇真实）；用显式 groupby shift；③因子 IC 必须与引擎回测/真实价格交叉验证（回测是唯一无偏测量） |
-
----
-
-## 已验证的真实信号结构（2026-08-07 修复工具后，CSI500 5d）
-
-- **低拥挤簇**（三窗口×三池×可交易口径全存活，均升序排名）：`margin_change`（融资活跃度反转）、`vol10`（低波）、`turnover_z`（低换手）、`sealed_days5`（涨停后回落）、`dist_to_low60`
-- **质量簇**（仅动量市有效，熊市反转）：`rev_yoy_z`、`npr_z`
-- **动量/筹码/尾盘/资金流/技术族**：修正后 IC≈0 或负（弱反转），此前标注作废
-- 择时信号：`pct_sealed`（+0.139）/`limit_down_pct`（+0.120，恐慌反弹）
+交付表达式/版本、数据条件、覆盖、样本内外证据及是否进入策略实验。
+分层曲线是因子诊断，不是可直接交易的组合净值；不根据一个 IC 阈值宣称可实盘。

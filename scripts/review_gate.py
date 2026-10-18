@@ -80,6 +80,8 @@ def save_backlog(path: Path, data: dict) -> None:
         "# 审查 backlog：由 scripts/review_gate.py 自动维护\n"
         "# open = 未决发现（P0/P1 是门禁 FAIL 的来源）；closed = 已修复或已 waive\n"
         "# 手工编辑请保持结构；字段：id/severity/rule/file/line/note/opened/resolved/waived\n"
+        "# rule/note 保留登记当时的原文引用；`原§N` 与已停用的 checklist ID 是历史定位符，\n"
+        "# 不指向当前文档——定位当前文本用引号内原文 grep，代码侧看 file/line\n"
     )
     path.write_text(
         header + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"

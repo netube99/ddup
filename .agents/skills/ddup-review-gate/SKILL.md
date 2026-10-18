@@ -1,67 +1,37 @@
 ---
 name: ddup-review-gate
-description: 审查收敛门禁：有边界审查、独立证据与分级、P0/P1 验收、P2/P3 backlog、三层 done-bar 与强制停止条件。审查或审计代码、产出 findings 和验收 audit_record 时使用。
+description: 对 ddup 代码变更进行有边界审查，登记可复现发现、管理 backlog 并验收必要修复；用于审查或审计请求。
 ---
 
-# ddup-review-gate — 维护期审查门禁
+# 有边界审查与验收
 
-先读 AGENTS.md「开发收敛协议」、最近审查记录与 backlog。完整流程见
-`docs/review_protocol.md`；基线见 `docs/review_record_20261012.md`。
+开始前读[审查协议](../../../docs/review_protocol.md)、
+[最新证据索引](../../../docs/reviews/README.md)与[backlog](../../../docs/review_backlog.yaml)。
+记录 commit/diff、涉及调用链、验收命令和完成条件。普通修改只审 diff；
+没有明确全仓授权或共用计算链路失效证据，不启动完整审查。
 
-## 范围与证据
+## 发现与处置
 
-- 开始前锁定 commit/diff、使用路径、覆盖范围、验收命令、停止条件。
-- 普通任务只审 diff 及直接影响的调用链。全量须有用户要求或共用计算链路失效证据。
-- 每条发现必须含触发条件、可运行复现、实际值、独立期望值及依据、影响对象。
-  未复现猜测写“待验证”，不作缺陷、不阻塞、不据此改代码。
-- P0：已复现的广泛数据损坏或核心计算错误。P1：支持路径上的错误计算、前视、
-  错误成交或契约违背。特定输入、低频、旧项为 P2 不能作为降级理由。
-- P2：当前支持路径不可达或明确超出支持范围的已证实局限。P3：文档/维护建议。
-  P2/P3 只登记；未经用户明确指定，不修复、不延长审查。
-- 审查请求默认产出证据与结论；修复请求默认只修确认的 P0/P1，先建立独立回归。
-  不能以静音、放宽阈值、改断言、降级或伪造 waive 换取通过。
+1. 用[核查矩阵](../../../docs/audit_checklist.md)选择证据；先复现再定级，
+   独立期望来自手算、原始数据或独立公式，不能调用被测实现生成答案。
+2. 每条 finding 包含 id/severity/rule/file/line/note；note 写触发、命令/测试、
+   实际结果、独立期望与依据、影响对象。未复现猜测单列待验证。
+3. P0/P1 是支持路径下已复现的计算/成交/契约错误，按实际影响定级。
+   触发少或历史为 P2 不能降级；P2/P3 记录 backlog，不自动修复。
+4. 审查请求默认交付发现；用户要求修复时只修确认的 P0/P1，除非明确扩大范围。
+   每个计算修复先建失败回归，再最小修改。
+5. findings 提交 review_gate.py check；完整审查用 --scope full，14 天冷却内返回 2；
+   修复验收用 diff。复用历史 ID，行号/措辞变化不是重开证据。
 
-## findings 与流程
+## 验收与停止
 
-```yaml
-meta:
-  date: 2026-10-12
-findings:
-  - id: F-EXAMPLE-01
-    severity: P1
-    rule: "AGENTS.md 设计契约：T+1 锁定"
-    file: btcore/engine.py
-    line: 1
-    note: "触发输入；复现命令/测试；实际值；独立期望值与公式；影响"
-```
+按协议分别报告自动检查、计算抽样、实盘证据。done --full 执行两项机械检查与全量
+pytest，Ruff 单独运行；门禁通过只证明已提交发现无阻塞，不证明覆盖了所有行为。
+未获真实账本写入授权时在副本验证；缺券商快照就写“未验证”。
 
-位置为示例占位；必填 id/severity/rule/file/line/note，结构检查不代替证据核实。
+范围完成且无未决 P0/P1 即停止；新增非阻塞项不延长循环，不重复 findings 冒充独立审查。
+同一问题两次修复未通过，停止自动改动并交付复现、失败原因和可选方案。
+新可复现 P0/P1 才扩展必要范围；用户目标、权限和范围始终优先。
 
-```bash
-python scripts/review_gate.py check findings.yaml --scope full
-python scripts/review_gate.py check findings.yaml --scope diff
-python scripts/review_gate.py close F-EXAMPLE-01
-python scripts/review_gate.py done --full
-```
-
-- check exit 1：含历史未决 P0/P1，报告阻塞；修复验收后 close，或用户明确 waive。
-- check exit 2：非法输入或 full 冷却期未过，不更新 backlog。
-- check exit 0 / CONVERGED：登记发现无未决阻塞；范围完成即停止。P2/P3 新增不延长循环。
-  不要求连续两轮或零发现；重复提交同一 YAML 不算独立审查。
-- 同一 open ID 的新证据/分级变化更新原项；closed 项仅凭新的实质证据才重开。
-  不因措辞或行号漂移重复报问题。
-- full 至少间隔 14 天，脚本只记录仓库级日期；修复验收用 diff。
-- 同一问题两次修复仍失败，停止自动改动，交付证据与方案。无新 diff/失败测试/
-  新复现/用户扩大范围，不得再循环。
-
-## done-bar 必须分层
-
-1. 自动：反破坏 + skill 同步 + Ruff + 全量 pytest；记录 passed/skipped/failed。
-   done 先拒绝未决 P0/P1，再跑两项机械检查；--full 才跑 pytest，Ruff 另跑。
-   done 返回 0 仅代表已执行检查通过，默认调用会打印“测试未执行”。
-2. 计算：固定代码/配置/数据窗口，独立重建受影响的现金、持股、费用、市值、指标；
-   时序变更加未来扰动/截断证据。cross_validate 不能替代这些检查。
-3. 实盘：已有券商快照对账证据或账本副本验证；缺证据写“未验证”，不写真实账本。
-
-CONVERGED 和自动检查通过都不能代表完整计算/实盘认证；最终报告范围、阻塞项、
-非阻塞待办、实际检查与未验证项。不得自动启动策略研究、重写基线或优化参数。
+最终报告列本轮范围、阻塞项、非阻塞待办、实际检查 passed/skipped/failed 及未验证范围。
+不得用 CONVERGED 或 fixtures 通过替代计算、真实数据与券商对账证据。

@@ -1,4 +1,6 @@
-# ML 子系统指南
+# ML 模型：声明、训练与消费
+
+[文档入口](index.md) · [因子机制](factor_library.md) · [研究方法](factor_research.md)
 
 ## 1. 基本概念
 
@@ -25,68 +27,104 @@ holding，否则 → panel。
 `scikit-learn`。
 
 ---
+<a id="configuration"></a>
+## 2. 配置参考
 
-## 2. 快速开始
+### `models` 节（策略 YAML）
 
-### 2.1 定义特征因子
+顶层为 mapping：`{模型名: 条目}`。模型名决定分数列名 `ml_<模型名>`。
 
-ML 特征就是普通因子库因子，与选股因子共享算子库：
+| 键 | 类型 | 必需 | 说明 |
+|----|------|------|------|
+| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），训练输出写这里（首次训练可不存在）；加载时按 meta 的 `artifact_sha256` 校验文件字节，不符报错 |
+| `meta` | str | 否 | meta 路径，缺省 = artifact 同名 `.meta.json` |
+| `features` | dict | 训练引导 | 见下表；meta 存在时以 meta 为准，YAML 内联的 `factors` / `raw` 必须与 meta 一致或省略（`state` 不参与比对，scope 恒由 meta 的 `state_features` 决定）；meta 缺失时内联值即契约 |
+| `role` | str | 否 | **已废弃**：仅告警忽略。scope 由 state_features 推导，阈值写在策略侧 |
+
+`features` 子键：
+
+| 子键 | 说明 |
+|------|------|
+| `factors` | 因子库因子名列表，并入因子闭包物化 |
+| `raw` | backend 原始列名列表（如 `turnover_rate`、`pe_ttm`），并入请求列 |
+| `state` | 账户态特征列表，支持 `hold_days`、`ret_from_entry`；非空即 holding scope |
+
+账户态特征定义（训练/推理同一公式）：`hold_days` = 引擎维护的持仓交易日数
+（成交当日 decision 时点为 1，逐交易日 +1；训练侧重放按市场交易日位置
+计算，与引擎逐日一致）；`ret_from_entry` = 当日裸收盘 / 买入均价 − 1
+（裸价口径 = 账户市值盈亏，现金分红另行入账不计入；买入均价是裸成交价，
+hfq 收盘与之混用会被复权因子污染）。重放按引擎 `Holding.entry_price`
+逐日路径：加仓日重算 cost/shares，现金分红除息日 rescale
+entry ×= pre_close/(pre_close+每股税前红利)、cost 扣税后净额——
+静态聚合买入均价无法表达这两类状态变化。
+
+### `conditions.model_exit`（策略 YAML）
 
 ```yaml
-# factors/library.yaml
-factors:
-  roc_5:
-    expr: "roc(close_hfq, 5)"
-    description: "5日动量"
-  close_vs_ma20:
-    expr: "close_hfq / ma(close_hfq, 20) - 1"
-    description: "价格相对 MA20 偏离度"
-```
-
-### 2.2 配置策略 YAML
-
-```yaml
-models:
-  alpha_xs:                              # 模型名 → 分数列 ml_alpha_xs
-    artifact: ml_model/alpha_xs.onnx     # 相对策略目录；训练输出也写这里
-    features:                            # 首次训练引导用；训练后以 meta 为准
-      factors: [roc_5, close_vs_ma20]
-      raw: [turnover_rate, pe_ttm]
-
-  tb_guard:                              # features 含 state → holding scope
-    artifact: ml_model/tb_guard.onnx
-    features:
-      factors: [roc_5, close_vs_ma20]
-      state: [hold_days, ret_from_entry]
-
-factor_specs:
-  - factor: mom_z
-    weight: 0.3
-  - factor: ml_alpha_xs                  # panel 分数列按名引用，参与评分
-    weight: 0.4
-
 conditions:
-  stop_loss_pct: 0.08
-  model_exit:                            # 分数 ≥ 0.6 → 生成 ML_EXIT 条件单
+  model_exit:
     - {model: tb_guard, threshold: 0.6}
 ```
 
-加载期校验（全部 fail-fast，无静默降级）：
+- list，每条必须含 `model` 键（引用已声明的模型，通常为 holding scope）
+- `threshold` 缺省 0.5，必须 ∈ (0, 1)
+- 持仓 bar 中 `ml_<model>` 分数 ≥ threshold 时生成 `ML_EXIT` 条件单；
+  当日该持仓无分数（见下方引擎行为）则不触发
+- 与 `stop_loss_pct` 等规则共存时按 ConditionBuilder 生成顺序求值，
+  同一持仓首条触发的条件单成交后不再评估后续
 
-- `artifact` 必填、必须是已存在的 `.onnx` 文件；meta 缺失（引擎路径）、
-  meta 版本不是 3、YAML 内联 features 与 meta 不一致 → 直接报错
-- 模型的 `features.factors` 自动并入因子闭包统一物化（不参与评分），
-  享受 warmup 推导 / 列裁剪等全部既有机制；因子名不在因子库中直接报错
-- `features.raw` 自动并入引擎向 backend 请求的列
-- `factor_specs` 引用 `ml_*` 列时校验对应 **panel** scope 模型已声明；
-  holding scope 模型不物化列（分数在决策时点注入持仓 bar），引用即报错
-- `conditions.model_exit` 引用的模型必须在 `models` 节已声明
+### model_meta.json（v3，训练导出，勿手写）
 
-注意：首次训练时 `artifact` 可以不预先存在——YAML 内联 `features` 提供
-特征契约，训练导出会创建目录并写 `.onnx` 与 `.meta.json`。引擎加载路径
-（`require_meta=True`）仍要求 artifact 与 meta 均已存在。
+| 键 | 说明 |
+|----|------|
+| `version` | `META_VERSION == 3`；v2 因 `ret_from_entry` 改为裸价口径被拒绝，需重新训练导出 |
+| `name` / `scope` | 模型名 / 推导出的 scope（`panel` / `holding`） |
+| `features` | `{factors, raw}` — 特征契约；输入向量列序 = factors + raw + state_features |
+| `state_features` | 账户态特征列表；非空即 holding scope |
+| `post_transform` | 分数截面后变换：`none`（缺省）/ `xs_rank` / `xs_zscore` |
+| `label` | 标签描述：panel 为 `{"type": "xs_fwdret", "horizon": N}`；holding 为 `{"type": "trend_break", "lookahead": N}` |
+| `train_window` | 训练窗口 `[start, end]` |
+| `metrics` | 测试集评估指标（见[训练](#training)） |
+| `n_train` / `n_test` | 切分后的样本数 |
+| `scaler_mean` / `scaler_std` | StandardScaler 参数，推理时自动应用；维度与特征契约不符时加载期 `ValueError`（meta 与特征不一致 = 静默错分，请重新训练导出） |
+| `artifact_sha256` | ONNX 文件字节哈希。写入用于版本追溯（随 runs.config_json 落盘）；加载 ModelSpec 时若 artifact 存在且 meta 含该键，重算 sha256 比对，不符 `ValueError`（篡改/半写 fail-fast） |
+| `n_trees` | 可选：导出到 ONNX 的树数；early stopping 模型为 `best_iteration + 1`（onnxmltools 只导出最优轮次之前的树），非早停为 booster 总轮数 |
+| `best_iteration` | 可选：early stopping 选中的轮次（0-based）；仅早停模型有。用于识别 artifact 是否被早停截断（对比宣称的树数/表现） |
 
-### 2.3 训练
+<a id="training-cli"></a>
+### `scripts/ml_train.py` 参数
+
+| 参数 | 必需 | 说明 |
+|------|------|------|
+| `yaml`（位置参数） | 是 | 策略 YAML 配置路径 |
+| `--model` | 是 | `models` 节中的模型名 |
+| `--start` / `--end` | 是 | 训练窗口 YYYYMMDD |
+| `--horizon` | 否 | panel 标签前瞻天数，缺省 5（也是 embargo 宽度） |
+| `--db` | holding 必需 | holding scope 标签来源：含 trade_log 的回测结果库 |
+| `--run-id` | 否 | 标签取用的 run_id；缺省取最新 `status='completed'` 的 run（无 completed 回退最新 run），多 run 时告警告知所选 |
+| `--lookahead` | 否 | holding 标签前瞻天数，缺省 3（也是 embargo 宽度） |
+| `--post-transform` | 否 | `none` / `xs_rank` / `xs_zscore`，写入 meta 作为训练/推理统一声明 |
+| `-v` / `--verbose` | 否 | 调试日志 |
+
+### 引擎行为要点
+
+- panel 物化时机：因子物化之后、`factor_universe` 裁切之前——截面后变换的
+  排名口径 = 因子计算全域，计算函数与训练侧共用；实际股票域仍须核对指数成分与加载窗口
+- holding 求值时机：每日 `select` / `calc_conditions` 之前逐持仓注入；
+  截面后变换口径 = 当日全部持仓
+- 分数语义：回归模型输出预测值；分类模型输出正类概率
+- 缺失特征与 ±inf 在 scaler 之后按 0 填充（标准化空间的 0 = 训练段均值，缺失/发散被
+  解释为中性；训练侧先把 ±inf 归一为 NaN，两侧同口径）；缺失特征过半则**无分数**：holding 模型该持仓当天无分数
+  （bar 中不出现 `ml_<name>` 键），panel 模型该行分数为 NaN（后续评分按缺失值规则处理），
+  `model_exit` 不会触发
+- 回测窗口与 meta `train_window` 重叠时引擎告警（样本内乐观偏差风险）；
+  仅告警不阻断，walk-forward 复用模型属合法用法
+- 引擎 config 键 `ml_log`：`"full"` 时 ml_predictions 表落盘全截面分数；
+  缺省只落盘决策相关标的（持仓 + 当日买卖名单 + 条件买单）。
+
+---
+<a id="training"></a>
+## 3. 训练与导出
 
 ```bash
 # panel scope：标签 = horizon 日前向收益（hfq 口径）的每日截面 pct rank
@@ -105,8 +143,7 @@ completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
 
 训练域：`filter_rules.index_universe` 成分在训练窗口内的并集；未配置则全市场。
 配置了但窗口内解析不到任何成分快照（成分表未同步等）→ 打印警告并回退
-全市场训练，不会静默改变训练域。面板自动向 start 之前延伸 warmup 天数
-（按因子闭包推导），标签窗口不会缺数据。
+全市场训练，不会静默改变训练域。面板向 start 之前延伸 warmup（按因子闭包推导）；窗口尾部缺少未来价格的标签不能作为有效样本。
 
 切分纪律：
 
@@ -135,235 +172,99 @@ completed run（`--run-id` 显式指定），同日公司行为（DIV/STK_DIV）
 - `<name>.onnx` — XGBoost ONNX 模型（panel 回归 / holding 二分类）
 - `<name>.meta.json` — meta v3：特征契约 + scaler + 评估指标 + sha256（勿手写）
 
-导出采用**原子写**：onnx/meta 先写同目录 `.tmp`，sklearn 原始模型 vs 导出
-ONNX 的输出一致性校验（含 scaler 路径，max diff > 1e-4 即失败）通过后才
-`os.replace` 落位——校验失败或中断时旧 artifact 原样保留，不留半写文件。
+导出先写临时文件；提供非空校验样本时，比对原模型与 ONNX（含 scaler），
+最大差异超过 1e-4 则拒绝发布。CLI 训练传入校验样本。
+ONNX 与 meta 分别通过 os.replace 落位，单文件替换是原子的，两个文件不是联合事务；
+两次替换之间中断可能留下不匹配的一对文件。加载时的哈希校验用于发现这种不一致。
 
 meta 的 `artifact_sha256` 不只用于追溯：加载 ModelSpec 时若 meta 含该键且
 artifact 存在，会重算文件 sha256 并比对，不符（篡改/半写）直接 `ValueError`。
 首训引导（`require_meta=False`、artifact 尚不存在）跳过该校验。
-
-### 2.4 策略消费
-
-panel 分数列就是普通物化列，策略代码零 ML 感知：
-
-```python
-def select(self, bars, snapshot, provider):
-    df = bars_to_df(bars)
-    factor_df, score = eval_factor_specs(df, self.FACTOR_SPECS)  # ml_alpha_xs 已加权
-    top = score.nlargest(self._top_k).index.tolist()
-    return {"buy": top, "sell": [s for s in snapshot.holdings if s not in top]}
-```
-
-holding 分数在决策时点注入持仓 bar，声明式消费用 ConditionBuilder：
-
-```python
-def on_start(self, provider, first_date, end_date=None):
-    self._cb = ConditionBuilder(self.config.get("conditions"))
-
-def calc_conditions(self, symbol, entry_price, bar, holding_days):
-    return self._cb.calc(symbol, entry_price, bar, holding_days)
-```
-
-或完全自定义——在 `select` / `calc_conditions` / `on_tick` 里读
-`bar["ml_tb_guard"]` 实现任意逻辑（减仓、加条件单、记日志……）。
-
-`ML_EXIT` 条件单 T+1 以开盘价成交，与 MANUAL 卖出同磨损口径，享受条件单
-全部既有护栏（开盘价非法顺延 / 跌停顺延 / 成交量 cap / T+1 锁定跳过），
-trade_log 的 trigger 记为 `ML_EXIT` 并附带 model 与 score。
-
----
-
-## 3. 配置参考
-
-### 3.1 `models` 节（策略 YAML）
-
-顶层为 mapping：`{模型名: 条目}`。模型名决定分数列名 `ml_<模型名>`。
-
-| 键 | 类型 | 必需 | 说明 |
-|----|------|------|------|
-| `artifact` | str | **是** | ONNX 路径（相对策略 YAML 目录或绝对），训练输出写这里（首次训练可不存在）；加载时按 meta 的 `artifact_sha256` 校验文件字节，不符报错 |
-| `meta` | str | 否 | meta 路径，缺省 = artifact 同名 `.meta.json` |
-| `features` | dict | 训练引导 | 见下表；meta 存在时以 meta 为准，YAML 内联值必须一致或省略 |
-| `role` | str | 否 | **已废弃**：仅告警忽略。scope 由 state_features 推导，阈值写在策略侧 |
-
-`features` 子键：
-
-| 子键 | 说明 |
-|------|------|
-| `factors` | 因子库因子名列表，并入因子闭包物化 |
-| `raw` | backend 原始列名列表（如 `turnover_rate`、`pe_ttm`），并入请求列 |
-| `state` | 账户态特征列表，支持 `hold_days`、`ret_from_entry`；非空即 holding scope |
-
-账户态特征定义（训练/推理同一公式）：`hold_days` = 引擎维护的持仓交易日数
-（成交当日 decision 时点为 1，逐交易日 +1；训练侧重放按市场交易日位置
-计算，与引擎逐日一致）；`ret_from_entry` = 当日裸收盘 / 买入均价 − 1
-（裸价口径 = 账户市值盈亏，现金分红另行入账不计入；买入均价是裸成交价，
-hfq 收盘与之混用会被复权因子污染）。重放按引擎 `Holding.entry_price`
-逐日路径：加仓日重算 cost/shares，现金分红除息日 rescale
-entry ×= pre_close/(pre_close+每股税前红利)、cost 扣税后净额——
-静态聚合买入均价无法表达这两类状态变化（meta v3 行为）。
-
-### 3.2 `conditions.model_exit`（策略 YAML）
+<a id="bootstrap"></a>
+## 4. 首次训练与消费
 
 ```yaml
+models:
+  alpha_xs:
+    artifact: ml_model/alpha_xs.onnx
+    features:
+      factors: [mom20]   # 必须存在于所用因子库
+      raw: [turnover_rate]
+  tb_guard:
+    artifact: ml_model/tb_guard.onnx
+    features:
+      factors: [mom20]
+      state: [hold_days, ret_from_entry]
+factor_specs:
+  - {factor: ml_alpha_xs, weight: 1.0}
 conditions:
   model_exit:
     - {model: tb_guard, threshold: 0.6}
 ```
 
-- list，每条必须含 `model` 键（引用已声明的模型，通常为 holding scope）
-- `threshold` 缺省 0.5，必须 ∈ (0, 1)
-- 持仓 bar 中 `ml_<model>` 分数 ≥ threshold 时生成 `ML_EXIT` 条件单；
-  当日该持仓无分数（见 §3.5）则不触发
-- 与 `stop_loss_pct` 等规则共存时按 ConditionBuilder 生成顺序求值，
-  同一持仓首条触发的条件单成交后不再评估后续
+以上是合并到完整策略 YAML 的片段。首次训练允许 artifact 不存在，但必须内联 features；
+训练产出 ONNX 与 meta 后才能回测。引擎要求两文件存在，meta 版本不是 3、特征不一致、
+scaler 维度不符或哈希不匹配都会拒绝加载。模型因子并入 materialize_only 闭包，
+raw 并入请求列；holding 分数不能放入 factor_specs。
 
-### 3.3 model_meta.json（v3，训练导出，勿手写）
+消费通道：panel 分数参与 factor_specs；持仓分数交给 conditions.model_exit；或在
+策略钩子中读取 ml_<name> 自行解释。沿用 Strategy 的默认 ConditionBuilder 即可；
+覆写 on_start/on_tick 时保留父类初始化/清理行为。策略不得自行加载 ONNX。
 
-| 键 | 说明 |
-|----|------|
-| `version` | 固定 3（v2 因 ret_from_entry 改为裸价口径被拒绝，需重新训练导出） |
-| `name` / `scope` | 模型名 / 推导出的 scope（`panel` / `holding`） |
-| `features` | `{factors, raw}` — 特征契约；输入向量列序 = factors + raw + state_features |
-| `state_features` | 账户态特征列表；非空即 holding scope |
-| `post_transform` | 分数截面后变换：`none`（缺省）/ `xs_rank` / `xs_zscore` |
-| `label` | 标签描述：panel 为 `{"type": "xs_fwdret", "horizon": N}`；holding 为 `{"type": "trend_break", "lookahead": N}` |
-| `train_window` | 训练窗口 `[start, end]` |
-| `metrics` | 测试集评估指标（见 §2.3） |
-| `n_train` / `n_test` | 切分后的样本数 |
-| `scaler_mean` / `scaler_std` | StandardScaler 参数，推理时自动应用；维度与特征契约不符时加载期 `ValueError`（meta 与特征不一致 = 静默错分，请重新训练导出） |
-| `artifact_sha256` | ONNX 文件字节哈希。写入用于版本追溯（随 runs.config_json 落盘）；加载 ModelSpec 时若 artifact 存在且 meta 含该键，重算 sha256 比对，不符 `ValueError`（篡改/半写 fail-fast） |
-| `n_trees` | 可选（E2E-02 治理）：导出到 ONNX 的树数；early stopping 模型为 `best_iteration + 1`（onnxmltools 只导出最优轮次之前的树），非早停为 booster 总轮数 |
-| `best_iteration` | 可选：early stopping 选中的轮次（0-based）；仅早停模型有。用于识别 artifact 是否被早停截断（对比宣称的树数/表现） |
+ML_EXIT 在 T 日决策生成，T+1 按开盘价尝试成交，遵守条件单价格、涨跌停、量 cap、
+T+1 锁定约束。当天未成交的条件不会保证自动顺延；下一决策日重新计算。
+trigger 为 ML_EXIT，附带 model 和 score。阈值属于策略，模型不自带强制交易意图。
 
-### 3.4 `scripts/ml_train.py` 参数
+<a id="evaluation"></a>
+## 5. 评估与模型版本
 
-| 参数 | 必需 | 说明 |
-|------|------|------|
-| `yaml`（位置参数） | 是 | 策略 YAML 配置路径 |
-| `--model` | 是 | `models` 节中的模型名 |
-| `--start` / `--end` | 是 | 训练窗口 YYYYMMDD |
-| `--horizon` | 否 | panel 标签前瞻天数，缺省 5（也是 embargo 宽度） |
-| `--db` | holding 必需 | holding scope 标签来源：含 trade_log 的回测结果库 |
-| `--run-id` | 否 | 标签取用的 run_id；缺省取最新 `status='completed'` 的 run（无 completed 回退最新 run），多 run 时告警告知所选 |
-| `--lookahead` | 否 | holding 标签前瞻天数，缺省 3（也是 embargo 宽度） |
-| `--post-transform` | 否 | `none` / `xs_rank` / `xs_zscore`，写入 meta 作为训练/推理统一声明 |
-| `-v` / `--verbose` | 否 | 调试日志 |
+1. 先明确标签含义：panel 是前向收益截面排名的回归预测，holding 是 TB 亏损回合预警。
+   不把回归分数解释为事件概率，也不把分类分数视为已校准概率。
+2. horizon/lookahead 与业务问题对应；最终检验窗口须晚于训练与调参窗口。
+   内部 80/20 切分不替代独立样本外复测。
+3. 后变换作用于**输出分数**，不是输入特征。none 保留原输出，xs_rank/xs_zscore
+   改成当日相对位置；holding 截面是当日持仓，panel 是物化域。变换后的分类分数
+   不再保有原概率含义，model_exit 阈值需要按新的分数语义解释。
+4. 用 factor_eval.py --model 在样本外复测 panel IC/衰减，再固定交易规则做回测。
+   holding 查分数覆盖、触发、误报和漏报，再看换手、磨损与收益影响。
+5. 滚动重训保留每个窗口的 artifact/meta，分别运行；sweep 的模型路径使用绝对路径，
+   不覆盖仍被历史实验引用的模型。
 
-### 3.5 引擎行为要点
+市场广度、行业特征和账户态可以组合，但模型不规定策略意图。只有所有输入同日相同，
+才应预期所有股票输出相同；含个股特征时不能称为纯市场状态分数。
 
-- panel 物化时机：因子物化之后、`factor_universe` 裁切之前——截面后变换的
-  排名口径 = 因子计算全域，与训练面板口径一致
-- holding 求值时机：每日 `select` / `calc_conditions` 之前逐持仓注入；
-  截面后变换口径 = 当日全部持仓
-- 分数语义：回归模型输出预测值；分类模型输出正类概率
-- 缺失特征与 ±inf 在 scaler 之后按 0 填充（标准化空间的 0 = 训练段均值，缺失/发散被
-  解释为中性；训练侧先把 ±inf 归一为 NaN，两侧同口径）；缺失特征过半则**无分数**：holding 模型该持仓当天无分数
-  （bar 中不出现 `ml_<name>` 键），panel 模型该行分数为 NaN（截面排名末位），
-  `model_exit` 不会触发
-- 回测窗口与 meta `train_window` 重叠时引擎告警（样本内乐观偏差风险）；
-  仅告警不阻断，walk-forward 复用模型属合法用法
-- 引擎 config 键 `ml_log`：`"full"` 时 ml_predictions 表落盘全截面分数；
-  缺省只落盘决策相关标的（持仓 + 当日买卖名单 + 条件买单）。
+<a id="observability"></a>
+## 6. 观测与排错
 
----
+| 位置/现象 | 核对内容 |
+| --- | --- |
+| `runs.config_json` 的 `models_meta` | 每条只有 `name` / `scope` / `label` / `train_window` / `artifact_sha256`；完整策略 `config` 与生效的 `initial_capital` / `max_positions` 同在这一列。因子定义和因子库版本**不落盘**，追溯须对照当时的 `factors/` 库与 `factor_specs` |
+| ml_predictions | run_id/date/symbol/model/score；ml_log=full 扩大 panel 落盘范围 |
+| debug/replay | 原始日面板包含 panel 分数；holding 分数在决策点注入，查 ml_predictions |
+| artifact/meta 缺失 | 首训内联 features 并训练；回测不能用占位文件 |
+| features 不一致 | 与 meta 对齐，或用新路径重训；不要手写 meta 绕过契约 |
+| 模型不触发 | 查缺失特征、分数覆盖、阈值与 scope，再查撮合拒单 |
+| IC 高而收益差 | 核对样本外窗口、交易域、执行价格、持有期、费用与基准 |
+| `post_transform` 未生效 | 只由训练参数写入 meta；在 `models` 条目里写同名字段不报错也不生效 |
 
-## 4. 标签与后变换的选择
+模型推理、训练面板和账户特征复用机制能减少漂移；仍须核对数据快照、因子定义、股票域
+和窗口。代码同源不等于不同实验的输入相同。
 
-| 场景 | 推荐 | 理由 |
-|------|------|------|
-| panel 标签 | 缺省的 `xs_fwdret`（前向收益截面 pct rank ∈ (0,1]） | 消市场 beta，跨日可比；原始收益标签被 beta 主导 |
-| 特征已含截面算子（`zscore(...)` 等） | `--post-transform none` | 因子表达式内已截面化，避免双重变换 |
-| 原始量纲特征（turnover_rate 等 raw 列） | `--post-transform xs_rank` | 分数跨日可比，与 eval_factor_specs 的 rank 语义一致 |
-| horizon | 与策略调仓周期一致 | 5 日调仓 → `--horizon 5` |
-| lookahead | 期望提前预警的交易日数 | holding 标签 = 距 TB 亏损离场 ≤ lookahead 个交易日 |
+### 已知边界（当前实现）
 
-后变换口径：`xs_rank` 为逐日截面 pct rank ∈ (0,1]；`xs_zscore` 为逐日截面
-z-score（截面标准差≈0 时置 0）。panel scope 的截面 = 因子计算全域
-（factor_universe 裁切前），holding scope 的截面 = 当日持仓；训练与推理一致。
+以下行为有回归证据并在 backlog 登记，不是文档笔误；遇到时按列出的影响判断，
+不要假设相反语义（ID 对应 `docs/review_backlog.yaml`）。
 
-### 意图模式（引擎零新增概念）
-
-| 意图 | 实现 |
-|------|------|
-| 选股 alpha | panel 模型 + `factor_specs` 引用分数列参与加权评分 |
-| 持仓预警离场 | holding 模型 + `conditions.model_exit` |
-| 市场状态/风险 | panel 模型引用坍缩因子（市场广度特征）→ 分数同日全市场一致，`select` 中自读门控买侧 |
-| 板块热度 | panel 模型引用 group 坍缩因子，分数按板块聚合后自读 |
-
-后两者不需要任何新机制：市场/板块特征本来就是坍缩因子，模型只是把它们
-组合成分数，解释权在策略。
-
----
-
-## 5. 可观测性
-
-| 工具 | ML 集成 |
-|------|---------|
-| `scripts/factor_eval.py --model x.onnx` | 模型分数物化为 `ml_<name>` 列后走与因子完全相同的 IC / IC 衰减 / 分层 / 相关性报告；仅支持 panel scope |
-| `scripts/cross_validate.py` | `ML_EXIT` 是登记的合法触发类型，交易审计通用 |
-| `scripts/replay.py`（debug 模式） | 决策快照的 bars_subset 含 `ml_*` 列——决策现场可见当日模型分数 |
-| 结果库 runs 表 | `config_json` 含 `models_meta`（每个模型的 name / scope / label / train_window / artifact_sha256），多 run 可区分模型版本 |
-| 结果库 ml_predictions 表 | `(run_id, date, symbol, model, score)`——SQL 直接查任意决策点的模型分数；落盘范围见 `ml_log`（§3.5） |
-
-滚动重训（walk-forward）不做进程内在线学习：用 sweep.py 跑多 run，每 run
-挂不同版本的模型 artifact，在结果库中多 run 对比。
-
----
-
-## 6. 策略侧文件结构
-
-```
-strategies/my_strategy/
-  config.yaml              # models 节 + factor_specs 引用 ml_* 列 + conditions.model_exit
-  strategy.py              # 零 ML 感知（panel）/ ConditionBuilder 委托（model_exit）
-  ml_model/
-    alpha_xs.onnx          # 训练导出（artifact 声明路径）
-    alpha_xs.meta.json     # 特征契约 + scaler + 指标（meta v3）
-```
-
----
-
-## 7. 常见问题
-
-**Q: 加载报「artifact 不存在」？**
-A: 模型尚未训练且 YAML 未内联 `features`。首次训练请在 `models.<name>` 内联
-`features` 后直接运行 `scripts/ml_train.py`（导出创建 artifact 与 meta）；
-模型已训练时检查 `artifact` 路径拼写是否正确。
-
-**Q: 加载报「缺少 meta 文件」？**
-A: 模型还没训练。在 YAML 内联 `features` 做引导，跑
-`scripts/ml_train.py --model <name>` 导出 meta 后再回测。
-
-**Q: 报「YAML 内联 features 与 meta 不一致」？**
-A: meta 是特征契约的唯一事实源。重训换特征后删除 YAML 内联 `features`，
-或改回与 meta 一致。
-
-**Q: 训练/推理特征会不会对不齐？**
-A: 不会——训练面板与引擎 preload 调用同一组物化函数，账户态特征共用同一
-公式，输入列序由 meta 锁定。要检查的是特征因子在因子库中的定义本身。
-
-**Q: panel 模型 IC 很高但回测没超额？**
-A: 检查 (1) `post_transform` 是否与特征截面化程度匹配（§4）；
-(2) horizon 是否与调仓周期错配；(3) 用 `factor_eval.py --model` 在
-样本外区间复测 IC 衰减。
-
-**Q: holding 模型从不触发 / 触发过多？**
-A: 调 `conditions.model_exit` 的 `threshold`（纯策略配置，改完直接回测，
-无需重训）。先查 ml_predictions 表看该模型的分数分布再定阈值；从不触发
-也可能是持仓当天缺失特征过半导致无分数。
-
-**Q: 在 YAML models 节里写 `post_transform` 有效吗？**
-A: 无效。`post_transform` 由训练侧确定并写入 meta（用
-`--post-transform` 指定），引擎只从 meta 读取。
-
-**Q: `model_exit` 引用的模型 `post_transform` 不是 `none` 会怎样？**
-A: 引擎在加载期告警一次：阈值比较作用于变换后分数，而持仓数过小时截面
-rank/zscore 会退化——单持仓时 `xs_rank` 恒为 1.0，`model_exit` 每次都触发。
-model_exit 配 `--post-transform none` 训练的模型最省事（分数直接可比）。
-
-**Q: 缺 onnxruntime？**
-A: `uv pip install onnxruntime`（推理）；训练另需
-`uv pip install xgboost onnxmltools scikit-learn`。
-未配置 `models` 的策略不需要任何 ML 依赖。
+- **YAML 内联 `state` 不参与一致性校验**（`F-ML-05`）：meta 存在时只比对 `factors` / `raw`，
+  YAML 里写错 `state` 不报错，scope 恒按 meta 的 `state_features` 推导。改 scope 必须重新
+  训练导出，不能只改 YAML。
+- **`post_transform` 只能来自 meta**：`models` 条目写同名键不报错、不生效，也无告警。
+- **panel 标签按行位移**（`F-ML-06`）：`xs_forward_return` 用组内 `shift(-horizon)`；个股
+  期内停牌缺行时，实际跨度可能多于 horizon 个市场交易日。稀疏面板下 horizon 不是严格
+  日历意义上的“N 个交易日”。
+- **holding 分数不在 debug 快照里**（`F-ML-07`）：快照的 `bars_subset` 取自 `day_bars`，
+  而 holding 分数只注入决策用的 bar dict；查 holding 分数看 `ml_predictions`，不要从快照
+  推断“当天没算分”。
+- **训练侧两处显示口径**（`F-ML-04`、`F-ML-08`）：`dataset.build_panel` 按
+  `getattr(logger, issue["level"])` 输出因子校验问题，未知 level 会崩（引擎侧已加白名单）；
+  meta 的 `metrics.pos_rate_train` 实际是全量样本正类率，不是切分后训练段。

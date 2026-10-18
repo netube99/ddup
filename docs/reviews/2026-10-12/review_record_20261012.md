@@ -148,7 +148,7 @@ AGENTS.md、review_protocol 与 review-gate skill 同步要求：
 .venv/bin/ruff check btcore/ tests/ scripts/ research/ strategies/ factors/ adapters/
 .venv/bin/python scripts/check_anticorrupt.py
 .venv/bin/python scripts/check_skill_sync.py
-.venv/bin/python docs/review_evidence_20261012.py
+.venv/bin/python scripts/diagnostics/review_evidence_20261012.py
 ```
 
 上述最后一条复跑两项回归场景，只使用合成数据。修复后应显示订单拒绝、分红差值 0、
@@ -161,7 +161,7 @@ AGENTS.md、review_protocol 与 review-gate skill 同步要求：
 .venv/bin/python scripts/run.py strategies/selected/dv_lowvol_300/config.yaml \
   --start 20240603 --end 20240628 --out /tmp/ddup-review-fresh.duckdb --no-report
 .venv/bin/python scripts/cross_validate.py /tmp/ddup-review-fresh.duckdb --run-id 1
-.venv/bin/python docs/review_evidence_20261012.py --result /tmp/ddup-review-fresh.duckdb
+.venv/bin/python scripts/diagnostics/review_evidence_20261012.py --result /tmp/ddup-review-fresh.duckdb
 ```
 
 结构化发现见 `review_findings_20261012.yaml`，本次数值快照见 `review_evidence_20261012.json`。

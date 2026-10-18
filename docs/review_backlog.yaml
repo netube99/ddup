@@ -1,15 +1,17 @@
 # 审查 backlog：由 scripts/review_gate.py 自动维护
 # open = 未决发现（P0/P1 是门禁 FAIL 的来源）；closed = 已修复或已 waive
 # 手工编辑请保持结构；字段：id/severity/rule/file/line/note/opened/resolved/waived
+# rule/note 保留登记当时的原文引用；`原§N` 与已停用的 checklist ID 是历史定位符，
+# 不指向当前文档——定位当前文本用引号内原文 grep，代码侧看 file/line
 meta:
   last_full_audit: '2026-10-12'
 open:
 - id: F-FAC-03
   severity: P3
-  rule: docs/factor_library.md §8:『where 的表达式规则与 expr 完全一致：纯表达式或算子表达式均可』
+  rule: docs/factor_library.md 原§8:『where 的表达式规则与 expr 完全一致：纯表达式或算子表达式均可』
   file: btcore/factors/library.py
   line: 82
-  note: 代码在 expr 无算子调用时对含算子的 where 加载期 fail-fast（『expr 无算子调用，where 不允许算子』）——docs §8
+  note: 代码在 expr 无算子调用时对含算子的 where 加载期 fail-fast（『expr 无算子调用，where 不允许算子』）——docs 原§8
     无此限制，文档与代码漂移，需择一收敛。
   opened: '2026-09-13'
 - id: F-FAC-04
@@ -23,7 +25,7 @@ open:
   opened: '2026-09-13'
 - id: F-MAT-03
   severity: P2
-  rule: 'docs/strategy_guide.md §5.4: ''涨跌停无法判定（缺失且无法推导）→ 买卖双双跳过'''
+  rule: 'docs/strategy_guide.md 原§5.4: ''涨跌停无法判定（缺失且无法推导）→ 买卖双双跳过'''
   file: btcore/match/core.py
   line: 68
   note: check_tradable 对 NaN 涨跌停放行；当前引擎路径不可达（get_limit_prices 经 _missing(NaN) 回退只返回有限值或
@@ -38,7 +40,7 @@ open:
   opened: '2026-09-13'
 - id: F-ENG-03
   severity: P3
-  rule: docs/strategy_guide.md §3.3 冲突校验表 '条件买单缺 symbol/type/price … → ValueError'
+  rule: docs/strategy_guide.md 原§3.3 冲突校验表 '条件买单缺 symbol/type/price … → ValueError'
   file: btcore/engine.py
   line: 121
   note: '_validate_buy_conditions 只查 symbol 键存在性，不校验非空字符串：{''symbol'': 123/''''} 通过校验流入
@@ -46,7 +48,7 @@ open:
   opened: '2026-09-13'
 - id: F-ENG-04
   severity: P3
-  rule: docs/strategy_guide.md §4.4 '后端无 get_index_members 能力或对应指数无数据时，告警一次、规则不生效（软回退）'
+  rule: docs/strategy_guide.md 原§4.4 '后端无 get_index_members 能力或对应指数无数据时，告警一次、规则不生效（软回退）'
   file: btcore/strategy_loader.py
   line: 249
   note: universe hook 仅在 backend 缺 get_index_members 方法时告警；有方法但指数无成分数据时静默回退全市场，无文档承诺的'告警一次'。文档漂移。
@@ -63,7 +65,7 @@ open:
   opened: '2026-09-13'
 - id: F-ML-05
   severity: P2
-  rule: docs/ml_guide.md §2.2 'YAML 内联 features 与 meta 不一致 → 直接报错'（meta 为特征契约唯一事实源）
+  rule: docs/ml_guide.md 原§2.2 'YAML 内联 features 与 meta 不一致 → 直接报错'（meta 为特征契约唯一事实源）
   file: btcore/ml/spec.py
   line: 145
   note: meta/YAML 一致性校验只比对 factors/raw，不比对 state：YAML 内联 state 与 meta 不一致时静默按 meta
@@ -71,7 +73,7 @@ open:
   opened: '2026-09-13'
 - id: F-ML-06
   severity: P3
-  rule: docs/ml_guide.md §2.3 '标签 = horizon 日前向收益'（t → t+horizon 交易日对齐）
+  rule: docs/ml_guide.md 原§2.3 '标签 = horizon 日前向收益'（t → t+horizon 交易日对齐）
   file: btcore/ml/labels.py
   line: 46
   note: xs_forward_return 的 shift(-horizon) 按 symbol 组内行位移：个股期内停牌缺行时实际跨多于 horizon
@@ -79,7 +81,7 @@ open:
   opened: '2026-09-13'
 - id: F-ML-07
   severity: P3
-  rule: docs/ml_guide.md §5 'replay.py 决策快照的 bars_subset 含 ml_* 列——决策现场可见当日模型分数'
+  rule: docs/ml_guide.md 原§5 'replay.py 决策快照的 bars_subset 含 ml_* 列——决策现场可见当日模型分数'
   file: btcore/engine.py
   line: 906
   note: debug 快照 bars_subset 取自 day_bars；holding 模型分数只注入 bars_dict 不回写 day_bars →
@@ -95,7 +97,7 @@ open:
   opened: '2026-09-13'
 - id: F-INF-02
   severity: P2
-  rule: docs/backend_guide.md §10.1 所体现的 fail-fast 哲学；AGENTS.md『不产生静默错误结果』
+  rule: docs/backend_guide.md 原§10.1 所体现的 fail-fast 哲学；AGENTS.md『不产生静默错误结果』
   file: btcore/generic_sql.py
   line: 126
   note: 行情库以 mode=ro&immutable=1 打开：源库存在未 checkpoint 的 WAL 时后端静默读到旧数据/空数据而不报错（回测期间同步行情即触发）。建议
@@ -112,14 +114,14 @@ open:
   opened: '2026-09-13'
 - id: F-INF-04
   severity: P2
-  rule: docs/backend_guide.md §10.1 重复键 fail-fast（仅覆盖面板表）；AGENTS.md 软回退 vs Fail-Fast
+  rule: docs/backend_guide.md 原§10.1 重复键 fail-fast（仅覆盖面板表）；AGENTS.md 软回退 vs Fail-Fast
   file: btcore/generic_sql.py
   line: 195
-  note: get_calendar 不去重：日历表同日多行时返回重复交易日，引擎将对同日 step 两次（公司行为/结算重复）。日历表不在 §10.1 重复键检查范围内。
+  note: get_calendar 不去重：日历表同日多行时返回重复交易日，引擎将对同日 step 两次（公司行为/结算重复）。日历表不在 原§10.1 重复键检查范围内。
   opened: '2026-09-13'
 - id: F-INF-05
   severity: P2
-  rule: docs/backend_guide.md §10.1 重复键 fail-fast 精神未延伸到 benchmark 能力表
+  rule: docs/backend_guide.md 原§10.1 重复键 fail-fast 精神未延伸到 benchmark 能力表
   file: btcore/generic_sql.py
   line: 337
   note: _impl_get_benchmark_bars 的 close/adj 查询无 (code, date) 重复键检查：源表同键多行时 merge
@@ -127,14 +129,14 @@ open:
   opened: '2026-09-13'
 - id: F-INF-06
   severity: P3
-  rule: docs/backend_guide.md §8 表格『date | 该表日期列名覆盖 | 任何已被字段引用的表』
+  rule: docs/backend_guide.md 原§8 表格『date | 该表日期列名覆盖 | 任何已被字段引用的表』
   file: docs/backend_guide.md
   line: 327
   note: 文档声称 tables.<t>.date 覆盖适用于任何被引用表，但对 calendar/dividends 表静默无效（日期列由专用空声明，覆盖无消费方）。文档漂移。
   opened: '2026-09-13'
 - id: F-INF-07
   severity: P3
-  rule: 'docs/backend_guide.md §3.2『get_stock_industries … {symbol: 行业名称}，未找到的不出现在结果中』'
+  rule: 'docs/backend_guide.md 原§3.2『get_stock_industries … {symbol: 行业名称}，未找到的不出现在结果中』'
   file: btcore/generic_sql.py
   line: 392
   note: '行业列值为 NULL 的行会以 {sym: None} 形式出现在返回值中，违反值为行业名称 str 的契约；missing-value 策略未定义。'
@@ -148,7 +150,7 @@ open:
   opened: '2026-09-13'
 - id: F-RSR-05
   severity: P3
-  rule: docs/strategy_guide.md §5.2.1 — 条件单按列表顺序评估（代码依赖隐含顺序）
+  rule: docs/strategy_guide.md 原§5.2.1 — 条件单按列表顺序评估（代码依赖隐含顺序）
   file: strategies/examples/rolling_ranker/strategy.py
   line: 132
   note: calc_conditions 在 for 循环内 conds.remove(c)（multi_model/strategy.py:305 同款）：删除元素会跳过下一个元素的
@@ -156,7 +158,7 @@ open:
   opened: '2026-09-13'
 - id: F-RSR-06
   severity: P3
-  rule: docs/cli_and_research.md §2.9 — sync 错误以 JSON ok:false 报告
+  rule: docs/cli_and_research.md 原§2.9 — sync 错误以 JSON ok:false 报告
   file: scripts/live.py
   line: 92
   note: sync.yaml 缺 cash 键时 float(None) 在 JSON 错误处理 try 块之前抛裸 TypeError traceback；fail-fast
@@ -164,11 +166,11 @@ open:
   opened: '2026-09-13'
 - id: V-FAC-01
   severity: P3
-  rule: 'docs/factor_library.md §12: ''mean → 按 trade_date 广播（同日所有个股同值）'''
+  rule: 'docs/factor_library.md 原§12: ''mean → 按 trade_date 广播（同日所有个股同值）'''
   file: btcore/factors/plan.py
   line: 435
   note: 投影对主面板存在但广度面板缺失的 (date,symbol) 行产出 NaN（旧代码广播同日值）。可达路径：GenericSQLBackend 行网格=被请求列表格键外并集（generic_sql.py:189-192），主/广度面板请求列集不同时停牌股可在估值表有行而日线表无行。NaN
-    口径可辩护（数据确实缺失）但属超出 where 掩码理由的静默行为变化，与 §12 字面广播表述冲突；MockDataBackend 行集恒为日线表行，测试体系无法覆盖此形态。
+    口径可辩护（数据确实缺失）但属超出 where 掩码理由的静默行为变化，与 原§12 字面广播表述冲突；MockDataBackend 行集恒为日线表行，测试体系无法覆盖此形态。
   opened: '2026-09-13'
 - id: V-FAC-02
   severity: P3
@@ -191,7 +193,7 @@ open:
   opened: '2026-09-13'
 - id: V-ENG-02
   severity: P3
-  rule: docs/strategy_guide.md §3.1『类变量——声明式默认值，YAML 可覆盖』
+  rule: docs/strategy_guide.md 原§3.1『类变量——声明式默认值，YAML 可覆盖』
   file: tests/test_review_engine.py
   line: 41
   note: '显式空值覆盖语义（factor_specs: [] / filter_rules: {} 覆盖类默认值）已实现（strategy_loader.py:110-113，probe
@@ -217,7 +219,7 @@ open:
   opened: '2026-09-13'
 - id: V-MRD-01
   severity: P3
-  rule: docs/cli_and_research.md §2.5：小单买入 = 买入触发最低佣金（边界 = min_commission / commission_rate）
+  rule: docs/cli_and_research.md 原§2.5：小单买入 = 买入触发最低佣金（边界 = min_commission / commission_rate）
   file: research/cross_validate.py
   line: 172
   note: commission_rate=0 是引擎合法配置（costs.py:22 仅拒负数/NaN），此时每笔买入 commission=max(0, min_commission)=min_commission
@@ -286,7 +288,7 @@ open:
   opened: '2026-09-16'
 - id: F-FD2-07
   severity: P3
-  rule: docs/factor_library.md §8：where 是后置掩码，表达式先完整求值（不保护 where 之前的滚动窗口）
+  rule: docs/factor_library.md 原§8：where 是后置掩码，表达式先完整求值（不保护 where 之前的滚动窗口）
   file: factors/library.yaml
   line: 200
   note: margin_ma5=ma(rzmre/rzye,5) 滚动前无分母保护：margin_detail 中 rzye=0 共 204 行（其中 145
@@ -321,7 +323,7 @@ open:
   opened: '2026-09-16'
 - id: F-FD3-09
   severity: P3
-  rule: docs/factor_library.md §10.1 ascending 语义（方向标注须与收益方向自洽）
+  rule: docs/factor_library.md 原§10.1 ascending 语义（方向标注须与收益方向自洽）
   file: factors/library.yaml
   line: 441
   note: ret_skew20 自述『高偏度→低未来收益』却标『降序排名』（应升序）；amihud_illiq(404) 自述『低流动性溢价（升序）』而低流动性溢价通常指高
@@ -347,7 +349,7 @@ open:
   opened: '2026-09-16'
 - id: F-FD4-07
   severity: P2
-  rule: docs/ml_guide.md §1 训练与回测同源（同一定义/同一物化链）；docs/factor_library.md §9.3 benchmark
+  rule: docs/ml_guide.md 原§1 训练与回测同源（同一定义/同一物化链）；docs/factor_library.md 原§9.3 benchmark
     推导规则
   file: scripts/ml_train.py
   line: 133
@@ -423,7 +425,7 @@ open:
   rule: AGENTS.md 接口/数据变更须同批更新 docs；docs/factor_library.md:975 自述零引用判定口径
   file: docs/factor_library.md
   line: 966
-  note: §18 写『现有 126 个因子…86 个零引用』，实际库 217 个因子；按文档口径重跑实际零引用 157 个，清单漏列 78 个（cvw_ma5/winner_chg20/re_attack_*/pen_*/ind_rank_*
+  note: 原§18 写『现有 126 个因子…86 个零引用』，实际库 217 个因子；按文档口径重跑实际零引用 157 个，清单漏列 78 个（cvw_ma5/winner_chg20/re_attack_*/pen_*/ind_rank_*
     等），清单内 9 个已被引用（winner_rate_z/margin_change/vol10 见 strategies/exploring/ml_lowcrowd/models/alpha_xs.meta.json；close_vs_cost50
     见 core_five_500 config 等）。ARCHITECTURE.md:19/174 同错。
   opened: '2026-09-16'
@@ -482,11 +484,32 @@ open:
     20260101-0831 RankIC 0.0994 与 +1.49% vs 基线 -1.38%）。属模型治理缺口：artifact 与宣称数字脱钩、meta
     不记树数/best_iteration。
   opened: '2026-09-19'
+- id: F-DIAG-01
+  severity: P3
+  rule: AGENTS.md 可分发文档约束：私有/本机路径不得进入仓库资产；docs/reviews/2026-10-12/review_record_20261012.md
+    记录的可复现命令应跨机可跑
+  file: scripts/diagnostics/review_evidence_20261012.py
+  line: 101
+  note: 触发：脚本把行情库写死为 /home/netube/aiwork/tushare_db/data/market.duckdb，且 --result（同文件
+    :183-190）没有配对的 --market 覆盖；按 docs/reviews/2026-10-12/review_record_20261012.md
+    的 `--result /tmp/...` 命令在其它机器执行会连不到库。实际：私有绝对路径硬编码；独立期望：行情库路径可由参数或环境变量覆盖，默认值只作本机回退。影响：历史证据命令的可复现性，不影响回测计算。该行随
+    2026-10-18 迁移从 docs/review_evidence_20261012.py 原样搬入 scripts/diagnostics/，非重写引入。
+  opened: '2026-10-18'
+- id: F-CHK-01
+  severity: P3
+  rule: docs/development.md 单一事实源：check_skill_sync『对账 … CLI 参数』
+  file: scripts/check_skill_sync.py
+  line: 131
+  note: 触发：check_doc_cli_flags 跳过不含 'scripts/' 的行，文档正文里裸写的 flag 不参与对账（例：docs/live_guide.md:32
+    的 --positions、:121 的 --ledger）。实际：只有与 scripts/ 路径同行的 flag 被校验；文档宣称：CLI 参数全部对账。独立核对两个裸
+    flag 均真实存在（scripts/live.py:460、scripts/live_e2e_check.py:30），故当前无失实声明，仅覆盖面窄于文字承诺。影响：未来正文
+    flag 改名可能漏检。
+  opened: '2026-10-18'
 closed:
 - id: F-FAC-01
   severity: P1
-  rule: docs/factor_library.md §8:『where 是对因子值的后置掩码：表达式先完整求值，where 为 False 的位置置 NaN』（结合
-    §12 坍缩因子投影回候选池面板）
+  rule: docs/factor_library.md 原§8:『where 是对因子值的后置掩码：表达式先完整求值，where 为 False 的位置置 NaN』（结合
+    原§12 坍缩因子投影回候选池面板）
   file: btcore/factors/plan.py
   line: 435
   note: 坍缩因子投影用 groupby.first()（跳过 NaN），把未掩码值泄漏给 where=False 的 symbol：带 where 的坍缩因子经引擎
@@ -507,8 +530,8 @@ closed:
   resolved: '2026-09-13'
 - id: F-MAT-01
   severity: P1
-  rule: 'docs/strategy_guide.md §5.2.3: 自定义条件单示例 {type: MY_CONDITION, price: None,
-    custom_param: value}；§8: ''条件单 price 填 None 但自定义 handler 未计算价格 → handler 收到 None''——price=None
+  rule: 'docs/strategy_guide.md 原§5.2.3: 自定义条件单示例 {type: MY_CONDITION, price: None,
+    custom_param: value}；原§8: ''条件单 price 填 None 但自定义 handler 未计算价格 → handler 收到 None''——price=None
     是文档化的合法输入'
   file: btcore/match/conditions.py
   line: 65
@@ -520,7 +543,7 @@ closed:
 - id: F-ENG-01
   severity: P1
   rule: 'build_strategy docstring: factor_specs ''不传时用类默认值''; docs/strategy_guide.md
-    §3.1 ''类变量——声明式默认值，YAML 可覆盖'''
+    原§3.1 ''类变量——声明式默认值，YAML 可覆盖'''
   file: btcore/strategy_loader.py
   line: 115
   note: build_strategy 把 None 参数经 factor_specs or [] / filter_rules or {} 变成显式空值，类级别默认值被清空：StockFilter
@@ -530,7 +553,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-ML-01
   severity: P1
-  rule: docs/ml_guide.md §1 训练与回测同源：'账户态特征的计算公式训练侧重放与引擎推理共用同一定义'
+  rule: docs/ml_guide.md 原§1 训练与回测同源：'账户态特征的计算公式训练侧重放与引擎推理共用同一定义'
   file: btcore/ml/labels.py
   line: 268
   note: 加仓回合 ret_from_entry 用静态聚合 buy_price 充当全部持仓日 entry_price，而引擎在加仓日重算 entry=cost/shares：buy
@@ -540,7 +563,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-ML-02
   severity: P1
-  rule: docs/ml_guide.md §3.1 ret_from_entry='当日裸收盘/买入均价−1' + §1 同一定义契约
+  rule: docs/ml_guide.md 原§3.1 ret_from_entry='当日裸收盘/买入均价−1' + 原§1 同一定义契约
   file: btcore/ml/labels.py
   line: 268
   note: 期内现金分红回合：引擎除息日 rescale entry_price ×= pre_close/(pre_close+每股税前红利) 且 cost
@@ -549,7 +572,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-ML-03
   severity: P1
-  rule: AGENTS.md ML 节：models 节意图中性、引擎在加载期完成校验（fail-fast，无静默降级）；docs/ml_guide.md §2.2
+  rule: AGENTS.md ML 节：models 节意图中性、引擎在加载期完成校验（fail-fast，无静默降级）；docs/ml_guide.md 原§2.2
     加载期校验列表
   file: btcore/strategy_loader.py
   line: 128
@@ -573,7 +596,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-RSR-01
   severity: P1
-  rule: docs/cli_and_research.md §2.5 — 小单买入检查：'资金 ≥10 万且 >50% 买入触发最低佣金 5 元'（告警条件是触发最低佣金，非固定金额）
+  rule: docs/cli_and_research.md 原§2.5 — 小单买入检查：'资金 ≥10 万且 >50% 买入触发最低佣金 5 元'（告警条件是触发最低佣金，非固定金额）
   file: research/cross_validate.py
   line: 175
   note: 小单判定硬编码 turnover < 25000，而引擎成本模型触发边界 = min_commission/commission_rate（默认 ≈33333）：默认费率下
@@ -583,7 +606,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-RSR-02
   severity: P1
-  rule: docs/strategy_guide.md §4.4 — index_universe 类型 'list[str]'；配置类型错误不应静默降级交易域
+  rule: docs/strategy_guide.md 原§4.4 — index_universe 类型 'list[str]'；配置类型错误不应静默降级交易域
   file: strategies/exploring/re_attack_500/config.yaml
   line: 34
   note: index_universe 写成字符串 "000905.SH"：resolve_index_snapshots 拆成单字符列表 → 白名单静默不生效（交易域退化全市场），且基准错误回退
@@ -592,7 +615,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-RSR-03
   severity: P2
-  rule: docs/cli_and_research.md §2.7 — replay.py '无匹配快照时打印错误并以退出码 1 退出'
+  rule: docs/cli_and_research.md 原§2.7 — replay.py '无匹配快照时打印错误并以退出码 1 退出'
   file: research/replay.py
   line: 99
   note: --symbol 过滤后所有日期均无该票快照时静默打印空行并以退出码 0 退出（脚本化 false-pass）。本轮回前已修：matched==0
@@ -625,7 +648,7 @@ closed:
   resolved: '2026-09-13'
 - id: F-FD0-01
   severity: P1
-  rule: docs/factor_library.md §9.2：pct_chg = (close - pre_close) / pre_close（小数口径，非百分数）
+  rule: docs/factor_library.md 原§9.2：pct_chg = (close - pre_close) / pre_close（小数口径，非百分数）
   file: factors/library.yaml
   line: 514
   note: limit_up_pct 表达式 mean(pct_chg >= 9.8) 阈值量纲错：pct_chg 是小数，9.8 是百分数，比较恒 False。DB
@@ -636,7 +659,7 @@ closed:
   resolved: '2026-09-16'
 - id: F-FD0-02
   severity: P1
-  rule: docs/factor_library.md §12：坍缩算子始终在全市场面板上逐日聚合，候选池大小不影响其值
+  rule: docs/factor_library.md 原§12：坍缩算子始终在全市场面板上逐日聚合，候选池大小不影响其值
   file: factors/library.yaml
   line: 63
   note: pct_sealed=mean(fd_amount>0) 的广度面板请求列仅 fd_amount → btcore/generic_sql.py:189-192
@@ -671,7 +694,7 @@ closed:
   resolved: '2026-09-16'
 - id: F-FD2-01
   severity: P1
-  rule: AGENTS.md 设计契约·价格体系：因子计算、排名使用后复权（*_hfq），不可混用；docs/factor_library.md §9.2
+  rule: AGENTS.md 设计契约·价格体系：因子计算、排名使用后复权（*_hfq），不可混用；docs/factor_library.md 原§9.2
   file: factors/library.yaml
   line: 266
   note: pct_b/cci_z/macd_golden/macd_z/kdj_golden/pdi_mdi/mfi_z/close_vs_bbi/ema_bullish（266-306）消费
@@ -715,7 +738,7 @@ closed:
   resolved: '2026-09-16'
 - id: F-FD4-03
   severity: P1
-  rule: docs/factor_library.md §6.1 roc『基准值为 0 处得 NaN』；docs/audit_checklist.md FA-OP-02（NaN/分母语义）
+  rule: docs/factor_library.md 原§6.1 roc『基准值为 0 处得 NaN』；docs/audit_checklist.md FA-OP-02（NaN/分母语义）
   file: factors/library.yaml
   line: 606
   note: roc_decay=roc_3/(roc_10+0.0001)-1 的 epsilon 对负/零分母无效且制造极端值：实测（2023-2024，50
@@ -749,14 +772,15 @@ closed:
     面板跨 symbol 污染…2026-08-07 之前的评估数字全部作废
   file: docs/factor_library.md
   line: 551
-  note: §11.2 Python API 示例仍为修复前的反模式：fwd_ret = bars_df['close_hfq'].groupby('symbol').pct_change(5).shift(-5)。groupby.pct_change
+  note: 原§11.2 Python API 示例仍为修复前的反模式：fwd_ret = bars_df['close_hfq'].groupby('symbol').pct_change(5).shift(-5)。groupby.pct_change
     返回原序（date-major）Series，链式 .shift(-5) 是扁平位移（d5 的 A 行取得 d6 的 C 行值），与 CLI/正确写法（research/factor_eval.py
     的显式 groupby shift）完全不等价；且上一行自称『与 CLI 一致』。照抄示例会原样重现导致全库存量评估数字作废的污染 bug。
   opened: '2026-09-16'
   resolved: '2026-09-16'
 - id: F-FD1-05
   severity: P2
-  rule: 'docs/factor_library.md §10.1 ascending: true=小值排名靠前；§11.4 陷阱三（ascending 语义写反）'
+  rule: 'docs/factor_library.md 原§10.1 ascending: true=小值排名靠前；原§11.4 陷阱三（ascending
+    语义写反）'
   file: factors/library.yaml
   line: 101
   note: rev_5d=-roc(close_hfq,5)：expr 高值=过去 5 日输家。描述『买跌卖涨，升序排名』三处互斥：升序（值小优先）选出的是过去涨幅最大者（买涨）；要执行『买跌』须降序（取
@@ -765,7 +789,7 @@ closed:
   resolved: '2026-09-16'
 - id: F-FD2-05
   severity: P3
-  rule: docs/factor_library.md §11.4 陷阱三（ascending 与 IC 符号）
+  rule: docs/factor_library.md 原§11.4 陷阱三（ascending 与 IC 符号）
   file: factors/library.yaml
   line: 230
   note: rev10_z=zscore(-roc(close_hfq,10)) 高值=过去 10 日输家；description 同时写『反转』与『升序』互斥（买跌应降序）。与
@@ -829,7 +853,8 @@ closed:
   resolved: '2026-09-16'
 - id: F-FD0-05
   severity: P1
-  rule: AGENTS.md 设计契约：不产生静默错误结果 / 崩溃；docs/factor_library.md §4 纯表达式路径应对任何合法面板产出 NaN
+  rule: AGENTS.md 设计契约：不产生静默错误结果 / 崩溃；docs/factor_library.md 原§4 纯表达式路径应对任何合法面板产出
+    NaN
   file: btcore/factors/expr.py
   line: 90
   note: 事件表在请求窗口内零行时 GenericSQLBackend 返回 object dtype 全 NaN 列（空结果集 dtype 推断），pandas.eval
@@ -841,7 +866,7 @@ closed:
   resolved: '2026-09-16'
 - id: F-CORE-01
   severity: P1
-  rule: docs/cli_and_research.md §2.9「账本即回测结果库：runs/trade_log/account_daily/holdings
+  rule: docs/cli_and_research.md 原§2.9「账本即回测结果库：runs/trade_log/account_daily/holdings
     衍生表与回测同 schema（report.py/cross_validate.py/replay.py 直接消费）」+ research/live.py:28
     LIVE_RUN_ID=1 契约
   file: research/live.py
@@ -855,7 +880,8 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-02
   severity: P1
-  rule: docs/cli_and_research.md §2.9 sync.yaml 格式（date 为 statement 级，fills 条目不含 date）
+  rule: docs/cli_and_research.md 原§2.9 sync.yaml 格式（date 为 statement 级，fills 条目不含
+    date）
   file: scripts/live.py
   line: 105
   note: cmd_sync 直接把 fills 交给 append_fills_idempotent，而该方法用 f.get("date") 作成交日 → 文档格式（fills
@@ -866,7 +892,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-03
   severity: P1
-  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
+  rule: docs/backend_guide.md 原§10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
     会静默打开旧库，必须 fail-fast）」
   file: scripts/sweep.py
   line: 101
@@ -877,7 +903,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-06
   severity: P1
-  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错」（research/attribution.py
+  rule: docs/backend_guide.md 原§10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错」（research/attribution.py
     已由其它审查改走 connect_market_db/connect_result_db）
   file: scripts/dump_fixtures.py
   line: 65
@@ -905,7 +931,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-MKT-02
   severity: P1
-  rule: docs/backend_guide.md §10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期 显式报错（DuckDB 的 sqlite_scanner
+  rule: docs/backend_guide.md 原§10.1「旧格式拒绝：SQLite 等非 DuckDB 文件在连接期 显式报错（DuckDB 的 sqlite_scanner
     会静默打开旧库，必须 fail-fast）」 + btcore/database.connect_result_db 结果库唯一连接入口契约
   file: scripts/dump_brinson_data.py
   line: 48
@@ -919,7 +945,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-MKT-03
   severity: P1
-  rule: docs/backend_guide.md §10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）+ AGENTS.md「明确声明的依赖缺失直接报错，不产生静默错误结果」
+  rule: docs/backend_guide.md 原§10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）+ AGENTS.md「明确声明的依赖缺失直接报错，不产生静默错误结果」
   file: scripts/dump_fixtures.py
   line: 65
   note: 修复前 dump_fixtures.py:65 与 refresh_gold_db.py:167 均裸 `duckdb.connect(market_db,
@@ -931,7 +957,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-01
   severity: P1
-  rule: docs/backend_guide.md §10.1 旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
+  rule: docs/backend_guide.md 原§10.1 旧格式拒绝：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner
     会静默打开旧库，必须 fail-fast）；btcore/database.assert_duckdb_file
   file: research/attribution.py
   line: 54
@@ -944,7 +970,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-02
   severity: P1
-  rule: docs/backend_guide.md §10.1 旧格式拒绝；btcore.connect_result_db 是结果库唯一连接入口（含 assert_duckdb_file）
+  rule: docs/backend_guide.md 原§10.1 旧格式拒绝；btcore.connect_result_db 是结果库唯一连接入口（含 assert_duckdb_file）
   file: research/attribution.py
   line: 583
   note: brinson_attribute（:583）与 brinson_attribute_from_files（:815）修复前均用裸 duckdb.connect(result_db,
@@ -983,7 +1009,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-05
   severity: P1
-  rule: docs/backend_guide.md §10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）
+  rule: docs/backend_guide.md 原§10.1 旧格式拒绝（sqlite_scanner 静默打开必须 fail-fast）
   file: scripts/dump_brinson_data.py
   line: 48
   note: 同一漏洞在 scripts/dump_brinson_data.py:48（行情库）与 :89（结果库）：裸 duckdb.connect(...,
@@ -1042,7 +1068,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-13
   severity: P3
-  rule: docs/backend_guide.md §1「A) 填表法：数据在 DuckDB 库中（表或 VIEW）」
+  rule: docs/backend_guide.md 原§1「A) 填表法：数据在 DuckDB 库中（表或 VIEW）」
   file: btcore/backend.py
   line: 7
   note: 超出本子代理可改文件范围，仅记录：模块 docstring 仍写「填表法（SQLite 数据库，数据在表里）」，迁移后数据源为 DuckDB 库，文档漂移。
@@ -1060,7 +1086,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-05
   severity: P2
-  rule: docs/cli_and_research.md §2.6「（sweep）终端按 收益/Sharpe/MDD 列打印汇总表」
+  rule: docs/cli_and_research.md 原§2.6「（sweep）终端按 收益/Sharpe/MDD 列打印汇总表」
   file: scripts/sweep.py
   line: 141
   note: '全部参数组合失败（或 --out 文件从未生成）时，收尾 connect_result_db(read_only=True) 抛未捕获 IOException:
@@ -1069,7 +1095,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-07
   severity: P2
-  rule: docs/cli_and_research.md §2.9 init「建账：现金 + 可选已有持仓（…以 OPENING 条目入账）」
+  rule: docs/cli_and_research.md 原§2.9 init「建账：现金 + 可选已有持仓（…以 OPENING 条目入账）」
   file: scripts/live.py
   line: 64
   note: init_account 内部 commit（research/live.py:121），之后 positions 逐条 append（DuckDB
@@ -1088,7 +1114,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-09
   severity: P3
-  rule: docs/cli_and_research.md §2.9「账本即回测结果库…（report.py/cross_validate.py/replay.py
+  rule: docs/cli_and_research.md 原§2.9「账本即回测结果库…（report.py/cross_validate.py/replay.py
     直接消费）」
   file: research/live.py
   line: 230
@@ -1118,7 +1144,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-CORE-12
   severity: P3
-  rule: docs/cli_and_research.md §2.9 CLI 子命令语义（store/provider 生命周期）
+  rule: docs/cli_and_research.md 原§2.9 CLI 子命令语义（store/provider 生命周期）
   file: scripts/live.py
   line: 95
   note: cmd_sync/cmd_signal 先开 LedgerStore（RW 连接）再 make_provider()；make_provider 抛错时
@@ -1153,7 +1179,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-MKT-06
   severity: P2
-  rule: docs/backend_guide.md §2.2「初始化期全量校验：表单引用的所有表和列做 落库校验」+ docs/backend_guide.md:126「表名/列名自动加双引号」（DuckDB
+  rule: docs/backend_guide.md 原§2.2「初始化期全量校验：表单引用的所有表和列做 落库校验」+ docs/backend_guide.md:126「表名/列名自动加双引号」（DuckDB
     标识符大小写不敏感绑定）
   file: btcore/generic_sql.py
   line: 620
@@ -1180,7 +1206,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-MKT-08
   severity: P3
-  rule: docs/backend_guide.md §10.1 重复键检查（提示前 3 条示例）；AGENTS.md 不产生静默错误结果
+  rule: docs/backend_guide.md 原§10.1 重复键检查（提示前 3 条示例）；AGENTS.md 不产生静默错误结果
   file: btcore/generic_sql.py
   line: 259
   note: SQL FULL OUTER JOIN ... USING 对 NULL 键不匹配：两张表各有同一 (NULL symbol, 同 trade_date)
@@ -1233,7 +1259,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-07
   severity: P3
-  rule: docs/backend_guide.md §10.1 数据加载下推（可 SQL 侧聚合，不重复全表拉取）
+  rule: docs/backend_guide.md 原§10.1 数据加载下推（可 SQL 侧聚合，不重复全表拉取）
   file: research/attribution.py
   line: 66
   note: 观察项：index_member_all 全表被两次拉取——_load_industry_map(:66) 取 (ts_code,l1_name)，brinson_attribute(:598)
@@ -1251,7 +1277,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-09
   severity: P3
-  rule: docs/cli_and_research.md §2.7：--run-id 缺省取最新 run；无匹配快照打印错误并退出码 1
+  rule: docs/cli_and_research.md 原§2.7：--run-id 缺省取最新 run；无匹配快照打印错误并退出码 1
   file: research/replay.py
   line: 25
   note: 文档漂移：resolve_run_id docstring/注释写『旧库无 runs 表回退 run 1』，实际 except CatalogException
@@ -1261,7 +1287,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-RPT-10
   severity: P3
-  rule: docs/cli_and_research.md §2.7 replay：无匹配快照打印错误并以退出码 1 退出（可操作报错）
+  rule: docs/cli_and_research.md 原§2.7 replay：无匹配快照打印错误并以退出码 1 退出（可操作报错）
   file: research/replay.py
   line: 90
   note: '观察项：结果库文件不存在时 connect_result_db(read_only=True) 抛裸 duckdb IOException（''Cannot
@@ -1283,7 +1309,7 @@ closed:
   resolved: '2026-09-18'
 - id: F-MKT-12
   severity: P3
-  rule: docs/backend_guide.md §3.1 query_bars 返回契约（MultiIndex (trade_date, symbol)、值语义）；btcore/generic_sql.py:217-251
+  rule: docs/backend_guide.md 原§3.1 query_bars 返回契约（MultiIndex (trade_date, symbol)、值语义）；btcore/generic_sql.py:217-251
     FULL OUTER JOIN 替代 pandas join 的语义等价性要求
   file: btcore/generic_sql.py
   line: 253
@@ -1870,18 +1896,19 @@ closed:
   resolved: '2026-10-12'
 - id: F-MAT-02
   severity: P1
-  rule: docs/strategy_guide.md §5.4 涨停不买、跌停不卖；Trade.price 为已含滑点的成交价
+  rule: docs/strategy_guide.md 原§5.4 涨停不买、跌停不卖；Trade.price 为已含滑点的成交价
   file: btcore/match/core.py
   line: 80
   note: 已修复并验收：原价 10.99、涨停 11.00、2 tick 滑点，旧成交为 11.01，现拒单且现金/持股不变；卖侧原价 9.01、跌停 9.00
     也拒绝 8.99 越界成交。tests/test_review_calculation_boundaries.py 的 18 个边界案例覆盖 manual/target/condition
-    买卖、达到/越过边界和仍在界内的成交费用；其中 12 例旧实现失败，新实现通过。docs/review_evidence_20261012.py 输出 order_rejected=true、within_limit=true。真实
-    dv_lowvol_300 20240603-28 修复前后 19 行账户与 17 行事件一致、独立费用/现金/市值重算通过。
+    买卖、达到/越过边界和仍在界内的成交费用；其中 12 例旧实现失败，新实现通过。scripts/diagnostics/review_evidence_20261012.py
+    输出 order_rejected=true、within_limit=true。真实 dv_lowvol_300 20240603-28 修复前后 19
+    行账户与 17 行事件一致、独立费用/现金/市值重算通过。
   opened: '2026-09-13'
   resolved: '2026-10-12'
 - id: F-ENG-02
   severity: P1
-  rule: docs/strategy_guide.md §5.4 公司行为照常入账、单日订单有效期与交易日结算
+  rule: docs/strategy_guide.md 原§5.4 公司行为照常入账、单日订单有效期与交易日结算
   file: btcore/engine.py
   line: 468
   note: 已修复并验收：缺行情日仍 step，公司行为与结算执行；compute_pending 清空 pending/条件单，持仓交易日计数和解锁照常，不调决策钩子。100

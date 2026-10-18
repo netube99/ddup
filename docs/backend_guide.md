@@ -7,7 +7,7 @@ ddup 引擎通过 `DataBackend` 抽象层（`btcore/backend.py`）消费数据�
 | **A) 填表法** | 数据在 DuckDB 库中（表或 VIEW） | 子类化 `GenericSQLBackend`，填一个 Python dict，零 SQL |
 | **B) 手写实现** | 非 DuckDB 数据源（内存、API、parquet、CSV 等） | 子类化 `DataBackend`，实现 3 个抽象方法 |
 
-推荐填表法。§1–§2、§4–§10 讲填表法，§3 讲手写实现。
+DuckDB 库优先使用填表法；非 DuckDB 数据源见“手写实现 DataBackend”。
 
 ---
 
@@ -64,11 +64,11 @@ class MyBackend(GenericSQLBackend):
 
 ```python
 MY_FORM = {
-    # ══ 索引键名 — 只填列名，不带表名（§4）══
+    # 索引键名：只填列名，不带表名
     "symbol": "ts_code",          # 证券代码列的名字
     "date":   "trade_date",       # 交易日列的名字（YYYYMMDD 字符串）
 
-    # ══ 十三必需 — 每个空填 "表名.字段名"（§5）══
+    # 13 个必需位置：填 "表名.字段名"
     "open":      "daily.open",
     "high":      "daily.high",
     "low":       "daily.low",
@@ -83,7 +83,7 @@ MY_FORM = {
     "dividend_stk_div":   "dividend.stk_div",
     "dividend_cash_div":  "dividend.cash_div",
 
-    # ══ 辅助能力 — 不填 = 该能力关闭（§6）══
+    # 可选辅助能力：不填即关闭
     "st_symbol":       "stock_st.ts_code",
     "industry_name":   "index_member_all.l1_name",
     "listing_date":    "stock_basic.list_date",
@@ -93,13 +93,13 @@ MY_FORM = {
     "benchmark_adj_factor": "fund_adj.adj_factor",   # 可选
     "benchmark_code":  "000300.SH",   # 默认基准代码（取值，非位置）
 
-    # ══ 自选扩展字段（§7）══
+    # 自选扩展字段
     "extra_fields": {
         "amount": "daily.amount",
         "turnover_rate": "daily_basic.turnover_rate",
     },
 
-    # ══ 表的特殊说明（§8）══
+    # 表的特殊说明
     "tables": {
         "trade_cal": {"filter": {"exchange": "SSE", "is_open": 1}},
         "dividend":  {"filter": {"div_proc": "实施", "ex_date": None}},
@@ -110,7 +110,7 @@ MY_FORM = {
 ### 2.2 关键规则
 
 - **没有主表/辅助表之分**：OHLC 分存四张表也各填各的。被引用表按 `(交易日, 代码)` 键外并集拼成网格，某字段在某张表没有对应行即为 NaN。
-- **能力开关 = 对应的空填没填**：填了就有该能力，不填则对应功能关闭（详见 §10 缺失行为）。
+- **能力开关 = 对应的空填没填**：填了就有该能力，不填则对应功能关闭（见“能力缺失行为速查”）。
 - **表名/列名自动加双引号**：物理名撞 SQL 保留字（如 `limit`）的字段可直接对接。
 - **VIEW 与表等价**：表单引用的"表"可以是 VIEW。例如 tushare 低积分库 `daily.amount` 单位是千元，可 `CREATE VIEW daily_rmb AS SELECT *, amount * 1000 AS amount FROM daily;` 后指向 VIEW。
 - **初始化期全量校验**：`__init__` 时表单引用的所有表和列做落库校验，拼写错误当场暴露，报错定位到具体表单条目。表单存在未知顶层键、`tables` 中出现未被任何字段引用的表，也在初始化期报错。
@@ -145,7 +145,7 @@ MY_FORM = {
 
 ### 3.2 鸭子类型能力方法（按需实现）
 
-非抽象方法。引擎通过 `getattr(backend, "方法名", None)` 检测，不存在时对应功能自动降级（行为见 §10）。签名必须匹配：
+非抽象方法。引擎通过 `getattr(backend, "方法名", None)` 检测，不存在时对应功能自动降级（见“能力缺失行为速查”）。签名必须匹配：
 
 | 方法 | 签名 | 返回契约 | 支撑功能 |
 |------|------|---------|---------|
@@ -154,7 +154,7 @@ MY_FORM = {
 | `get_stock_industries` | `(ts_codes: list[str]) -> dict[str, str]` | `{symbol: 行业名称}`，未找到的不出现在结果中 | `industry` 分组伪列、`exclude_industries` 过滤 |
 | `get_recent_listings` | `(cutoff_days: int = 60, as_of: str \| None = None) -> set[str]` | 上市日距 `as_of` ≤ `cutoff_days` 的股票代码集合；`as_of=None` 取当前日期 | `exclude_new_stock` 过滤 |
 | `get_index_members` | `(index_codes: list[str], start: str, end: str) -> dict[str, set[str]]` | `{date: {symbol, ...}}`，多指数并集；快照可为月频，引擎按"最近一期 ≤ 当日"取值 | `index_universe` / `factor_universe` 股票池限定 |
-| `backend_bar_columns` | `() -> set[str]` | 后端可供给的 bars 列名（canonical 名，与 `query_bars` 校验口径一致）；不实现 = 引擎按"全部可供给"处理 | preload 列裁剪：`exclude_loss` 等过滤规则依赖列与后端能力取交集，缺列（如 `eps`）时由 filters 逐 bar 软回退（见 §10） |
+| `backend_bar_columns` | `() -> set[str]` | 后端可供给的 bars 列名（canonical 名，与 `query_bars` 校验口径一致）；不实现 = 引擎按"全部可供给"处理 | preload 列裁剪：`exclude_loss` 等过滤规则依赖列与后端能力取交集，缺列（如 `eps`）时由 filters 逐 bar 软回退（见“能力缺失行为速查”） |
 
 ### 3.3 完整示例
 
@@ -178,7 +178,7 @@ MY_FORM = {
 "date":   "trade_date",    # 我的库里日期列叫 trade_date
 ```
 
-某张表例外时（如 `repurchase` 表的日期是公告日 `ann_date`），在 `tables` 节覆盖（§8.3）：
+某张表例外时（如 `repurchase` 表的日期是公告日 `ann_date`），在 `tables` 节覆盖（见“键列名覆盖”）：
 
 ```python
 "tables": {
@@ -188,9 +188,9 @@ MY_FORM = {
 
 ---
 
-## 5. 十三必需接口
+## 5. 13 个必需接口
 
-13 个空是引擎运行的最小数据需求，**全部必填**（缺任一项初始化报错）。
+13 个位置是引擎运行的最小数据需求，**全部必填**（缺任一项初始化报错）。
 
 ### 5.1 数据契约字段（9 项）
 
@@ -202,13 +202,13 @@ MY_FORM = {
 | `close` | 收盘价（元） | `daily.close` | 裸价 |
 | `vol` | 成交量 | `daily.vol` | 单位**手** |
 | `adj_factor` | 后复权因子 | `adj_factor.adj_factor` | 引擎按 `hfq价 = 裸价 × adj_factor` 派生 |
-| `pre_close` | 昨收价（元） | `daily.pre_close` | **交易所除权口径**（§3.1） |
+| `pre_close` | 昨收价（元） | `daily.pre_close` | **交易所除权口径**（见 query_bars 数据契约） |
 | `up_limit` | 涨停价（元） | `stk_limit.up_limit` | 精确值，不可用 ±10% 近似 |
 | `down_limit` | 跌停价（元） | `stk_limit.down_limit` | 精确值 |
 
 - 涨跌停与 OHLCV 不在同一张表是常态，直接填 `"stk_limit.up_limit"`，引擎按 `(交易日, 代码)` 自动对齐。
 - 引擎派生列 `open_hfq` / `high_hfq` / `low_hfq` / `close_hfq` / `pct_chg` 不得在表单中声明。
-- **`amount` 非引擎必需**：引擎内部不消费成交额，策略需要时通过 `REQUIRED_FIELDS` 声明；对接填在 `extra_fields`（§7）。tushare 低积分库 `daily.amount` 单位是千元，可用 VIEW 转换（§2.2）。
+- **`amount` 非引擎必需**：引擎内部不消费成交额，策略需要时通过 `REQUIRED_FIELDS` 声明；对接填在 `extra_fields`。tushare 低积分库 `daily.amount` 单位是千元，可用 VIEW 转换。
 
 > **extra_fields 与引擎能力的隐式依赖**
 >
@@ -224,7 +224,7 @@ MY_FORM = {
 
 | 空 | 含义 | tushare 映射 | 口径要求 |
 |---|---|---|---|
-| `calendar_date` | 交易日历日期列 | `trade_cal.cal_date` | YYYYMMDD 字符串；须过滤只留开市日（§8.1） |
+| `calendar_date` | 交易日历日期列 | `trade_cal.cal_date` | YYYYMMDD 字符串；须过滤只留开市日（见 filter 行过滤） |
 | `dividend_ex_date` | 除权除息日 | `dividend.ex_date` | YYYYMMDD 字符串 |
 | `dividend_stk_div` | 每股送转比例 | `dividend.stk_div` | 10 送 3 → `0.3` |
 | `dividend_cash_div` | 每股现金红利（元） | `dividend.cash_div` | — |
@@ -232,13 +232,13 @@ MY_FORM = {
 特殊要求：
 
 - **分红三个空必须在同一张表**（初始化期校验，否则报错）。
-- 分红表需过滤"实施"状态、排除 `ex_date` 为 NULL 的行（§8.1）。
+- 分红表需过滤"实施"状态、排除 `ex_date` 为 NULL 的行（见 filter 行过滤）。
 
 ---
 
 ## 6. 辅助能力接口（可选）
 
-7 个空，填了启用对应能力，不填则功能关闭（缺失行为汇总见 §10）。填表法中能力方法由后端按已填的空自动装配，鸭子类型检测对手写后端与填表后端一视同仁。
+7 个空，填了启用对应能力，不填则功能关闭（缺失行为见本章“能力缺失行为速查”）。填表法中能力方法由后端按已填的空自动装配，鸭子类型检测对手写后端与填表后端一视同仁。
 
 | 空 | 格式 | 启用能力 | 数据要求 |
 |---|---|---|---|
@@ -284,40 +284,27 @@ MY_FORM = {
 
 仓库自带的 `adapters/tushare.py` 是完整示例：基本面/估值、技术指标、资金流向、筹码、融资融券、涨跌停、龙虎榜、大宗交易、回购、股东增减持等数百个字段的填法均可直接参照。
 
-### 7.2 财报类数据：公告日对齐日频
+<a id="alignment"></a>
+### 7.2 财报与事件的可得日对齐
 
-引擎只消费 `(交易日期, 证券代码)` 日频网格上的列，**不做季度频率推断**。财报类数据（`eps`、`rev_yoy` 等）须在数据层按**公告日**（`ann_date`）对齐成日频列。建议建 VIEW：
+引擎只做 `(交易日, symbol)` 精确键拼接，不会把季度、公告事件自动变成日频序列。
+后端需先按公告可得时点将财报映射到交易日网格，再按需要向后延续已知值；不能按
+报告期提前使用，也不能仅 `ann_date AS trade_date` 后宣称已经完成日频对齐。公告在
+非交易日或盘后时，须定义何时可进入 T 日收盘决策。YoY 等跨季度指标也在数据层准备。
 
-```sql
-CREATE VIEW v_financials AS
-SELECT ts_code, ann_date AS trade_date, eps, rev_yoy, ...
-FROM financials;
-```
+事件型列若只记录事件当日，其余日为 NaN；“未发生”与“数据缺失”须区分。
+`tables: {repurchase: {date: "ann_date"}}` 只覆盖日期列名，不会前移公告或填充缺口。
+一对多事件先按明确规则聚合为日频唯一键，再接入，避免外连接放大行数。当前模板使用
+`stk_holdertrade_agg` 与 `stk_holdernumber_agg` 等 VIEW 完成这种聚合。
 
-然后表单引用 VIEW：`"eps": "v_financials.eps"`。跨季度运算（如 YoY 增速）也预先算成列——引擎不会自动推断历史季度数据。
+### 7.3 完全自定义数据源
 
-### 7.3 事件型表：日期列名覆盖
-
-部分表的日期列不是交易日列，用 `tables` 节的 `date` 键声明对齐列：
-
-```python
-"tables": {
-    "repurchase":       {"date": "ann_date"},
-    "stk_holdertrade":  {"date": "ann_date"},
-    "stk_holdernumber": {"date": "end_date"},
-}
-```
-
-事件型表只在公告日有值，其余日期在网格中为 NaN——符合预期，不是错误。需要填充或条件取值时在数据层（SQL VIEW）预处理，或在因子表达式里用 `where` 限定有效域。
-
-### 7.4 完全自定义数据源
-
-任何有 `(代码, 日期)` 键的数据都可对接（社交媒体情绪、新闻舆情、替代数据厂商因子等），导入 DuckDB 后填映射即可：
+任何有 `(代码, 日期)` 键的数据都可映射，包括新闻、情绪和替代数据：
 
 ```python
 "extra_fields": {
     "sentiment_score": "social_media.sentiment",
-    "news_impact":     "alt_data.news_impact_score",
+    "news_impact": "alt_data.news_impact_score",
 }
 ```
 
@@ -331,10 +318,10 @@ FROM financials;
 |---|---|---|
 | `filter` | 行过滤（`{列: 值}` dict） | 仅日历 / 分红 / ST / 指数成分表 |
 | `filter_sql` | 复杂行过滤（手写 SQL 片段） | 仅日历 / 分红 / ST / 指数成分表 |
-| `symbol` | 该表代码列名覆盖 | 任何已被字段引用的表 |
-| `date` | 该表日期列名覆盖 | 任何已被字段引用的表 |
+| `symbol` | 该表代码列名覆盖 | 任何已被字段引用的表（含分红 / ST / 行业 / 上市日期 / 指数成分 / 基准） |
+| `date` | 该表日期列名覆盖 | 仅 panel 表、ST、指数成分、基准表；**对日历与分红表的日期列无效**（见下） |
 
-对非适用范围的表配置 `filter` / `filter_sql`，或对未被任何字段引用的表配置任何子键，均在初始化期报错。
+对非适用范围的表配置 `filter` / `filter_sql`，或对未被任何字段引用的表配置任何子键，均在初始化期报错。`date` 覆盖落在日历/分红表上**不报错也不生效**——这两个角色的日期列由 `calendar_date` / `dividend_ex_date` 表单位置绑定，请改表单而不是 `tables`。同一张表同时充当 panel 表（被 `open` / `extra_fields` 等引用）时，`date` 覆盖仍对 panel 查询生效。
 
 ### 8.1 `filter` — 等值行过滤
 
@@ -382,12 +369,13 @@ FROM financials;
 - [ ] 分红三个空在同一张表，且过滤了"实施"状态
 - [ ] 辅助能力按需填写，不用的空整行删掉
 - [ ] `index_code` 和 `index_member` 要么都填（同一张表）要么都不填
-- [ ] 事件型表（repurchase / stk_holdertrade / stk_holdernumber 等）在 `tables` 节声明了 `date` 覆盖
+- [ ] 事件型表及其聚合 VIEW 用 `tables.date` 声明公告日列
 - [ ] 实例化后端不报错：`python -c "from adapters.my_backend import TushareBackend; TushareBackend()"`（落库校验通过）
 - [ ] 日历正确：`python -c "from adapters.my_backend import TushareBackend; print(TushareBackend().get_calendar('20240101', '20240131')[:5])"`
 
 ---
 
+<a id="failure-modes"></a>
 ## 10. 能力缺失行为速查
 
 核心分界：**可选能力缺失 → 告警软回退**；**因子表达式显式引用不可用的伪列 → 直接报错**。检测方式均为鸭子类型（`getattr(backend, "方法名", None)`）。
@@ -397,11 +385,18 @@ FROM financials;
 | ST 标记 `st_symbol` | `get_st_map` | `exclude_st: true` → 告警一次，ST 过滤不生效，回测继续 |
 | 行业分类 `industry_name` | `get_stock_industries` | `exclude_industries` → 告警一次，行业过滤不生效；因子表达式引用 `industry` 伪列 → preload 报错 |
 | 上市日期 `listing_date` | `get_recent_listings` | `exclude_new_stock: true` → 告警一次，新股过滤不生效，回测继续 |
-| 指数成分 `index_code` + `index_member` | `get_index_members` | `index_universe` → 告警一次，白名单不生效；`factor_universe` → 告警一次，因子计算域回退为交易域 |
+| 指数成分 `index_code` + `index_member` | `get_index_members` | `index_universe` → 缺方法时两处各告警一次（preload universe 裁剪回退全市场、`StockFilter` 白名单不生效）；`factor_universe` → preload 告警一次，因子计算域回退交易域 |
 | 基准行情 `benchmark_close` | `get_benchmark_bars` | 报告基准对比列为空，不报错；因子表达式引用 `idx_ret` → preload 报错 |
 | 列供给能力 | `backend_bar_columns` | 不实现 = 过滤规则依赖列全部照常请求，缺列由后端 `query_bars` 自行处理；实现后，`exclude_loss` 等过滤依赖列先与后端能力取交集，缺列走逐 bar 软回退 |
 
-另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。`exclude_loss` 的两类缺失各有独立告警：**列整列缺失**（后端表单未提供、引擎列协商让位）→ StockFilter 运行时告警一次，明说等价于不做亏损过滤；**列在但个别行缺**（`bak_basic` 无该股该日行）→ 引擎 preload 汇总告警一次（`filters.audit_loss_coverage`，只计有行情样本，北交所行数单独列出），单行不再回退 `pe_ttm<=0`（tushare 从不发布负 PE，该回退恒不触发）。
+另：`exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔过滤规则**默认关闭**——策略未声明 = 不过滤、也不告警；只有显式开启且后端缺能力（缺 ST 表 / 上市日期 / `eps` 列）时才会出现上表告警（软回退）。`exclude_loss` 的两类缺失各有独立告警：**列整列缺失**（后端表单未提供、引擎列协商让位）→ StockFilter 运行时告警一次，明说等价于不做亏损过滤；**列在但个别行缺**（`bak_basic` 无该股该日行）→ 引擎 preload 汇总告警一次（`filters.audit_loss_coverage`，只计有行情样本，北交所行数单独列出），单行缺 `eps` 时回退 `pe_ttm <= 0` 再判定，两列皆不可判定则保留。
+
+指数成分的两条路径各自独立，告警次数与阶段不同：
+
+- **preload 裁剪**（`strategy_loader._attach_universe` → `filters.resolve_index_universe`）。缺方法 → hook 首次调用时告警一次（每策略实例最多一次），回退全市场；方法在但 `[start-45d, end]` 与全历史回退都查不到快照 → **静默**返回 `None`，同样回退全市场，不告警。仅在策略未自定义 `get_universe` / `get_factor_universe` 时挂接。
+- **逐日白名单**（`filters.StockFilter.__init__`，仅 `index_universe`）。缺方法 → 构造时告警一次；方法在但快照为空 → 构造时告警一次（`index_universe=... 无成分数据，白名单规则不生效`）。
+
+因此缺方法时最多出现两条告警（分属两处，各一次），而有方法无数据时只有 `StockFilter` 侧告警，preload 侧无声。`factor_universe` 没有逐日白名单，只有 preload 路径。
 
 ### 10.1 数据卫生检查与空值语义（fail-fast）
 
@@ -411,3 +406,17 @@ FROM financials;
 - **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 FULL OUTER JOIN 多对多爆炸、策略层 `to_dict` 静默丢行。
 - **旧格式拒绝**：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner 会静默打开旧库，必须 fail-fast）。
 - **空 universe 语义**：`query_bars` 的 `symbols=[]` 返回空面板，`None` 才表示全市场（引擎 preload 用 None；勿用空列表表达“全市场”）。
+
+
+<a id="semantic-boundaries"></a>
+## 11. 数据语义边界
+
+- 新股名单按 `[start-60 日历日, end]` 一次预加载，整个窗口固定排除；不是逐日年龄
+  到 60 日自动释放。
+- 指数快照先查 start 前 45 日至 end，无结果再查更早历史；逐日取最近一期，但早于首个
+  快照时 `StockFilter` 使用首期。需要严格逐时可得性时必须显式核查。
+- `get_stock_industries` 只有股票列表参数，没有日期参数；不能宣称历史行业 PIT。
+- 分红读取按实施事件归并：有 end_date/ann_date 时，同报告期取最新公告；不同报告期值
+  全同取一份，值不同相加并告警；缺上述列时按值去重。重复事件含义仍须回原始公告核对。
+- 初始化通过只证明已检查的表结构和键满足条件；单位、公告时点与稀疏数据含义须独立
+  抽样验证，方法见[有边界核查](audit_checklist.md#data-probes)。

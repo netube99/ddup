@@ -1,6 +1,6 @@
 """本次审查复现与独立结果重建；不是引擎实现或生产命令。
 
-运行：.venv/bin/python docs/review_evidence_20261012.py [--result /tmp/run.duckdb]
+运行：.venv/bin/python scripts/diagnostics/review_evidence_20261012.py [--result /tmp/run.duckdb]
 """
 
 import argparse
@@ -13,7 +13,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def reproduce() -> dict:

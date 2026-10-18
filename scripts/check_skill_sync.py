@@ -1,166 +1,362 @@
 #!/usr/bin/env python3
-"""校验 .agents/skills/ 中可被代码验证的事实与当前代码一致。
+"""Check project skills and canonical documentation against executable facts.
 
-接口变更（CLI flag、算子、YAML 键、协议键、config 默认值）后必须同步 skill；
-本脚本发现漂移即非零退出。只对账"skill 提到的事实"，不保证 skill 覆盖完整
-（覆盖完整性靠 ddup-docs-drift-audit 流程审计）。
+The check is deliberately semantic at the boundaries where words can drift:
+operators, select/filter/condition keys, engine defaults, ML metadata, CLI
+flags, skill frontmatter, and local Markdown links. It does not try to verify
+prose quality or duplicate the full engine test suite.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
+
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = ROOT / ".agents" / "skills"
+DOCS_DIR = ROOT / "docs"
 SCRIPTS_DIR = ROOT / "scripts"
+
+EXPECTED_SKILLS = {
+    "ddup-backtest-analysis",
+    "ddup-experiment-design",
+    "ddup-factor-research",
+    "ddup-live-ops",
+    "ddup-ml-research",
+    "ddup-research-loop",
+    "ddup-review-gate",
+    "ddup-strategy-craft",
+}
 
 
 def _load_skills() -> dict[str, str]:
-    return {p.parent.name: p.read_text(encoding="utf-8") for p in SKILLS_DIR.glob("*/SKILL.md")}
+    return {
+        path.parent.name: path.read_text(encoding="utf-8")
+        for path in sorted(SKILLS_DIR.glob("*/SKILL.md"))
+    }
 
 
-def _section(text: str, header: str) -> str:
-    """提取 ## header 到下一个 ## 之间的文本。"""
-    m = re.search(re.escape(header) + r"(.*?)(?=\n## |\Z)", text, re.S)
-    return m.group(1) if m else ""
+def _between(text: str, start: str, end: str | None = None) -> str:
+    start_at = text.find(start)
+    if start_at < 0:
+        return ""
+    start_at += len(start)
+    if end is None:
+        return text[start_at:]
+    end_at = text.find(end, start_at)
+    return text[start_at:] if end_at < 0 else text[start_at:end_at]
+
+
+def _section(text: str, anchor: str, next_anchor: str | None = None) -> str:
+    marker = f'<a id="{anchor}"></a>'
+    end_marker = f'<a id="{next_anchor}"></a>' if next_anchor else None
+    return _between(text, marker, end_marker)
+
+
+def _first_table_tokens(section: str) -> set[str]:
+    for block in re.split(r"\n\s*\n", section):
+        if re.search(r"^\|\s*[^|\n]+\s*\|", block, re.M):
+            return set(
+                re.findall(
+                    r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|",
+                    block,
+                    re.M,
+                )
+            )
+    return set()
 
 
 def _backticks(text: str) -> set[str]:
     return set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text))
 
 
-def check_cli_flags(skills: dict[str, str], errors: list[str]) -> None:
-    """skill 中出现的 --flag 必须存在于某个 scripts/*.py 的 add_argument。"""
-    valid: set[str] = set()
-    for src in SCRIPTS_DIR.glob("*.py"):
-        pattern = r"add_argument\(\s*[\"']--([a-z0-9-]+)[\"']"
-        valid.update(re.findall(pattern, src.read_text(encoding="utf-8")))
-    # skill 中故意提及的不存在 flag（否定式说明），豁免
-    allowed_mentions = {"debug"}
+def check_skill_inventory(skills: dict[str, str], errors: list[str]) -> None:
+    found = set(skills)
+    missing = EXPECTED_SKILLS - found
+    extra = found - EXPECTED_SKILLS
+    if missing:
+        errors.append(f"skills: 缺少任务入口 {sorted(missing)}")
+    if extra:
+        errors.append(f"skills: 出现未登记任务入口 {sorted(extra)}")
+
     for name, text in skills.items():
-        for flag in sorted(set(re.findall(r"(?<![\w-])--([a-z0-9][a-z0-9-]*)", text))):
-            if flag not in valid and flag not in allowed_mentions:
-                errors.append(f"{name}: --{flag} 不存在于任何 scripts/*.py 的 argparse")
+        if not text.startswith("---\n"):
+            errors.append(f"{name}: SKILL.md 缺少 YAML frontmatter")
+            continue
+        try:
+            _, frontmatter, _ = text.split("---", 2)
+            meta = yaml.safe_load(frontmatter) or {}
+        except (ValueError, yaml.YAMLError) as exc:
+            errors.append(f"{name}: frontmatter 无法解析: {exc}")
+            continue
+        if meta.get("name") != name:
+            errors.append(f"{name}: frontmatter name={meta.get('name')!r} 与目录不一致")
+        description = meta.get("description")
+        if not isinstance(description, str) or len(description.strip()) < 20:
+            errors.append(f"{name}: description 缺失或过短")
 
 
-def check_factor_ops(skills: dict[str, str], errors: list[str]) -> None:
-    """算子表与 btcore.factors.ops.OP_NAMES 双向一致。"""
+def check_cli_flags(skills: dict[str, str], errors: list[str]) -> None:
+    """Require flags named by skills to exist in at least one project CLI."""
+    valid: set[str] = set()
+    for source in SCRIPTS_DIR.glob("*.py"):
+        text = source.read_text(encoding="utf-8")
+        valid.update(re.findall(r"[\"']--([a-z0-9][a-z0-9-]*)[\"']", text))
+    valid.update({"help", "version"})
+
+    for name, text in skills.items():
+        mentioned = set(re.findall(r"(?<![\w-])--([a-z0-9][a-z0-9-]*)", text))
+        for flag in sorted(mentioned - valid):
+            errors.append(f"{name}: --{flag} 不存在于任何 scripts/*.py 的 argparse")
+
+
+def check_doc_cli_flags(errors: list[str]) -> None:
+    """Check flags used alongside project CLI paths in current documentation."""
+    valid: set[str] = set()
+    for source in SCRIPTS_DIR.glob("*.py"):
+        text = source.read_text(encoding="utf-8")
+        valid.update(re.findall(r"[\"']--([a-z0-9][a-z0-9-]*)[\"']", text))
+    valid.update({"help", "version"})
+
+    sources = [
+        ROOT / "README.md",
+        ROOT / "AGENTS.md",
+        ROOT / "ARCHITECTURE.md",
+        *(DOCS_DIR / name for name in ("backend_guide.md", "factor_library.md",
+         "factor_research.md", "strategy_guide.md", "strategy_patterns.md",
+         "cli_and_research.md", "results_analysis.md", "ml_guide.md",
+         "live_guide.md", "development.md", "audit_checklist.md",
+         "review_protocol.md")),
+    ]
+    for source in sources:
+        text = source.read_text(encoding="utf-8").replace("\\\n", " ")
+        for line in text.splitlines():
+            if "scripts/" not in line:
+                continue
+            for flag in set(re.findall(r"(?<![\w-])--([a-z0-9][a-z0-9-]*)", line)):
+                if flag not in valid:
+                    errors.append(
+                        f"{source.relative_to(ROOT)}: --{flag} 不存在于项目 CLI argparse"
+                    )
+
+
+def check_factor_ops(errors: list[str]) -> None:
     from btcore.factors.ops import OP_NAMES
 
-    section_tokens = _backticks(_section(skills.get("ddup-factor-research", ""), "## 21 算子"))
-    phantom = section_tokens - OP_NAMES
-    missing = OP_NAMES - section_tokens
+    text = (DOCS_DIR / "factor_library.md").read_text(encoding="utf-8")
+    documented = _first_table_tokens(_section(text, "operators"))
+    phantom = documented - OP_NAMES
+    missing = set(OP_NAMES) - documented
     if phantom:
-        errors.append(f"ddup-factor-research: 算子表含代码中不存在的算子 {sorted(phantom)}")
+        errors.append(f"factor_library: 包含不存在的算子 {sorted(phantom)}")
     if missing:
-        errors.append(f"ddup-factor-research: 代码算子未在 skill 文档化 {sorted(missing)}")
+        errors.append(f"factor_library: 未记录代码算子 {sorted(missing)}")
 
 
-def check_select_keys(skills: dict[str, str], errors: list[str]) -> None:
-    """select 返回协议键与 engine._SELECT_KEYS 双向一致。"""
+def check_select_keys(errors: list[str]) -> None:
     from btcore.engine import _SELECT_KEYS
 
-    text = skills.get("ddup-strategy-craft", "")
-    line = next((ln for ln in text.splitlines() if "合法键仅" in ln), "")
-    documented = _backticks(line)
-    if set(_SELECT_KEYS) != documented:
+    text = (DOCS_DIR / "strategy_guide.md").read_text(encoding="utf-8")
+    documented = _first_table_tokens(
+        _section(text, "select").split("### `calc_conditions", 1)[0]
+    )
+    if documented != set(_SELECT_KEYS):
         errors.append(
-            "ddup-strategy-craft: select 键 "
+            "strategy_guide select: "
             f"{sorted(documented)} != engine._SELECT_KEYS {sorted(_SELECT_KEYS)}"
         )
 
 
-def check_filter_rules(skills: dict[str, str], errors: list[str]) -> None:
-    """filter_rules 键与 strategy_loader._KNOWN_FILTER_KEYS 双向一致。"""
+def check_filter_rules(errors: list[str]) -> None:
     from btcore.strategy_loader import _KNOWN_FILTER_KEYS
 
-    text = skills.get("ddup-strategy-craft", "")
-    documented = _backticks(_section(text, "## 6. filter_rules"))
+    text = (DOCS_DIR / "strategy_guide.md").read_text(encoding="utf-8")
+    documented = _first_table_tokens(_section(text, "filters", "condition-config"))
     phantom = documented - _KNOWN_FILTER_KEYS
-    missing = _KNOWN_FILTER_KEYS - documented
+    missing = set(_KNOWN_FILTER_KEYS) - documented
     if phantom or missing:
         errors.append(
-            "ddup-strategy-craft: filter_rules 漂移 "
+            "strategy_guide filter_rules: "
             f"phantom={sorted(phantom)} missing={sorted(missing)}"
         )
 
 
-def check_condition_keys(skills: dict[str, str], errors: list[str]) -> None:
-    """conditions YAML 键全部在 skill 中出现（代码→skill 单向）。"""
+def check_condition_keys(errors: list[str]) -> None:
     from btcore.strategy_loader import _CONDITION_KEYS
 
-    all_text = "\n".join(skills.values())
-    for key in sorted(_CONDITION_KEYS):
-        if key not in all_text:
-            errors.append(f"skills: conditions 键 {key} 未在任何 skill 文档化")
+    text = (DOCS_DIR / "strategy_guide.md").read_text(encoding="utf-8")
+    section = _section(text, "condition-config", "conditions")
+    documented = _backticks(section)
+    documented.update(re.findall(r"^\s*([a-z_]+):", section, re.M))
+    missing = set(_CONDITION_KEYS) - documented
+    if missing:
+        errors.append(f"strategy_guide conditions: 未记录 {sorted(missing)}")
 
 
-def check_ml_contract(skills: dict[str, str], errors: list[str]) -> None:
-    """ML meta 版本与账户态特征集与 btcore.ml.spec 一致。"""
-    from btcore.ml.spec import META_VERSION, SUPPORTED_STATE_FEATURES
+def _engine_defaults() -> dict[str, object]:
+    """Extract literal config.get defaults without importing the engine."""
+    source = (ROOT / "btcore" / "engine.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    defaults: dict[str, object] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "config"
+            and len(node.args) >= 2
+        ):
+            continue
+        key = node.args[0]
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            continue
+        try:
+            defaults[key.value] = ast.literal_eval(node.args[1])
+        except (ValueError, TypeError):
+            continue
 
-    text = skills.get("ddup-ml-research", "")
-    if f"== {META_VERSION}" not in text:
-        errors.append(f"ddup-ml-research: 未写明 meta version == {META_VERSION}")
-    for feat in sorted(SUPPORTED_STATE_FEATURES):
-        if feat not in text:
-            errors.append(f"ddup-ml-research: 账户态特征 {feat} 未文档化")
+    from btcore.constants import (
+        COMMISSION_RATE,
+        MIN_COMMISSION,
+        STAMP_TAX_RATE,
+        TRANSFER_FEE_RATE,
+    )
+
+    defaults.update(
+        commission_rate=COMMISSION_RATE,
+        min_commission=MIN_COMMISSION,
+        stamp_tax_rate=STAMP_TAX_RATE,
+        transfer_fee_rate=TRANSFER_FEE_RATE,
+    )
+    return defaults
 
 
-def check_config_defaults(skills: dict[str, str], errors: list[str]) -> None:
-    """config 键在 engine/costs 源码中存在；engine 内字面默认值对账（costs 常数值跳过）。"""
-    engine_src = (ROOT / "btcore" / "engine.py").read_text(encoding="utf-8")
-    costs_src = (ROOT / "btcore" / "costs.py").read_text(encoding="utf-8")
-    all_src = engine_src + costs_src
-    defaults = {
-        m.group(1): m.group(2).strip().strip("\"'").replace("_", "")
-        for m in re.finditer(r'config\.get\("(\w+)",\s*([^)]+)\)', engine_src)
-    }
-    text = skills.get("ddup-strategy-craft", "")
-    section = _section(text, "## 4. YAML config 引擎键")
-    for key, val in re.findall(r"`(\w+)`=([^\s，、（(]+)", section):
-        val = val.strip("\"'")
-        if f'"{key}"' not in all_src:
-            errors.append(f"ddup-strategy-craft: config 键 {key} 不存在于 engine.py/costs.py")
-        elif key in defaults and defaults[key] != val:
+def _parse_literal(token: str) -> object:
+    value = token.strip().strip("`")
+    if value in {"", "—", "自动推导"}:
+        return None
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, TypeError, SyntaxError):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+
+def check_config_defaults(errors: list[str]) -> None:
+    text = (DOCS_DIR / "strategy_guide.md").read_text(encoding="utf-8")
+    section = _section(text, "config", "factors")
+    rows = re.findall(
+        r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|\s*[^|]+\|\s*([^|]+?)\s*\|",
+        section,
+        re.M,
+    )
+    documented = {key: _parse_literal(value) for key, value in rows}
+    for key, expected in sorted(_engine_defaults().items()):
+        if key not in documented:
+            errors.append(f"strategy_guide config: 未记录引擎键 {key}")
+            continue
+        actual = documented[key]
+        if actual is None:
+            continue
+        if actual != expected:
             errors.append(
-                f"ddup-strategy-craft: config {key} 默认值 skill={val} engine={defaults[key]}"
+                f"strategy_guide config {key}: doc={actual!r} engine={expected!r}"
             )
 
 
-def check_docs_facts(skills: dict[str, str], errors: list[str]) -> None:
-    """docs/ 关键事实断言（DOC-03/04 曾两次漂移，纳入机械检查防再犯）。
+def check_ml_contract(errors: list[str]) -> None:
+    from btcore.ml.spec import META_VERSION, SUPPORTED_STATE_FEATURES
 
-    只对账可被代码验证的硬事实：ml_guide 的 meta 版本引用必须与
-    btcore.ml.spec.META_VERSION 一致；factor_library 的 ema_bullish 示例
-    必须用 `* 1` 显式算术化（numexpr bool 加法是 OR，裸布尔相加与
-    library.yaml 定义矛盾）。
-    """
-    from btcore.ml.spec import META_VERSION
+    text = (DOCS_DIR / "ml_guide.md").read_text(encoding="utf-8")
+    if f"META_VERSION == {META_VERSION}" not in text:
+        errors.append(f"ml_guide: 未写明 META_VERSION == {META_VERSION}")
+    for version in set(re.findall(r"META_VERSION == (\d+)", text)) - {
+        str(META_VERSION)
+    }:
+        errors.append(f"ml_guide: META_VERSION == {version} 与代码 {META_VERSION} 冲突")
+    for feature in sorted(SUPPORTED_STATE_FEATURES):
+        if feature not in text:
+            errors.append(f"ml_guide: 未记录账户态特征 {feature}")
 
-    ml_guide = (ROOT / "docs" / "ml_guide.md").read_text(encoding="utf-8")
-    if f"meta 版本不是 {META_VERSION}" not in ml_guide:
-        errors.append(
-            f"docs/ml_guide.md: 未写明 'meta 版本不是 {META_VERSION}'"
-            f"（spec.py META_VERSION={META_VERSION}）"
-        )
-    for v in set(re.findall(r"meta 版本不是 (\d+)", ml_guide)) - {str(META_VERSION)}:
-        errors.append(f"docs/ml_guide.md: 'meta 版本不是 {v}' 与 META_VERSION={META_VERSION} 冲突")
 
-    factor_lib = (ROOT / "docs" / "factor_library.md").read_text(encoding="utf-8")
-    section = _section(factor_lib, "### 6.4")
+def check_factor_arithmetic(errors: list[str]) -> None:
+    text = (DOCS_DIR / "factor_library.md").read_text(encoding="utf-8")
+    section = _section(text, "boolean-score", "operators")
     if "* 1" not in section:
-        errors.append(
-            "docs/factor_library.md §6.4: ema_bullish 示例未用 `* 1` 算术化"
-            "（numexpr bool 加法 = OR，需与 library.yaml 定义一致）"
-        )
+        errors.append("factor_library: 布尔计分示例未显式使用 `* 1`")
     if "布尔值可直接相加" in section:
-        errors.append(
-            "docs/factor_library.md §6.4: 仍宣称布尔值可直接相加"
-            "（numexpr bool 加法 = OR，与 library.yaml ema_bullish 矛盾）"
-        )
+        errors.append("factor_library: 仍宣称布尔值可直接相加")
+
+
+def _slugify(heading: str) -> str:
+    heading = re.sub(r"<[^>]+>", "", heading)
+    heading = re.sub(r"[`*~]", "", heading).strip().lower()
+    out: list[str] = []
+    for char in heading:
+        if char.isalnum() or char in "-_":
+            out.append(char)
+        elif char.isspace():
+            out.append("-")
+    return re.sub(r"-+", "-", "".join(out)).strip("-")
+
+
+def _without_fences(text: str) -> str:
+    return re.sub(r"```.*?```", "", text, flags=re.S)
+
+
+def _markdown_anchors(text: str) -> set[str]:
+    text = _without_fences(text)
+    anchors = set(re.findall(r'<a\s+id=["\']([^"\']+)["\']', text))
+    anchors.update(_slugify(m.group(1)) for m in re.finditer(r"^#{1,6}\s+(.+)$", text, re.M))
+    return anchors
+
+
+def check_local_links(errors: list[str]) -> None:
+    markdown_files = [
+        ROOT / "README.md",
+        ROOT / "AGENTS.md",
+        ROOT / "ARCHITECTURE.md",
+        *sorted(DOCS_DIR.rglob("*.md")),
+        *sorted(SKILLS_DIR.glob("*/SKILL.md")),
+    ]
+    anchor_cache: dict[Path, set[str]] = {}
+
+    for source in (path for path in markdown_files if path.is_file()):
+        text = _without_fences(source.read_text(encoding="utf-8"))
+        for raw_target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
+            target = raw_target.strip()
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1]
+            if not target or target.startswith(("http://", "https://", "mailto:")):
+                continue
+            target = unquote(target)
+            path_part, _, fragment = target.partition("#")
+            destination = source if not path_part else (source.parent / path_part).resolve()
+            try:
+                destination.relative_to(ROOT)
+            except ValueError:
+                errors.append(f"{source.relative_to(ROOT)}: 链接越出项目 {raw_target}")
+                continue
+            if not destination.exists():
+                errors.append(f"{source.relative_to(ROOT)}: 链接目标不存在 {raw_target}")
+                continue
+            if fragment and destination.suffix == ".md":
+                if destination not in anchor_cache:
+                    anchor_cache[destination] = _markdown_anchors(
+                        destination.read_text(encoding="utf-8")
+                    )
+                if fragment not in anchor_cache[destination]:
+                    errors.append(
+                        f"{source.relative_to(ROOT)}: 目标缺少锚点 #{fragment} ({raw_target})"
+                    )
 
 
 def main() -> int:
@@ -171,21 +367,26 @@ def main() -> int:
     if not skills:
         print("跳过：无项目 skill")
         return 0
+
     errors: list[str] = []
+    check_skill_inventory(skills, errors)
     check_cli_flags(skills, errors)
-    check_factor_ops(skills, errors)
-    check_select_keys(skills, errors)
-    check_filter_rules(skills, errors)
-    check_condition_keys(skills, errors)
-    check_ml_contract(skills, errors)
-    check_config_defaults(skills, errors)
-    check_docs_facts(skills, errors)
+    check_doc_cli_flags(errors)
+    check_factor_ops(errors)
+    check_select_keys(errors)
+    check_filter_rules(errors)
+    check_condition_keys(errors)
+    check_config_defaults(errors)
+    check_ml_contract(errors)
+    check_factor_arithmetic(errors)
+    check_local_links(errors)
+
     if errors:
-        print("skill 与代码漂移：")
-        for e in errors:
-            print(f"  - {e}")
+        print("文档、skill 与代码漂移：")
+        for error in errors:
+            print(f"  - {error}")
         return 1
-    print(f"OK：{len(skills)} 个 skill 与代码事实一致")
+    print(f"OK：{len(skills)} 个 skill、代码契约与本地链接一致")
     return 0
 
 
