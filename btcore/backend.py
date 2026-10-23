@@ -4,10 +4,14 @@
 两种接入方式（二选一）
 ============================================================================
 
-A) 填表法（DuckDB 数据库，数据在表里）
+A) 填表法（DuckDB：数据在库表/VIEW 里）
    子类化 btcore.generic_sql.GenericSQLBackend，只填一个 Python dict 说明
    "表名.字段名" 的位置。零 SQL，全部由通用机械自动生成。
-   完整示例见 adapters/tushare.py，教程见 docs/backend_guide.md §2。
+   数据在一个 DuckDB 文件里传 db_path；上游是 SQLite/CSV/parquet 等异构源
+   时，经 ATTACH/read_csv VIEW 挂进连接后传 conn（连接注入，表单支持
+   "库名.表名.字段名" 三段式）。
+   完整示例见 adapters/tushare.py（文件库）与 tests/test_backend_attach.py
+   （SQLite ATTACH / CSV VIEW），教程见 docs/backend_guide.md §2、§2.3。
 
 B) 手写实现（非 SQL 数据源：内存、API、parquet、CSV 等）
    直接子类化本文件的 DataBackend，实现全部抽象方法，并按需添加能力方法。

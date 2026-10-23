@@ -6,6 +6,15 @@
 某字段在某张表没有对应行即为 NaN。拼表、对齐、列裁剪全部是内部逻辑。
 填好的完整示例见 adapters/tushare.py；对接说明见 docs/backend_guide.md。
 
+数据源两种进入方式（构造参数二选一）：
+
+- db_path：数据已在一个 DuckDB 文件里（只读打开，带写锁重试与魔数校验）；
+- conn：注入已有的 DuckDB 连接——上游是 sqlite/CSV/parquet 等异构源时，
+  由调用方经 ATTACH ... (TYPE SQLITE) / read_csv VIEW 挂进连接，表单照常
+  填位置（ATTACH 库支持 "库名.表名.字段名" 三段式）。注入连接归调用方
+  持有：close() 只注销内部视图，不关闭连接。recipe 见 docs/backend_guide.md
+  §7.4。
+
 表单（Python dict）：
 
     {
@@ -61,6 +70,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import date, timedelta
 
 import duckdb
@@ -126,6 +136,66 @@ def _q(name: str) -> str:
     仍可对接；标识符内的双引号按 SQL 标准双写转义。"""
     return '"' + name.replace('"', '""') + '"'
 
+
+def _qt(table: str) -> str:
+    """表位置 SQL 引用：支持 "库名.表名" 限定（ATTACH 场景）。
+
+    整体加引号的 'src.quotes' 是名为 src.quotes 的单标识符（DuckDB 拒绝），
+    限定引用必须分段转义：双引号包裹的 段."".段 形式。无点表名等价于 _q。
+    """
+    return ".".join(_q(part) for part in table.split("."))
+
+
+def _split_catalog(table: str) -> tuple[str | None, str]:
+    """限定表名 "库名.表名" 拆为 (库名, 纯表名)；无前缀返回 (None, 表名)。"""
+    if "." in table:
+        cat, _, bare = table.partition(".")
+        return cat, bare
+    return None, table
+
+
+def _build_query_sql(
+    tables: list[tuple[str, dict]], with_symbols: bool,
+    keys: Callable[[str], tuple[str, str]],
+) -> str:
+    """编译键外并集查询（纯文本生成，不触碰连接）。
+
+    每张表投影为 (symbol, trade_date, 被请求列) 子查询，链式 FULL OUTER
+    JOIN USING 让 DuckDB 做投影/谓词下推与向量化哈希连接。symbols 过滤
+    内联进各表子查询：实测小 universe + 大区间可让日期/代码过滤一起下推
+    到扫描（外层半连接形式慢 3 倍+）。结果由 _cached_query_sql 按组合缓存。
+    """
+    selects = ['"symbol"', '"trade_date"']
+    joins = []
+    sym_filter = ' WHERE "symbol" IN (SELECT "symbol" FROM _ddup_symbols)'
+    for i, (table, cols) in enumerate(tables):
+        ksym, kdate = keys(table)
+        proj = [
+            f'{_q(ksym)} AS "symbol"', f'{_q(kdate)} AS "trade_date"',
+        ]
+        # 恒别名到 canonical：物理列大小写与表单不一致时输出列名仍统一
+        proj += [
+            f"{_q(phys)} AS {_q(canon)}"
+            for canon, phys in cols.items()
+        ]
+        alias = f"t{i}"
+        selects += [f'{alias}.{_q(canon)}' for canon in cols]
+        sub = f"(SELECT {', '.join(proj)} FROM {_qt(table)}"
+        if with_symbols:
+            sub += sym_filter
+        sub += f") AS {alias}"
+        if not joins:
+            joins.append(sub)
+        else:
+            joins.append(
+                f'FULL OUTER JOIN {sub} USING ("symbol", "trade_date")'
+            )
+    sql = f"SELECT {', '.join(selects)} FROM {joins[0]}"
+    if len(joins) > 1:
+        sql += " " + " ".join(joins[1:])
+    sql += ' WHERE "trade_date" >= ? AND "trade_date" <= ?'
+    return sql
+
 # 鸭子类型扩展方法名 → 编译后角色节名；已填的空在实例上动态装配同名方法
 _EXTRAS = {
     "get_benchmark_bars": "benchmark",
@@ -168,14 +238,37 @@ _RESERVED_FIELDS = {
 class GenericSQLBackend(DataBackend):
     """通用 SQL（DuckDB）后端：填表声明数据位置，行为与手写 SQL 后端一致。"""
 
-    def __init__(self, form: dict, db_path: str):
+    def __init__(self, form: dict, db_path: str | None = None, *,
+                 conn: duckdb.DuckDBPyConnection | None = None):
         self._c = _compile_form(form)
+        if (db_path is None) == (conn is None):
+            raise ValueError(
+                "db_path 与 conn 必须二选一：数据在 DuckDB 文件里传 db_path；"
+                "上游经 ATTACH/read_csv 挂进已有连接时传 conn（注入连接归调用方"
+                "持有，close 只注销内部视图不关连接）"
+            )
+        if conn is not None:
+            self.db_path = ""
+            self._conn = conn
+            self._owns_conn = False
+        else:
+            self.db_path = str(db_path)
+            self._conn = connect_market_db(db_path)
+            self._owns_conn = True
         # 鸭子类型能力方法一次性装配为实例属性（hasattr/getattr 探测路径
         # 与普通方法一致，静态检查可见）；类 MRO 已定义（子类覆盖）的跳过
         for meth, sec in _EXTRAS.items():
             if sec in self._c["sections"] and getattr(type(self), meth, None) is None:
                 setattr(self, meth, getattr(self, f"_impl_{meth}"))
-        self._conn = connect_market_db(db_path)
+        # query_bars 的 SQL 文本缓存：表单进程内不可变，同一 (被引表, 列映射,
+        # 有无 symbols) 组合重复拼接是纯浪费（研究层分块查询同列集反复调用）
+        self._sql_cache: dict[tuple, str] = {}
+        # 当前注册进连接的 _ddup_symbols 视图的 symbols 键；None = 未注册。
+        # 视图跨调用复用，close 时统一注销
+        self._symbols_key: tuple[str, ...] | None = None
+        # 表物理列名集合（原始大小写，键为小写表名）：_check_schema 会查全部
+        # 引用表的列并填充，_fetch_dividend_rows 等处直接复用，不再重复回源
+        self._table_columns: dict[str, set[str]] = {}
         self._check_schema()
         self._div_idx: dict[str, dict] | None = None
         # PERF-08：可选分红查询窗口（ex_date BETWEEN start AND end，YYYYMMDD）；
@@ -196,7 +289,17 @@ class GenericSQLBackend(DataBackend):
         self._div_bounds = (start, end)
 
     def close(self):
-        self._conn.close()
+        if self._symbols_key is not None:
+            self._conn.unregister("_ddup_symbols")
+            self._symbols_key = None
+        if self._owns_conn:
+            self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
     def backend_bar_columns(self) -> set[str]:
         """后端可供给的 bars 列（canonical 名）；引擎 preload 列裁剪的能力协商。
@@ -238,51 +341,18 @@ class GenericSQLBackend(DataBackend):
         if not tables:
             return _empty_panel()
 
-        # 单条 SQL 键外并集：每张表投影为 (symbol, trade_date, 被请求列) 子查询，
-        # 链式 FULL OUTER JOIN USING 让 DuckDB 做投影/谓词下推与向量化哈希连接，
-        # 取代此前逐表拉取 + pandas 侧 join（宽表跨表拼接的内存放大）。
-        # symbols 过滤内联进各表子查询：实测小 universe + 大区间可让日期/代码
-        # 过滤一起下推到扫描（外层半连接形式慢 3 倍+）
-        registered = False
-        if symbols is not None:
+        # symbols 视图跨调用复用：连续同 universe 的查询（研究层 compute_breadth
+        # 分块 / live 回放补价）跳过 register/unregister 的 catalog 往返与
+        # DataFrame 重建；视图名本类独占，换 universe 时重注册，close 时注销
+        if symbols is not None and tuple(symbols) != self._symbols_key:
+            if self._symbols_key is not None:
+                self._conn.unregister("_ddup_symbols")
             self._conn.register(
                 "_ddup_symbols", pd.DataFrame({"symbol": list(symbols)})
             )
-            registered = True
-        try:
-            selects = ['"symbol"', '"trade_date"']
-            joins = []
-            sym_filter = ' WHERE "symbol" IN (SELECT "symbol" FROM _ddup_symbols)'
-            for i, (table, cols) in enumerate(tables):
-                ksym, kdate = self._keys(table)
-                proj = [
-                    f'{_q(ksym)} AS "symbol"', f'{_q(kdate)} AS "trade_date"',
-                ]
-                # 恒别名到 canonical：物理列大小写与表单不一致时输出列名仍统一
-                proj += [
-                    f"{_q(phys)} AS {_q(canon)}"
-                    for canon, phys in cols.items()
-                ]
-                alias = f"t{i}"
-                selects += [f'{alias}.{_q(canon)}' for canon in cols]
-                sub = f"(SELECT {', '.join(proj)} FROM {_q(table)}"
-                if symbols is not None:
-                    sub += sym_filter
-                sub += f") AS {alias}"
-                if not joins:
-                    joins.append(sub)
-                else:
-                    joins.append(
-                        f'FULL OUTER JOIN {sub} USING ("symbol", "trade_date")'
-                    )
-            sql = f"SELECT {', '.join(selects)} FROM {joins[0]}"
-            if len(joins) > 1:
-                sql += " " + " ".join(joins[1:])
-            sql += ' WHERE "trade_date" >= ? AND "trade_date" <= ?'
-            df = self._conn.execute(sql, [start, end]).df()
-        finally:
-            if registered:
-                self._conn.unregister("_ddup_symbols")
+            self._symbols_key = tuple(symbols)
+        sql = self._cached_query_sql(tables, symbols is not None)
+        df = self._conn.execute(sql, [start, end]).df()
         # 重复键会让 join 多对多爆炸、策略层 to_dict 静默丢行：
         # 必须在回源处 fail-fast（AGENTS.md 不产生静默错误结果）
         dup_mask = df.duplicated(subset=["trade_date", "symbol"], keep=False)
@@ -301,6 +371,47 @@ class GenericSQLBackend(DataBackend):
             )
         return df.set_index(["trade_date", "symbol"]).sort_index()
 
+    def _cached_query_sql(
+        self, tables: list[tuple[str, dict]], with_symbols: bool
+    ) -> str:
+        """query_bars SQL 文本按 (被引表, 列映射, 有无 symbols 过滤) 缓存。
+
+        dict 迭代序来自 _compile_form 的稳定插入序，缓存键与生成文本一一
+        对应；不同列集/不同键列覆盖各自成键，不会串。
+        """
+        key = (
+            tuple((t, tuple(cols.items())) for t, cols in tables), with_symbols,
+        )
+        sql = self._sql_cache.get(key)
+        if sql is None:
+            sql = _build_query_sql(tables, with_symbols, self._keys)
+            self._sql_cache[key] = sql
+        return sql
+
+    def _table_column_names(self, table: str) -> set[str]:
+        """表物理列名集合（原始大小写）：_check_schema 已查过则复用。
+
+        只读连接下 schema 不可变，缓存无失效问题；表不在校验集时回源一次
+        并缓存（防御路径，分红表必在表单引用中）。限定表名按 (catalog,
+        纯表名) 拆开查 information_schema（table_name 列不含库名前缀）。
+        """
+        cols = self._table_columns.get(table.lower())
+        if cols is None:
+            cat, bare = _split_catalog(table)
+            sql = (
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE lower(table_name) = lower(?)"
+            )
+            params: list = [bare]
+            if cat is not None:
+                sql += " AND lower(table_catalog) = lower(?)"
+                params.append(cat)
+            cols = {
+                r[0] for r in self._conn.execute(sql, params).fetchall()
+            }
+            self._table_columns[table.lower()] = cols
+        return cols
+
     def _find_duplicate_table(self, tables: list[tuple[str, dict]],
                               start: str, end: str,
                               symbols: list[str] | None) -> str:
@@ -315,7 +426,7 @@ class GenericSQLBackend(DataBackend):
                 params += list(symbols)
             row = self._conn.execute(
                 f"SELECT COUNT(*) FROM (SELECT {_q(ksym)}, {_q(kdate)}"
-                f" FROM {_q(table)} {where} GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1)",
+                f" FROM {_qt(table)} {where} GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1)",
                 params,
             ).fetchone()
             if row and row[0]:
@@ -328,7 +439,7 @@ class GenericSQLBackend(DataBackend):
         frag, fparams = self._filter_sql(sec["table"])
         where = f"({frag}) AND " if frag else ""
         rows = self._conn.execute(
-            f"SELECT {dcol} FROM {_q(sec['table'])}"
+            f"SELECT {dcol} FROM {_qt(sec['table'])}"
             f" WHERE {where}{dcol} >= ? AND {dcol} <= ? ORDER BY {dcol}",
             (*fparams, start, end),
         ).fetchall()
@@ -349,13 +460,9 @@ class GenericSQLBackend(DataBackend):
         where = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
         table = sec["table"]
         # end_date/ann_date 是 tushare 表列（2026-08 重建为多阶段公告表后用于
-        # 事件级归并）；通用后端无这两列时退化到值级归并
-        cols = {
-            r[0] for r in self._conn.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE lower(table_name) = lower(?)", [table],
-            ).fetchall()
-        }
+        # 事件级归并）；通用后端无这两列时退化到值级归并。列存在性经
+        # _table_column_names 缓存（_check_schema 已查过，不重复回源）
+        cols = self._table_column_names(table)
         has_event_cols = "end_date" in cols and "ann_date" in cols
         sel_extra = ", end_date AS endd, ann_date AS annd" if has_event_cols else ""
         # ORDER BY ann_date DESC NULLS LAST：ann_date 为 NULL 的行（老分红/
@@ -365,7 +472,7 @@ class GenericSQLBackend(DataBackend):
             f"SELECT {_q(sym)} AS sym, {_q(sec['stk_div'])} AS stk,"
             f" {_q(sec['cash_div'])} AS cash, {_q(sec['ex_date'])} AS ex"
             f"{sel_extra}"
-            f" FROM {_q(table)}{where}{order_by}",
+            f" FROM {_qt(table)}{where}{order_by}",
             (*fparams, *bounds_params),
         )
         names = [d[0] for d in cur.description]
@@ -465,7 +572,7 @@ class GenericSQLBackend(DataBackend):
         csym, cdate = self._keys(sec["close_table"])
         df = self._conn.execute(
             f"SELECT {_q(cdate)} AS trade_date, {_q(sec['close'])} AS close"
-            f" FROM {_q(sec['close_table'])}"
+            f" FROM {_qt(sec['close_table'])}"
             f" WHERE {_q(csym)}=? AND {_q(cdate)}>=? AND {_q(cdate)}<=?"
             f" ORDER BY {_q(cdate)}",
             [code, start, end],
@@ -480,7 +587,7 @@ class GenericSQLBackend(DataBackend):
             asym, adate = self._keys(sec["adj_table"])
             adj = self._conn.execute(
                 f"SELECT {_q(adate)} AS trade_date, {_q(sec['adj'])} AS adj_factor"
-                f" FROM {_q(sec['adj_table'])}"
+                f" FROM {_qt(sec['adj_table'])}"
                 f" WHERE {_q(asym)}=? AND {_q(adate)}>=? AND {_q(adate)}<=?"
                 f" ORDER BY {_q(adate)}",
                 [code, start, end],
@@ -520,7 +627,7 @@ class GenericSQLBackend(DataBackend):
         frag, fparams = self._filter_sql(sec["table"])
         where = f" AND {frag}" if frag else ""
         rows = self._conn.execute(
-            f"SELECT {_q(sec['symbol'])}, {_q(dcol)} FROM {_q(sec['table'])}"
+            f"SELECT {_q(sec['symbol'])}, {_q(dcol)} FROM {_qt(sec['table'])}"
             f" WHERE {_q(dcol)} >= ?{where} ORDER BY {_q(dcol)}",
             (from_date, *fparams),
         ).fetchall()
@@ -536,7 +643,7 @@ class GenericSQLBackend(DataBackend):
         sym, _ = self._keys(sec["table"])
         ph = ",".join("?" * len(ts_codes))
         rows = self._conn.execute(
-            f"SELECT {_q(sym)}, {_q(sec['name'])} FROM {_q(sec['table'])}"
+            f"SELECT {_q(sym)}, {_q(sec['name'])} FROM {_qt(sec['table'])}"
             f" WHERE {_q(sym)} IN ({ph})",
             ts_codes,
         ).fetchall()
@@ -552,7 +659,7 @@ class GenericSQLBackend(DataBackend):
             as_of = date.today().strftime("%Y%m%d")
         cutoff = (date.fromisoformat(as_of) - timedelta(days=cutoff_days)).strftime("%Y%m%d")
         rows = self._conn.execute(
-            f"SELECT {_q(sym)} FROM {_q(sec['table'])}"
+            f"SELECT {_q(sym)} FROM {_qt(sec['table'])}"
             f" WHERE {lcol} >= ? AND {lcol} <= ?",
             (cutoff, as_of),
         ).fetchall()
@@ -570,7 +677,7 @@ class GenericSQLBackend(DataBackend):
         where = f" AND {frag}" if frag else ""
         ph = ",".join("?" * len(index_codes))
         rows = self._conn.execute(
-            f"SELECT {_q(dcol)}, {_q(mcol)} FROM {_q(sec['table'])}"
+            f"SELECT {_q(dcol)}, {_q(mcol)} FROM {_qt(sec['table'])}"
             f" WHERE {_q(icol)} IN ({ph}) AND {_q(dcol)} >= ? AND {_q(dcol)} <= ?{where}"
             f" ORDER BY {_q(dcol)}",
             (*index_codes, start, end, *fparams),
@@ -672,30 +779,52 @@ class GenericSQLBackend(DataBackend):
                 ref(table, col, f"filters[{table!r}]")
 
         tables = sorted(refs)
+        # 引用键规范化为 (库名小写, 纯表名小写)：限定表名 'src.quotes' 拆开
+        # 匹配 information_schema（其 table_name 列不含库名，归属在
+        # table_catalog）；无前缀表限定当前库，同名表在 ATTACH 库之间不混淆。
+        # 只读连接下 current_database 与文件库的 table_catalog 一致（实测）。
+        current_db = self._conn.execute(
+            "SELECT current_database()"
+        ).fetchone()[0]
+        ref_keys = {}
+        for table in tables:
+            cat, bare = _split_catalog(table)
+            ref_keys[table] = ((cat or current_db).lower(), bare.lower())
+        bare_names = sorted({ck[1] for ck in ref_keys.values()})
         # DuckDB 标识符大小写不敏感（保留大小写）：校验同样按 lower() 比较，
         # 避免物理 MixedCase 表/列被误拒（查询本身可正常工作）
-        lowers = [t.lower() for t in tables]
-        ph = ",".join("?" * len(lowers))
+        ph = ",".join("?" * len(bare_names))
         rows = self._conn.execute(
-            "SELECT table_name FROM information_schema.tables"
+            "SELECT table_catalog, table_name FROM information_schema.tables"
             f" WHERE lower(table_name) IN ({ph})",
-            lowers,
+            bare_names,
         ).fetchall()
-        have_tables = {r[0].lower() for r in rows}
-        missing_tables = {t for t in tables if t.lower() not in have_tables}
+        have_tables = {(r[0].lower(), r[1].lower()) for r in rows}
+        missing_tables = {
+            t for t, ck in ref_keys.items() if ck not in have_tables
+        }
         if missing_tables:
             raise ValueError(f"表单引用的表在库中不存在: {sorted(missing_tables)}")
-        have_all: dict[str, set[str]] = {}
+        have_all: dict[tuple[str, str], set[str]] = {}
+        # 原始大小写列集合：供 _table_column_names 复用（存在性判断需保持
+        # 物理大小写，与旧回源查询行为一致）
+        have_raw: dict[tuple[str, str], set[str]] = {}
         col_rows = self._conn.execute(
-            "SELECT table_name, column_name FROM information_schema.columns"
+            "SELECT table_catalog, table_name, column_name"
+            " FROM information_schema.columns"
             f" WHERE lower(table_name) IN ({ph})",
-            lowers,
+            bare_names,
         ).fetchall()
-        for tbl, col in col_rows:
-            have_all.setdefault(tbl.lower(), set()).add(col.lower())
+        for cat, tbl, col in col_rows:
+            k = (cat.lower(), tbl.lower())
+            have_raw.setdefault(k, set()).add(col)
+            have_all.setdefault(k, set()).add(col.lower())
+        for table, ck in ref_keys.items():
+            if ck in have_raw:
+                self._table_columns[table.lower()] = have_raw[ck]
         bad_cols = []
         for table, cols in refs.items():
-            have = have_all.get(table.lower(), set())
+            have = have_all.get(ref_keys[table], set())
             for col, desc in cols.items():
                 if col.lower() not in have:
                     bad_cols.append(f"{table}.{col}（{desc}）")
@@ -763,7 +892,7 @@ class GenericSQLBackend(DataBackend):
 
         for table, col, kind in probes:
             row = self._conn.execute(
-                f"SELECT typeof({_q(col)}), {_q(col)} FROM {_q(table)}"
+                f"SELECT typeof({_q(col)}), {_q(col)} FROM {_qt(table)}"
                 f" WHERE {_q(col)} IS NOT NULL LIMIT 1"
             ).fetchone()
             if row is None:
@@ -794,13 +923,17 @@ def _parse_key_name(form: dict, name: str) -> str:
 
 
 def _parse_loc(form: dict, name: str) -> tuple[str, str] | None:
-    """解析位置空为 (表名, 字段名)；未填返回 None。"""
+    """解析位置空为 (表名, 字段名)；未填返回 None。
+
+    rpartition 支持 ATTACH 场景的三段式 "库名.表名.字段名"（表名带库名
+    前缀）；两段式 "表名.字段名" 行为不变。
+    """
     value = form.get(name)
     if value is None:
         return None
     if not isinstance(value, str) or "." not in value:
         raise ValueError(f"表单 {name!r} 需填 '表名.字段名'，实际值: {value!r}")
-    table, _, col = value.partition(".")
+    table, _, col = value.rpartition(".")
     if not table or not col:
         raise ValueError(f"表单 {name!r} 需填 '表名.字段名'，实际值: {value!r}")
     return table, col

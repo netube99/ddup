@@ -9,6 +9,11 @@ ddup 引擎通过 `DataBackend` 抽象层（`btcore/backend.py`）消费数据�
 
 DuckDB 库优先使用填表法；非 DuckDB 数据源见“手写实现 DataBackend”。
 
+回测结果清单会记录可识别的数据源路径，以及 backend 可选提供的 `snapshot_id`。若后端
+能提供不可变数据快照版本，可设置 `self.snapshot_id` 为稳定字符串；它只作为运行追溯标识，
+引擎不会据此校验行情内容。GenericSQLBackend 记录数据库路径、文件大小和修改时间作为
+弱身份提示，不会散列整库；手写后端未暴露路径或快照标识时，数据身份为 `unknown`。
+
 ---
 
 ## 1. 快速开始
@@ -57,6 +62,14 @@ class MyBackend(GenericSQLBackend):
     def __init__(self, db_path: str = _DEFAULT_DB_PATH):
         super().__init__(MY_FORM, db_path)
 ```
+
+数据源两种进入方式（构造参数二选一，同时传/都不传在初始化期报错）：
+
+- `db_path`：数据已在一个 DuckDB 文件里（只读打开，带写锁重试与魔数校验）；
+- `conn`：注入已有 DuckDB 连接——上游是 SQLite/CSV/parquet 等异构源时，
+  由你经 `ATTACH ... (TYPE SQLITE)` 或 `read_csv` VIEW 挂进连接后注入，
+  表单照常填位置（ATTACH 库用 `库名.表名.字段名` 三段式）。注入连接归
+  调用方持有：后端 `close()` 只注销内部视图，不关连接。完整示例见 §2.3。
 
 ### 2.1 表单结构
 
@@ -111,16 +124,87 @@ MY_FORM = {
 
 - **没有主表/辅助表之分**：OHLC 分存四张表也各填各的。被引用表按 `(交易日, 代码)` 键外并集拼成网格，某字段在某张表没有对应行即为 NaN。
 - **能力开关 = 对应的空填没填**：填了就有该能力，不填则对应功能关闭（见“能力缺失行为速查”）。
-- **表名/列名自动加双引号**：物理名撞 SQL 保留字（如 `limit`）的字段可直接对接。
+- **表名/列名自动加双引号**：物理名撞 SQL 保留字（如 `limit`）的字段可直接对接。位置空支持三段式 `库名.表名.字段名`（ATTACH 场景，见 §2.3）。
 - **VIEW 与表等价**：表单引用的"表"可以是 VIEW。例如 tushare 低积分库 `daily.amount` 单位是千元，可 `CREATE VIEW daily_rmb AS SELECT *, amount * 1000 AS amount FROM daily;` 后指向 VIEW。
 - **初始化期全量校验**：`__init__` 时表单引用的所有表和列做落库校验，拼写错误当场暴露，报错定位到具体表单条目。表单存在未知顶层键、`tables` 中出现未被任何字段引用的表，也在初始化期报错。
 - **运行期列名校验**：`query_bars` 被请求未在表单中声明的列名时抛出 `ValueError` 并列出未知列名——用于快速定位 `REQUIRED_FIELDS` 或 `extra_fields` 遗漏。
+
+### 2.3 异构上游：SQLite ATTACH 与 CSV VIEW（连接注入）
+
+数据不在 DuckDB 文件里时不必先转库：DuckDB 能把 SQLite 库 ATTACH 进连接、把 CSV/parquet 读成 VIEW，填表法的全部机械（拼表、校验、列裁剪）照常工作。
+
+**Recipe A：SQLite 上游（三段式表单）**
+
+```python
+import duckdb
+from btcore.generic_sql import GenericSQLBackend
+
+conn = duckdb.connect()
+conn.execute("ATTACH 'his_data.db' AS src (TYPE SQLITE)")
+
+SQLITE_FORM = {
+    "symbol": "ts_code",
+    "date": "trade_date",
+    "open": "src.quotes.open",          # 三段式：库名.表名.字段名
+    "high": "src.quotes.high",
+    # ...其余契约字段同理；两段式 "表名.字段名" 行为不变
+    "calendar_date": "src.trade_cal.cal_date",
+    "dividend_ex_date": "src.dividend.ex_date",
+    "dividend_stk_div": "src.dividend.stk_div",
+    "dividend_cash_div": "src.dividend.cash_div",
+}
+
+backend = GenericSQLBackend(SQLITE_FORM, conn=conn)   # 注入连接
+# ... 回测/研究正常使用 backend；结束时任一：
+backend.close()   # 只注销内部视图，不关 conn
+conn.close()      # 连接归调用方持有，由你关闭
+```
+
+同库同名表在 ATTACH 后不会混淆：无前缀的表单条目只匹配当前库，
+SQLite 库的表必须显式带 `src.` 前缀。
+
+**Recipe B：CSV 目录 + 清洗层（VIEW 内做数据卫生）**
+
+散装 CSV 的典型脏法：代码丢前导零（Excel 打开过）、日期带横线、
+无涨跌停列。清洗全部在 VIEW 层一次性表达，表单指向 VIEW：
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+# 脏 CSV：code=1 应为 000001.SZ；dt 是 ISO 日期；无涨跌停列
+conn.execute("""
+CREATE VIEW quotes AS SELECT
+    CASE WHEN code < 100000
+         THEN printf('%06d.SZ', code) ELSE printf('%06d.SH', code)
+    END AS ts_code,
+    strftime(dt, '%Y%m%d') AS trade_date,
+    open, high, low, close, vol, adj_factor, pre_close,
+    CAST(NULL AS DOUBLE) AS up_limit,    -- 缺失涨跌停 = NaN，
+    CAST(NULL AS DOUBLE) AS down_limit   -- 撮合回退 limits 板块规则推导
+FROM read_csv_auto('quotes/*.csv', header=true);
+CREATE VIEW cal AS SELECT CAST(cal_date AS VARCHAR) AS cal_date
+FROM read_csv('cal.csv', header=true);
+""")
+# 表单照常两段式填："open": "quotes.open", "calendar_date": "cal.cal_date", ...
+```
+
+清洗层的两条硬约束（初始化期键类型校验强制）：
+
+- 键列（代码/日期）必须是 `VARCHAR` 且日期为 8 位数字 `YYYYMMDD`。
+  `read_csv` 会把无横线日期和纯数字代码推断成 `BIGINT`、把 ISO 日期
+  推断成 `DATE`——不经 cast 直接对接会在构造后端时被拒绝，不会静默错算。
+- Excel 建议先另存为 CSV（DuckDB 无原生 Excel reader）；多 sheet 先拆文件。
+
+能力空（ST/行业/成分/基准）同样可用三段式或 VIEW，例如
+`"benchmark_close": "src.index_daily.close"`。可运行完整示例见
+`tests/test_backend_attach.py`。
 
 ---
 
 ## 3. 备选方案：手写实现 `DataBackend`
 
-数据不在 DuckDB（内存、CSV、parquet、HTTP API 等）或库结构不适合填表时，直接实现 `DataBackend` ABC。
+数据无法经 DuckDB 挂载（内存对象、HTTP API 等）、或库结构不适合填表时，直接实现 `DataBackend` ABC。CSV/parquet/SQLite 等文件型上游优先走 §2.3 的连接注入填表法。
 
 ### 3.1 必须实现的抽象方法（3 个）
 

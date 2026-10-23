@@ -348,6 +348,53 @@ def test_dividends_outside_window_fall_back_to_query(backend):
                    "600000.SH": {"stk_div": 0.0, "cash_div": 0.3}}
 
 
+# ── 连接生命周期与查询缓存 ──
+
+
+def test_context_manager_closes_connection(db_path):
+    with GenericSQLBackend(FULL_FORM, db_path) as backend:
+        assert len(backend.query_bars(None, "20240102", "20240102")) > 0
+    # 退出即关闭：连接不可再执行；重复 close 幂等
+    with pytest.raises(duckdb.Error):
+        backend._conn.execute("SELECT 1")
+    backend.close()
+
+
+def test_query_bars_sql_cached_and_consistent(backend):
+    """同参数重复查询结果一致（SQL 文本缓存不改变语义），不同列集各自成键。"""
+    first = backend.query_bars(["000001.SZ"], "20240101", "20240131")
+    second = backend.query_bars(["000001.SZ"], "20240101", "20240131")
+    pd.testing.assert_frame_equal(first, second)
+    assert len(backend._sql_cache) == 1
+    backend.query_bars(["000001.SZ"], "20240101", "20240131",
+                       columns=["close", "vol"])
+    backend.query_bars(None, "20240101", "20240131")  # 全市场：无 symbols 过滤
+    assert len(backend._sql_cache) == 3
+
+
+def test_query_bars_symbols_view_reuse_across_universes(backend):
+    """symbols 视图跨调用复用：换 universe 重注册后结果仍正确。"""
+    a = backend.query_bars(["000001.SZ"], "20240101", "20240131")
+    b = backend.query_bars(["000001.SZ", "600000.SH"], "20240101", "20240131")
+    assert set(a.index.get_level_values("symbol")) == {"000001.SZ"}
+    assert set(b.index.get_level_values("symbol")) == {"000001.SZ", "600000.SH"}
+    # 回到首个 universe：视图再次重注册，结果与首次一致
+    c = backend.query_bars(["000001.SZ"], "20240101", "20240131")
+    pd.testing.assert_frame_equal(a, c)
+
+
+def test_dividend_column_detection_cached(backend):
+    """列存在性经 _check_schema 缓存：通用表无 end_date/ann_date 列时
+    走值级归并，语义与直查 information_schema 一致。"""
+    cols = backend._table_column_names("div")
+    assert {"ex_date", "stk_div", "cash_div"} <= cols
+    assert not {"end_date", "ann_date"} & cols
+    # 缓存已在 _check_schema 填充（只读连接 schema 不可变）
+    assert "div" in backend._table_columns
+    div = backend.get_dividends_on_date("20240103")
+    assert div["000001.SZ"] == {"stk_div": 0.5, "cash_div": 1.0}
+
+
 # ── 扩展方法 ──
 
 
