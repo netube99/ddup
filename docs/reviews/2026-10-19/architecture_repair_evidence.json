@@ -1,0 +1,58 @@
+{
+  "live_gap": {
+    "calendar": [
+      "20240603",
+      "20240604",
+      "20240605"
+    ],
+    "actual_holding_days": 3,
+    "expected_holding_days": 3,
+    "actual_sell": [
+      "000001.SZ"
+    ],
+    "expected_sell": [
+      "000001.SZ"
+    ],
+    "contract_satisfied": true
+  },
+  "run_identity": {
+    "resolved_weights": [
+      1.0,
+      2.0
+    ],
+    "saved_config_equal": false,
+    "saved_config_keys": [
+      "_run_manifest",
+      "benchmark",
+      "initial_capital",
+      "max_positions"
+    ],
+    "desired_identity_distinguishes_specs": true,
+    "recorded_weights": [
+      1.0,
+      2.0
+    ],
+    "contract_satisfied": true
+  },
+  "breadth_work": {
+    "unique_input_rows": 12,
+    "materialized_rows_per_chunk": [
+      4,
+      8,
+      12
+    ],
+    "total_materialized_rows": 24,
+    "all_daily_values_equal_expected_10": true
+  },
+  "automatic_checks": {
+    "pytest_passed": 871,
+    "pytest_failed": 0,
+    "pytest_errors": 0,
+    "pytest_skipped": 0,
+    "pytest_seconds": 75.254,
+    "review_gate_done_full_exit": 0,
+    "ruff": "passed",
+    "anticorrupt": "passed",
+    "skill_sync": "passed"
+  }
+}

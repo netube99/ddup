@@ -46,7 +46,7 @@ flowchart TD
 | `corporate.adjust/apply_condition_rescale` | 用明确分红事件调整股数/成本/价格与 trailing 锚点 |
 | `limits/costs/slippage` | 精确涨跌停优先，费用闭包，固定 0.01 元 tick |
 | `stats.calculate_statistics` | 不读数据库的统计纯函数，输入账户/成交/持仓/基准 |
-| `database` | 多 run DuckDB、显式事务、事件与快照持久化 |
+| `database` | 多 run DuckDB、显式事务、事件与快照持久化；`engine` 在 `config_json` 附版本化运行清单 |
 | `types/constants` | 共享数据类与常量，不依赖业务模块 |
 
 架构强制规则和禁止恢复的旧模式见 [AGENTS](AGENTS.md)。
@@ -103,7 +103,7 @@ T+1 锁在当天撮合阶段生效；收盘决策时解锁不会产生当天第�
 | 交易域与因子域 | 交易域控制可见候选；factor_universe 可提供更宽截面，物化后再裁切；StockFilter 的逐日入场过滤不等于物化前逐日 PIT 裁切 |
 | 持仓上限 | max_positions 为预算和提示依据，不是强制持仓数拦截；策略自行控制 |
 | 公司行为 | 仅由分红表驱动，不用 adj_factor 跳变猜事件；税预扣与停牌除息限制见策略指南 |
-| 结果 | 多 run 累积；holdings 是共享终态快照，无 run_id、无每日历史；历史需重建 |
+| 结果 | 多 run 累积；新回测在 `config_json` 记录版本化声明/源码/模型/数据源身份，限制与旧格式见[结果指南](docs/results_analysis.md#schema)；holdings 是共享终态快照，无 run_id、无每日历史；历史需重建 |
 
 <a id="factor-design"></a>
 ## 因子供给为何分两路

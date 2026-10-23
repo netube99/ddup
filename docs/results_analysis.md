@@ -24,8 +24,27 @@ run_id 与 trade_log.id 用 sequence，允许不连续；SQL 查询始终限制 
 | sweep_results | sweep 附加：id、label、params_json、stats_json；没有 run_id 外键 |
 
 资金/价格 DOUBLE，日期与 JSON VARCHAR，ID/股数 BIGINT。
-status 为 running/completed/failed；config_json 保存运行配置（含覆盖后的资金/持仓数与
-模型追溯信息），不是完整源码、因子库和所有 YAML 顶层字段的可重放快照。
+status 为 running/completed/failed。新 run 的 `config_json` 保留历史兼容的平铺配置键
+（包括 CLI 覆盖后的 `initial_capital` / `max_positions`），并增加 `_run_manifest`：
+版本化记录生效引擎设置、因子规格/过滤规则/因子闭包、策略类与策略文件哈希、引擎文件
+哈希、Git commit、关键依赖版本、已加载模型契约和模型文件哈希，以及可识别的数据源身份。
+分析脚本仍可从 JSON 顶层读取旧配置键；manifest 是附加字段，不改变 runs 表结构。
+
+manifest 用排序 JSON 生成内容摘要。模型记录包含实际加载的 features、state features、
+scaler、变换方式及 meta 内容；数据源若提供 `snapshot_id` 会记录该标识。没有快照标识时，
+文件路径/大小/mtime（若后端暴露文件路径）只作为弱身份提示，manifest 标记 `identity_strength`
+为 `weak`；不会散列整个行情库。自定义后端未暴露来源时，数据源为 `unknown`。
+
+这些字段帮助区分运行声明和定位文件版本，但**不构成完整可重放快照**：Git commit 不包含
+工作区状态，策略文件哈希只覆盖策略类所在文件，引擎哈希不覆盖全部动态模块，数据快照也
+可能未知。旧 run 没有 `_run_manifest` 时按旧格式正常读取，但应视为追溯信息不完整；实盘
+衍生结果遵循账本自身格式，不使用本回测 manifest。
+
+清单序列化支持 JSON 基本值、字符串键 mapping、list/tuple、Path、日期/时间和可转为
+Python 标量的 NumPy 值。非有限浮点（NaN/Inf）、非字符串 mapping 键、其它对象会在写入
+run 行前 fail-fast；`_run_manifest` 是保留键，策略配置不得占用。旧实现把未知对象用
+`str()` 写入，因此这项边界更严格；遇到自定义配置对象应先转成明确的 JSON 值。
+
 holdings 每次初始化清空，只在 run 收尾写终态，不能用它查询某个历史 run 的逐日持仓。
 
 读侧用 database.connect_result_db(read_only=True)，不要用 init_backtest_db 打开分析库：

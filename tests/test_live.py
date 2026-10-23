@@ -15,8 +15,10 @@ import yaml
 
 import scripts.live as live_cli
 from btcore import database, types
+from btcore.backend import DataBackend
 from btcore.engine import Engine
 from btcore.provider import DataProvider
+from btcore.strategy import Strategy
 from btcore.strategy_loader import load_strategy
 from research.live import (
     LEDGER_SCHEMA_VERSION,
@@ -24,6 +26,7 @@ from research.live import (
     apply_fill,
     build_op_sheet,
     reconcile,
+    replay_ledger,
     run_signal,
     seed_opening,
     validate_fill_dates,
@@ -148,6 +151,194 @@ class TestSeedOpening:
         acc = types.Account(cash=50_000.0, initial_capital=60_000.0)
         seed_opening(acc, store, provider, START)
         assert acc.holdings["000001.SZ"].locked is True
+
+
+class TestReplayMissingBarDay:
+    def test_gap_day_advances_holding_and_clears_day_state_without_hooks(self, request):
+        days = ["20240603", "20240604", "20240605", "20240606"]
+        symbol = "000001.SZ"
+
+        class SparseBackend(DataBackend):
+            def get_calendar(self, start, end):
+                return [day for day in days if start <= day <= end]
+
+            def get_dividends_on_date(self, date_str):
+                if date_str == "20240604":
+                    return {symbol: {"stk_div": 0.1, "cash_div": 0.5}}
+                return {}
+
+            def query_bars(self, symbols, start, end, columns=None):
+                dates = [d for d in days if d != "20240604" and start <= d <= end]
+                if symbols is not None and symbol not in symbols:
+                    dates = []
+                index = pd.MultiIndex.from_tuples(
+                    [(d, symbol) for d in dates], names=["trade_date", "symbol"]
+                )
+                closes = [100.0 if d == days[-1] else 10.0 for d in dates]
+                frame = pd.DataFrame({
+                    "open": closes, "high": closes, "low": closes, "close": closes,
+                    "vol": [1000.0] * len(index), "adj_factor": [1.0] * len(index),
+                    "pre_close": closes, "up_limit": [110.0 if p == 100 else 11.0
+                                                         for p in closes],
+                    "down_limit": [90.0 if p == 100 else 9.0 for p in closes],
+                }, index=index)
+                return frame if columns is None else frame[columns]
+
+        class AgeExit(Strategy):
+            def __init__(self):
+                super().__init__({"benchmark": "", "initial_capital": 10_000})
+                self.hook_dates = {name: [] for name in
+                                   ("on_fills", "on_tick", "select", "calc_conditions")}
+                self.conditions_seen = []
+
+            def on_fills(self, trades, provider):
+                self.hook_dates["on_fills"].append(provider.get_as_of())
+
+            def on_tick(self, bars, snapshot, provider):
+                self.hook_dates["on_tick"].append(provider.get_as_of())
+                self._provider = provider
+                return None
+
+            def select(self, bars, snapshot, provider):
+                self.hook_dates["select"].append(provider.get_as_of())
+                self.conditions_seen.append(
+                    list(snapshot.holdings[symbol].conditions)
+                    if symbol in snapshot.holdings else []
+                )
+                return {
+                    "sell": [s for s, h in snapshot.holdings.items()
+                             if h.holding_days == 1 or h.holding_days >= 3]
+                }
+
+            def calc_conditions(self, symbol, entry_price, bar, holding_days):
+                self.hook_dates["calc_conditions"].append(
+                    self._provider.get_as_of() if hasattr(self, "_provider") else None
+                )
+                return [{"type": "STOP_LOSS", "price": 9.0}]
+
+        store = LedgerStore(":memory:")
+        request.addfinalizer(store.close)
+        store.init_account(days[0], 9_000.0, 10_000.0)
+        store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
+                          reason="OPENING", created_at=NOW)
+        store.conn.commit()
+        strategy = AgeExit()
+        engine, calendar = run_signal(
+            strategy, DataProvider(SparseBackend()), store, days[2]
+        )
+
+        assert calendar == days[:3]
+        assert engine.account.holdings[symbol].holding_days == 3
+        assert engine.pending_actions["sell"] == [symbol]
+        assert all(dates == days[:1] + days[2:3]
+                   for dates in strategy.hook_dates.values())
+        assert strategy.conditions_seen[-1] == []
+        assert engine.account.holdings[symbol].shares == 110
+        assert engine.account.cash == pytest.approx(9_040.0)
+        corporate_sides = store.conn.execute(
+            "SELECT side FROM trade_log WHERE side IN ('DIV', 'STK_DIV')"
+        ).fetchall()
+        assert {side for (side,) in corporate_sides} == {"DIV", "STK_DIV"}
+
+        # 短窗和含极端未来价格的长窗共有前缀，账户日状态必须相同。
+        long_store = LedgerStore(":memory:")
+        request.addfinalizer(long_store.close)
+        long_store.init_account(days[0], 9_000.0, 10_000.0)
+        long_store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
+                               reason="OPENING", created_at=NOW)
+        long_store.conn.commit()
+        long_strategy = AgeExit()
+        long_provider = DataProvider(SparseBackend())
+        long_engine = Engine(long_strategy, long_provider, initial_capital=10_000.0)
+        long_engine.account.cash = 9_000.0
+        seed_opening(long_engine.account, long_store, long_provider, days[0])
+        long_calendar = long_engine.prepare(days[0], days[-1])
+        long_daily, _ = replay_ledger(
+            long_engine, long_provider, long_store, long_calendar,
+            run_decisions=True, collect=True,
+        )
+        short_daily = store.conn.execute(
+            "SELECT date, cash, total_value, n_holdings FROM account_daily "
+            "WHERE run_id = 1 ORDER BY date"
+        ).fetchall()
+        long_prefix = [tuple(row[k] for k in
+                             ("date", "cash", "total_value", "n_holdings"))
+                       for row in long_daily[:3]]
+        assert [row[0] for row in long_prefix] == [row[0] for row in short_daily]
+        for long_row, short_row in zip(long_prefix, short_daily):
+            assert long_row[1:] == pytest.approx(short_row[1:])
+        assert engine.account.cash + sum(
+            h.shares * h.last_price for h in engine.account.holdings.values()
+        ) == pytest.approx(engine.account.total_value)
+
+        # 单独回放到缺 bar 日，直接观察生命周期推进和当日状态清理。
+        gap_store = LedgerStore(":memory:")
+        request.addfinalizer(gap_store.close)
+        gap_store.init_account(days[0], 9_000.0, 10_000.0)
+        gap_store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
+                              reason="OPENING", created_at=NOW)
+        gap_store.conn.commit()
+        gap_strategy = AgeExit()
+        gap_provider = DataProvider(SparseBackend())
+        gap_engine = Engine(gap_strategy, gap_provider, initial_capital=10_000.0)
+        gap_engine.account.cash = 9_000.0
+        seed_opening(gap_engine.account, gap_store, gap_provider, days[0])
+        gap_calendar = gap_engine.prepare(days[0], days[1])
+        gap_daily, _ = replay_ledger(
+            gap_engine, gap_provider, gap_store, gap_calendar,
+            run_decisions=True, collect=True,
+        )
+        gap_holding = gap_engine.account.holdings[symbol]
+        assert gap_holding.holding_days == 2
+        assert gap_holding.locked is False
+        assert gap_holding.conditions == []
+        assert gap_engine.pending_actions == {"buy": [], "sell": []}
+        assert gap_strategy.hook_dates == {
+            name: [days[0]] for name in gap_strategy.hook_dates
+        }
+        assert gap_daily[-1]["cash"] + sum(
+            h.shares * h.last_price for h in gap_engine.account.holdings.values()
+        ) == pytest.approx(gap_daily[-1]["total_value"])
+        previous_total = 10_000.0
+        for row in gap_daily:
+            assert row["daily_pnl"] == pytest.approx(
+                row["total_value"] - previous_total
+            )
+            previous_total = row["total_value"]
+        assert gap_daily[-1]["total_value"] == pytest.approx(10_040.0)
+
+        no_decision_store = LedgerStore(":memory:")
+        request.addfinalizer(no_decision_store.close)
+        no_decision_store.init_account(days[0], 9_000.0, 10_000.0)
+        no_decision_store.append_fill(
+            days[0], symbol, "OPENING", price=10.0, shares=100,
+            reason="OPENING", created_at=NOW,
+        )
+        no_decision_store.conn.commit()
+        no_decision_strategy = AgeExit()
+        no_decision_provider = DataProvider(SparseBackend())
+        no_decision_engine = Engine(
+            no_decision_strategy, no_decision_provider, initial_capital=10_000.0
+        )
+        no_decision_engine.account.cash = 9_000.0
+        seed_opening(no_decision_engine.account, no_decision_store,
+                     no_decision_provider, days[0])
+        no_decision_calendar = no_decision_engine.prepare(days[0], days[0])
+        no_decision_holding = no_decision_engine.account.holdings[symbol]
+        no_decision_holding.holding_days = 7
+        no_decision_holding.locked = True
+        no_decision_holding.conditions = [{"type": "STOP_LOSS", "price": 9.0}]
+        no_decision_engine.pending_actions = {"buy": [symbol], "sell": [symbol]}
+        replay_ledger(
+            no_decision_engine, no_decision_provider, no_decision_store,
+            no_decision_calendar, run_decisions=False,
+        )
+        assert no_decision_holding.holding_days == 7
+        assert no_decision_holding.locked is True
+        assert no_decision_holding.conditions == [{"type": "STOP_LOSS", "price": 9.0}]
+        assert no_decision_engine.pending_actions == {"buy": [symbol], "sell": [symbol]}
+        assert all(not dates for dates in no_decision_strategy.hook_dates.values())
+
 
 
 class TestReconcile:

@@ -11,7 +11,9 @@ description: 设计和执行 ddup 对照回测、参数扫描及样本外验证�
 ## 执行
 
 1. 记录 commit/diff、完整策略/因子配置、模型哈希、数据来源/窗口与费用口径。
-   runs.config_json 不等于完整配置快照。
+   新回测可从 [运行清单](../../../docs/results_analysis.md#schema) 的
+   `runs.config_json._run_manifest` 取得声明和内容身份；检查数据版本是已知、弱标识还是
+   未知。清单不等于完整可重放快照，旧 run 缺清单时另行固定输入证据。
 2. 单次实验用[run](../../../docs/cli_and_research.md#run)，扫描用
    [sweep](../../../docs/cli_and_research.md#sweep)。先用 --dry-run 检查组合数与字段路径。
 3. run 必须显式 --out 才落盘。共享 DuckDB 不并发写；sweep 本身串行，

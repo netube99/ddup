@@ -1,0 +1,47 @@
+meta:
+  date: '2026-10-19'
+  commit: 9d258bad87c8d25365b40a453270154f602c68c0
+  scope: 架构评估中新复现的实盘日生命周期缺陷及两项设计建议；非全仓计算审计
+findings:
+  - id: ARCH-LIVE-01
+    severity: P1
+    rule: AGENTS.md 无 bar 契约：加载池整日无 bar 时持仓交易日计数与解锁照常，清空单日订单和持仓条件单，不调用决策钩子
+    file: research/live.py
+    line: 579
+    note: >-
+      触发：run_signal 回放 20240603/04/05 三个交易日，04 日加载池无 bar，
+      03 日期初持有 000001.SZ 100 股，策略在 holding_days>=3 时卖出。
+      复现：.venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py 的 live_gap。
+      实际：05 日 holding_days=2、sell=[]；独立期望：初始计数 0 加三个交易日=3，
+      sell=[000001.SZ]。replay_ledger 用 bars_dict 非空限制 compute_pending，跳过其
+      无行情日计日/解锁/清单逻辑，导致恢复交易后的操作单漏掉到期退出。
+      影响真实账本信号回放支持路径；探针仅使用内存账本，未核验真实账户。
+      与已关闭 F-ENG-02 同类但入口不同：Engine.run 的缺行情处理已修复，本项位于实盘回放。
+  - id: ARCH-RUN-01
+    severity: P3
+    rule: ARCHITECTURE.md 模型与账本复用要求固定配置、计算域和数据版本；运行追溯的维护建议，不改变当前接口契约
+    file: btcore/engine.py
+    line: 447
+    note: >-
+      触发：同一策略类、同一 config，通过 build_strategy 分别设置 probe 因子权重 1 和 2。
+      复现：.venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py 的 run_identity。
+      实际：解析后的权重分别为 1/2，两次 runs.config_json 完全相同，只有 benchmark、
+      initial_capital、max_positions；顶层 factor_specs/filter_rules/因子定义不在 config 中。
+      独立设计期望：完整运行身份至少能区分不同生效权重，而现记录无法区分。
+      模型已有 artifact_sha256 校验与摘要，应在其基础上补全 resolved 配置、因子闭包、
+      策略源码/代码版本、模型 meta 与数据快照身份。影响复现实验和解释历史结果，
+      本探针不声称两个不同权重必然产生不同交易，也未发现当次计算错误。
+  - id: ARCH-PERF-01
+    severity: P3
+    rule: ARCHITECTURE.md 因子供给明确保留完整前缀以保证计算一致；基于该取舍的性能维护建议
+    file: btcore/factors/library.py
+    line: 407
+    note: >-
+      触发：12 个交易日、单标的常数收盘价 10、mean(close_hfq)、chunk_days=4。
+      复现：.venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py 的 breadth_work。
+      实际：compute_factors 每块输入 4/8/12 行，共处理 24 行，12 日结果均正确为 10。
+      独立工作量对照：原始数据仅 12 行；固定每块 b 行、共 k 块时重复前缀输入量为
+      b*k*(k+1)/2（不含 warmup），不是单遍 b*k。内存仍随历史增长。
+      当前实现为保证停牌样本与滚动浮点边界一致的显式取舍，不属计算缺陷。
+      建议先测量真实耗时/峰值内存，再评估版本化物化缓存或具备等价性证据的增量算子，
+      不直接截断历史或改成 float32。未做真实规模性能基准，不能推断具体加速比。

@@ -572,14 +572,13 @@ def replay_ledger(engine: Engine, provider, store: LedgerStore,
                 day_trades.append(trade)
                 trade_rows.append(trade)
 
-        if bars_dict or price_fallback:
-            value_account(engine.account, bars_dict,
-                          fallback_closes=(price_fallback or {}).get(today))
+        value_account(engine.account, bars_dict,
+                      fallback_closes=(price_fallback or {}).get(today))
 
-        if run_decisions and bars_dict:
+        if run_decisions:
             # 策略决策层：on_fills(当日真实成交) → on_tick → select →
-            # calc_conditions；末日之前的 pending_actions 全部丢弃——
-            # 真实世界已按账本发生
+            # calc_conditions；Engine.compute_pending 对无行情日只推进持仓
+            # 生命周期并清空当日状态，不调用策略钩子。
             engine.compute_pending(today, bars_dict, day_trades)
 
         if collect:

@@ -1,6 +1,5 @@
 import copy
 import difflib
-import json
 import logging
 import math
 from collections import Counter
@@ -8,12 +7,19 @@ from collections import Counter
 import pandas as pd
 
 from btcore import corporate, database, limits, match, stats, types
+from btcore.constants import (
+    COMMISSION_RATE,
+    MIN_COMMISSION,
+    STAMP_TAX_RATE,
+    TRANSFER_FEE_RATE,
+)
 from btcore.costs import make_costs_fn
 from btcore.factors import plan as factor_plan
 from btcore.filters import audit_loss_coverage, filter_required_columns
 from btcore.ml import runtime as ml_runtime
 from btcore.ml.spec import SCOPE_HOLDING, SCOPE_PANEL
 from btcore.provider import DataProvider, benchmark_price_column
+from btcore.run_manifest import serialize_run_config
 from btcore.slippage import apply_slippage
 from btcore.types import bar_get
 
@@ -394,6 +400,21 @@ class Engine:
                 "（按非 full 处理）", ml_log,
             )
         self._ml_log_full = ml_log is not None and str(ml_log).lower() == "full"
+        self._run_effective_config = {
+            "initial_capital": self.initial_capital,
+            "max_positions": self.max_positions,
+            "benchmark": self.benchmark,
+            "execution_price": self._execution_price,
+            "slippage_ticks": self._slippage_ticks,
+            "condition_slippage_ticks": self.condition_slippage_ticks,
+            "order_volume_ratio": self.order_volume_ratio,
+            "quiet_skips": self.quiet_skips,
+            "ml_log": ml_log,
+            "commission_rate": float(config.get("commission_rate", COMMISSION_RATE)),
+            "min_commission": float(config.get("min_commission", MIN_COMMISSION)),
+            "stamp_tax_rate": float(config.get("stamp_tax_rate", STAMP_TAX_RATE)),
+            "transfer_fee_rate": float(config.get("transfer_fee_rate", TRANSFER_FEE_RATE)),
+        }
         # run() 里由 write_run 赋真实 run_id；直接调 step() 的测试用 0
         self.run_id = 0
         self.bars_df: pd.DataFrame | None = None
@@ -430,6 +451,14 @@ class Engine:
         self._warn_in_sample_overlap(start, end)
         conn = database.init_backtest_db(self.db_path)
         try:
+            config_json = serialize_run_config(
+                self.strategy,
+                self.initial_capital,
+                self.max_positions,
+                self.benchmark,
+                self.provider.backend if self.provider is not None else None,
+                effective_config=self._run_effective_config,
+            )
             calendar = self.prepare(start, end)
 
             # runs 行独立事务提交: 后续 step 回滚不会把它带走,
@@ -442,14 +471,8 @@ class Engine:
                     start_date=start,
                     end_date=end,
                     initial_capital=self.initial_capital,
-                    # 落库生效值：CLI 覆盖（--capital 等）后 runs 表的
-                    # initial_capital 列与 config_json 保持一致
-                    config_json=json.dumps(
-                        {**self.strategy.config,
-                         "initial_capital": self.initial_capital,
-                         "max_positions": self.max_positions},
-                        ensure_ascii=False, default=str,
-                    ),
+                    # 保留旧 config_json 的平铺键，并附加版本化声明清单。
+                    config_json=config_json,
                     status="running",
                 )
 

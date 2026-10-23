@@ -505,6 +505,27 @@ open:
     flag 均真实存在（scripts/live.py:460、scripts/live_e2e_check.py:30），故当前无失实声明，仅覆盖面窄于文字承诺。影响：未来正文
     flag 改名可能漏检。
   opened: '2026-10-18'
+- id: ARCH-PERF-01
+  severity: P3
+  rule: ARCHITECTURE.md 因子供给明确保留完整前缀以保证计算一致；基于该取舍的性能维护建议
+  file: btcore/factors/library.py
+  line: 407
+  note: 触发：12 个交易日、单标的常数收盘价 10、mean(close_hfq)、chunk_days=4。 复现：.venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py
+    的 breadth_work。 实际：compute_factors 每块输入 4/8/12 行，共处理 24 行，12 日结果均正确为 10。 独立工作量对照：原始数据仅
+    12 行；固定每块 b 行、共 k 块时重复前缀输入量为 b*k*(k+1)/2（不含 warmup），不是单遍 b*k。内存仍随历史增长。 当前实现为保证停牌样本与滚动浮点边界一致的显式取舍，不属计算缺陷。
+    建议先测量真实耗时/峰值内存，再评估版本化物化缓存或具备等价性证据的增量算子， 不直接截断历史或改成 float32。未做真实规模性能基准，不能推断具体加速比。
+  opened: '2026-10-19'
+- id: F-BKD-04
+  severity: P3
+  rule: btcore/provider.py get_benchmark_returns 的 PERF-07 缓存注释（『逐日滑窗调用每窗回源一次，单标的索引查询
+    成本可忽略』）——条件触发的维护建议
+  file: btcore/provider.py
+  line: 133
+  note: 触发：策略逐日调用 get_benchmark_trend/get_benchmark_returns（缓存键含滑窗起点，逐日必变，缓存不命中，每天回源一次
+    SQL + pct_change 重算）。当前内核与全部策略均无逐日消费者，属投机性优化，故不修。条件触发：当出现逐日消费基准的
+    策略时，仿 provider.attach_bars 模式一次预载整个回测区间基准 frame，逐日本地切片；同时消除 _bench_cache 随回测
+    天数无界增长的条目。
+  opened: '2026-10-24'
 closed:
 - id: F-FAC-01
   severity: P1
@@ -517,6 +538,66 @@ closed:
     (trade_date, symbol) 逐行 reindex 广度面板值；回归测试 tests/test_review_factors.py 两例 RED→GREEN。
   opened: '2026-09-13'
   resolved: '2026-09-13'
+- id: F-BKD-01
+  severity: P3
+  rule: btcore/generic_sql.py query_bars：表单已经 _compile_form 编译缓存，SQL 文本生成与
+    symbols 视图却每次重建的不一致；用户授权的三项打磨之一
+  file: btcore/generic_sql.py
+  line: 277
+  note: 修复：SQL 文本提取为模块级纯函数 _build_query_sql，按（被引表、列映射、有无 symbols 过滤）经
+    _cached_query_sql 缓存（表单进程内不可变，dict 迭代序稳定）；_ddup_symbols 视图跨调用复用——同 universe
+    连续查询跳过 register/unregister 与 DataFrame 重建，换 universe 时重注册，close 时统一注销（不再每查 finally
+    unregister）。语义不变：同参数重复查询结果逐元素一致。验收：tests/test_generic_sql.py 新增
+    test_query_bars_sql_cached_and_consistent / test_query_bars_symbols_view_reuse_across_universes，
+    连同既有 74 例（含 test_column_pruning/test_provider/test_foreign_backend）全绿。真实库（21GB market.duckdb）
+    micro-bench：沪深300 成分同列集 4 块季度查询×5 轮，旧中位 0.268s → 新 0.245s（+8.6%）；池交替场景持平
+    （噪声内，±5%）。SQL 执行仍是绝对大头，此为小头整洁性收益，非结构性加速。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-BKD-02
+  severity: P3
+  rule: btcore/generic_sql.py close() 生命周期；research/cli_common.py:68『调用方负责关闭：
+    provider.backend.close()』文档约定——无协议支持，靠调用方自觉，易泄漏
+  file: btcore/generic_sql.py
+  line: 252
+  note: 修复：补 __enter__/__exit__（退出调 close），close 同时注销复用中的 _ddup_symbols 视图并保持幂等
+    （DuckDBPyConnection.close 可重入）。with 语法（with TushareBackend(...) as backend）成为合法写法。
+    验收：tests/test_generic_sql.py::test_context_manager_closes_connection——with 内可查询，退出后连接不可执行
+    （duckdb.Error），二次 close 无副作用。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-BKD-03
+  severity: P3
+  rule: btcore/generic_sql.py _fetch_dividend_rows 每次构建分红索引（含 PERF-08 窗口外
+    单日回表）都重查 information_schema 判断 end_date/ann_date 列存在性
+  file: btcore/generic_sql.py
+  line: 401
+  note: 修复：_check_schema 校验列时顺带缓存各表物理列名集合（原始大小写，与旧回源查询行为一致），
+    _table_column_names 统一取用；只读连接下 schema 不可变，缓存无失效问题，表不在校验集时回源一次并缓存
+    （防御路径，分红表必在表单引用中）。验收：tests/test_generic_sql.py::test_dividend_column_detection_cached
+    （列集合正确、通用表无事件列走值级归并、缓存已填充）；窗口外回表既有测试
+    test_dividends_outside_window_fall_back_to_query 仍绿。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-BKD-05
+  severity: P3
+  rule: 数据对接层异构上游抽象缺口（用户授权的功能增强）：填表法机械被焊死在单 DuckDB
+    文件路径，SQLite/CSV/parquet 上游被迫走手写 ABC 重复拼表逻辑
+  file: btcore/generic_sql.py
+  line: 245
+  note: 修复：GenericSQLBackend 构造参数二选一 db_path/conn（互斥 fail-fast），conn 注入连接归调用方持有
+    （_owns_conn=False 时 close 只注销内部视图不关连接）；_parse_loc 改 rpartition 支持三段式 库名.表名.字段名
+    （ATTACH 场景，两段式行为不变）；新增 _qt 表名分段引用（实验验证：整体引号的限定表名是单标识符被 DuckDB
+    拒绝，必须分段引用）；_check_schema/_check_key_types/_table_column_names 按 (table_catalog,
+    table_name) 归属校验（实验验证：文件库 current_database 与 table_catalog 一致，无前缀表限定当前库，
+    同名表跨 ATTACH 库不混淆）；全部 FROM 调用点换 _qt。验收：tests/test_backend_attach.py 7 例——
+    sqlite ATTACH 三段式拼表/日历/分红、列裁剪、CSV 脏数据清洗层（printf 补零/strftime 归一/缺失涨跌停 NULL）、
+    脏键（BIGINT/DATE）被初始化期拒绝、注入连接不被 close、db_path 路径契约不变；连同既有套件全绿。
+    docs/backend_guide.md 新增 §2.3 两份 recipe（SQLite ATTACH / CSV 清洗层），backend.py / generic_sql.py
+    docstring 同步；check_skill_sync 通过。键校验在异构场景的把关为预期特性：read_csv 推断的 BIGINT/DATE 键被
+    fail-fast 拒绝，逼清洗层显式 cast，不产生静默错算。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
 - id: F-FAC-02
   severity: P2
   rule: F-BRD-03 口径（btcore/factors/library.py 注释与 tests/test_factor_library.py::test_group_mean_values_match_hand_compute：『group_mean
@@ -1916,3 +1997,29 @@ closed:
     覆盖现金+送转、sell/target/条件订单失效、恢复交易与截断一致；其中 9 例旧实现失败，新实现通过。整窗无行情仍 ValueError 且 run=failed，现有加固测试通过。
   opened: '2026-09-13'
   resolved: '2026-10-12'
+- id: ARCH-LIVE-01
+  severity: P1
+  rule: AGENTS.md 无bar日公司行为、结算、计日与解锁照常；不调用决策钩子，清空单日订单和持仓条件单
+  file: research/live.py
+  line: 575
+  note: 修复并定向验收：replay_ledger 每个交易日调用共享 value_account；run_decisions=True 时每天调用 compute_pending，空行情分支只推进生命周期和清理状态。
+    tests/test_live.py::TestReplayMissingBarDay 的旧实现首先失败于3个交易日仅计2天； 补强检查还复现缺行情日公司行为后total_value仍10000，独立期望
+    cash9040 + shares110 * last_price(10/1.1)=10040。 修后计数3、到期卖单存在；空行情当日解锁、pending/条件单清空、四类决策钩子不调用；
+    股数110、现金9040、总资产10040、当日盈亏40，保留缺pre_close既有告警与价格口径。 短窗与未来极端价格长窗前缀一致，run_decisions=False保留不决策语义。
+    命令：.venv/bin/pytest -q tests/test_live.py（67 passed）， .venv/bin/pytest -q tests/test_review_calculation_boundaries.py（28
+    passed）。 主代理重跑 scripts/diagnostics/architecture_evidence_20261019.py 确认live_gap契约满足。
+    历史实盘衍生结果如受缺行情影响需在副本重放；真实券商账本未验证，回测计算未改动。
+  opened: '2026-10-19'
+  resolved: '2026-10-19'
+- id: ARCH-RUN-01
+  severity: P3
+  rule: ARCHITECTURE.md 固定配置、计算域和数据版本；用户明确授权补全运行追溯
+  file: btcore/engine.py
+  line: 454
+  note: 修复：runs.config_json 保留平铺配置和资金/仓位覆盖值，新增版本化 _run_manifest， 在prepare/策略钩子前捕获声明；记录已解析执行设置、因子规格/过滤规则/闭包、
+    策略文件和引擎文件哈希、Git commit/依赖版本、模型文件与完整已加载meta身份、 后端数据来源及明确weak/unknown/provider_snapshot状态。不散列大行情库，Git缺失软回退。
+    初审探针实际权重1/2而config_json相同；修后主代理运行 .venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py，
+    recorded_weights=[1.0,2.0]、saved_config_equal=false、contract_satisfied=true。 tests/test_run_manifest.py
+    覆盖Engine持久化、配置覆盖/构造后变更、声明变更、 模型meta、规范化、无Git、数据身份与旧结果report读回。 清单不是完整可重放快照：不覆盖全部动态模块或任意策略运行态，旧run/实盘衍生run无清单。
+  opened: '2026-10-19'
+  resolved: '2026-10-19'

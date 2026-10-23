@@ -1,0 +1,39 @@
+meta:
+  date: '2026-10-19'
+  commit: 9d258bad87c8d25365b40a453270154f602c68c0
+  scope: 用户授权问题1/2的修复diff与直接调用链，保留初审发现文件
+findings:
+  - id: ARCH-LIVE-01
+    severity: P1
+    rule: AGENTS.md 无bar日公司行为、结算、计日与解锁照常；不调用决策钩子，清空单日订单和持仓条件单
+    file: research/live.py
+    line: 575
+    note: >-
+      修复并定向验收：replay_ledger 每个交易日调用共享 value_account；run_decisions=True
+      时每天调用 compute_pending，空行情分支只推进生命周期和清理状态。
+      tests/test_live.py::TestReplayMissingBarDay 的旧实现首先失败于3个交易日仅计2天；
+      补强检查还复现缺行情日公司行为后total_value仍10000，独立期望
+      cash9040 + shares110 * last_price(10/1.1)=10040。
+      修后计数3、到期卖单存在；空行情当日解锁、pending/条件单清空、四类决策钩子不调用；
+      股数110、现金9040、总资产10040、当日盈亏40，保留缺pre_close既有告警与价格口径。
+      短窗与未来极端价格长窗前缀一致，run_decisions=False保留不决策语义。
+      命令：.venv/bin/pytest -q tests/test_live.py（67 passed），
+      .venv/bin/pytest -q tests/test_review_calculation_boundaries.py（28 passed）。
+      主代理重跑 scripts/diagnostics/architecture_evidence_20261019.py 确认live_gap契约满足。
+      历史实盘衍生结果如受缺行情影响需在副本重放；真实券商账本未验证，回测计算未改动。
+  - id: ARCH-RUN-01
+    severity: P3
+    rule: ARCHITECTURE.md 固定配置、计算域和数据版本；用户明确授权补全运行追溯
+    file: btcore/engine.py
+    line: 454
+    note: >-
+      修复：runs.config_json 保留平铺配置和资金/仓位覆盖值，新增版本化 _run_manifest，
+      在prepare/策略钩子前捕获声明；记录已解析执行设置、因子规格/过滤规则/闭包、
+      策略文件和引擎文件哈希、Git commit/依赖版本、模型文件与完整已加载meta身份、
+      后端数据来源及明确weak/unknown/provider_snapshot状态。不散列大行情库，Git缺失软回退。
+      初审探针实际权重1/2而config_json相同；修后主代理运行
+      .venv/bin/python scripts/diagnostics/architecture_evidence_20261019.py，
+      recorded_weights=[1.0,2.0]、saved_config_equal=false、contract_satisfied=true。
+      tests/test_run_manifest.py 覆盖Engine持久化、配置覆盖/构造后变更、声明变更、
+      模型meta、规范化、无Git、数据身份与旧结果report读回。
+      清单不是完整可重放快照：不覆盖全部动态模块或任意策略运行态，旧run/实盘衍生run无清单。
