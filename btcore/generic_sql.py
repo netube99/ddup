@@ -126,6 +126,43 @@ def connect_market_db(db_path: str) -> duckdb.DuckDBPyConnection:
     ) from last_exc
 
 
+def attach_readonly(
+    conn: duckdb.DuckDBPyConnection, db_path: str, alias: str
+) -> None:
+    """只读 ATTACH 一个 DuckDB 文件到已有连接（上游维护持写锁时短重试）。
+
+    与 connect_market_db 同一套锁冲突判定；供 adapter 在注入连接上挂载
+    行情库后再回到 GenericSQLBackend（如 adapters/tushare.py 的
+    事件对齐 VIEW 方案）。ATTACH 不支持参数绑定，路径单引号双写转义。
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"行情数据库不存在: {db_path}")
+    assert_duckdb_file(db_path, "行情库")
+    safe_path = db_path.replace("'", "''")
+    sql = f"ATTACH '{safe_path}' AS {_q(alias)} (TYPE DUCKDB, READ_ONLY)"
+    last_exc: Exception | None = None
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            conn.execute(sql)
+            return
+        except duckdb.Error as exc:
+            last_exc = exc
+            if not _is_lock_conflict(exc):
+                raise RuntimeError(f"无法只读挂载行情库 {db_path}: {exc}") from exc
+            if attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    "只读挂载 %s 失败（%s），%.0fs 后重试 %d/%d",
+                    db_path, exc, _LOCK_RETRY_SECONDS,
+                    attempt + 1, _LOCK_RETRY_ATTEMPTS - 1,
+                )
+                time.sleep(_LOCK_RETRY_SECONDS)
+    raise RuntimeError(
+        f"无法只读挂载行情库 {db_path}: {last_exc}。"
+        "DuckDB 单写者模型下，上游维护/转换进程持写锁时读取会失败；"
+        "请等待上游维护完成（或让上游先 CHECKPOINT 释放）后重试"
+    ) from last_exc
+
+
 def _empty_panel() -> pd.DataFrame:
     idx = pd.MultiIndex.from_arrays([[], []], names=["trade_date", "symbol"])
     return pd.DataFrame(index=idx)

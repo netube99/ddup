@@ -377,9 +377,17 @@ FROM read_csv('cal.csv', header=true);
 非交易日或盘后时，须定义何时可进入 T 日收盘决策。YoY 等跨季度指标也在数据层准备。
 
 事件型列若只记录事件当日，其余日为 NaN；“未发生”与“数据缺失”须区分。
-`tables: {repurchase: {date: "ann_date"}}` 只覆盖日期列名，不会前移公告或填充缺口。
-一对多事件先按明确规则聚合为日频唯一键，再接入，避免外连接放大行数。当前模板使用
-`stk_holdertrade_agg` 与 `stk_holdernumber_agg` 等 VIEW 完成这种聚合。
+`tables: {某表: {date: "ann_date"}}` 只覆盖日期列名，不会对齐非交易日公告
+或填充缺口。一对多事件先按明确规则聚合为日频唯一键，再接入，避免外连接
+放大行数。tushare 模板对公告日表（回购/增减持/股东人数/质押）的做法：内存
+库只读挂载行情库，用 `ddup_*_daily` 对齐 VIEW 把公告日映射到下一开市日
+（开市日公告不变）并按表口径合并同日多条，再以三段式
+`memory.ddup_repurchase_daily.amount` 接入——见 `adapters/tushare.py` 模块头。
+
+两仓分界原则（上游镜像仓 × 本仓接入层）：无状态对齐/聚合（公告日→下一
+开市日、同日合并）归本仓 adapter 对齐 VIEW；有状态日频物化（前向携带、
+过期、退出事件，如 `pension_float_daily`）归上游 refresh 脚本——前者每次
+preload 只算一次不痛，后者需要物化性能与状态语义。新接事件表按此决策。
 
 ### 7.3 完全自定义数据源
 

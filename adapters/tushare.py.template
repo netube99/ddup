@@ -2,6 +2,12 @@
 # adapters/tushare.py 是被 .gitignore 排除的真实实现，也是表单的**唯一事实源**：
 # 表引用、extra_fields、tables 特殊说明的增删改一律以 adapters/tushare.py 为准，
 # 修改后需回写本模板（scripts/check_skill_sync.py 会校验关键事实）。
+#
+# ⚠️ 公告日事件表（回购/增减持/股东人数/质押等 ann_date 键表）：
+# 不得裸接 {"date": "ann_date"}——周末公告行会混进键外并集面板，杀掉同标的
+# ts 因子窗口（F-FAC-06）。真实实现用 ddup_*_daily 对齐 VIEW（公告日→下一
+# 开市日 + 同日合并，含增减持按 in_de 带符号），经内存库只读 ATTACH + USE
+# 构建，见 backend_guide §7.2 与真实实现模块头。
 import os
 
 from btcore.generic_sql import GenericSQLBackend
@@ -71,6 +77,10 @@ TUSHARE_FORM = {
         # -- 现金分红事件（dividend_grid VIEW：ex_date 作 trade_date，仅除息日有值；
         #    sum 计数 = 滚动窗口分红次数，股息稳定性因子；与契约 dividend_cash_div 同源）--
         # "div_cash": "dividend_grid.cash_div",
+
+        # -- 公告日事件表（回购/增减持/股东人数/质押）：必须先经对齐 VIEW
+        #    （公告日→下一开市日 + 同日合并）再接入，禁止裸 ann_date 直连
+        #    （F-FAC-06；真实实现 ddup_*_daily 方案见模块头注释与 §7.2）--
     },
 
     # ══ 表的特殊说明 ══
@@ -83,7 +93,12 @@ TUSHARE_FORM = {
 
 
 class TushareBackend(GenericSQLBackend):
-    """tushare 库后端。"""
+    """tushare 库后端（骨架：直连文件库起步）。
+
+    真实实现另含事件对齐 VIEW 层（内存库只读 ATTACH + ddup_*_daily，
+    F-FAC-06），需要公告日事件表时参照真实实现或 backend_guide §2.3 连接
+    注入方案接入。
+    """
 
     def __init__(self, db_path: str = _DEFAULT_DB_PATH):
         super().__init__(TUSHARE_FORM, db_path)

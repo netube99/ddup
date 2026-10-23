@@ -6,6 +6,27 @@
 meta:
   last_full_audit: '2026-10-12'
 open:
+- id: F-FAC-07
+  severity: P3
+  rule: btcore/factors/library.py compute_factors『work = df.copy()』深拷贝；与
+    compute_breadth 分块路径叠加的内存放大维护建议
+  file: btcore/factors/library.py
+  line: 118
+  note: 触发：compute_breadth 每块已持 carry+base 两个面板，compute_factors 再深拷贝一次 → 峰值约
+    2× 面板内存（全市场×多年研究域下 GB 级）。_eval_named 只往 work 写新列（不覆写已有列），
+    copy(deep=False) 语义等价且省一半峰值；需回归确认无原地覆写路径后可改。与 ARCH-PERF-01 同域
+    （carry 线性增长）但独立可修。未做真实规模内存 profile，不推断具体降幅。
+  opened: '2026-10-24'
+- id: F-FAC-08
+  severity: P3
+  rule: btcore/factors/ops.py 闭式矩（cov = E[xy] − E[x]E[y]）的数值精度边界文档化建议
+  file: btcore/factors/ops.py
+  line: 80
+  note: 触发：对原始量纲大数列（amount 千元级、total_mv 万元级，E[x²] ~1e12）直接 corr/beta/resid_std
+    时灾难性消除使有效精度降至 ~4-5 位。现役库暴露为零（grep 验证 corr/beta/resid_std 全部作用于
+    roc 收益率 ~0.01 量纲或 idx_ret），属未来用户易踩。建议 factor_library.md 算子表加一句『对大数列
+    先 rank/zscore/roc 变换再回归』；或实现侧先减列均值再矩展开。不改数值行为，不阻塞。
+  opened: '2026-10-24'
 - id: F-FAC-03
   severity: P3
   rule: docs/factor_library.md 原§8:『where 的表达式规则与 expr 完全一致：纯表达式或算子表达式均可』
@@ -527,6 +548,41 @@ open:
     天数无界增长的条目。
   opened: '2026-10-24'
 closed:
+- id: F-FAC-06
+  severity: P1
+  rule: docs/backend_guide.md §7.2『公告在非交易日或盘后时，须定义何时可进入 T 日收盘决策』+
+    factors/library.yaml 现役因子消费（holder_num / pledge_risk / rep_amount 类 / insider_chg_z）
+  file: adapters/tushare.py
+  line: 22
+  note: 触发：ann_date 对齐的四张事件表存在非交易日行（真实库实测 2026-10-24：repurchase 8229/62274 ≈13%、
+    stk_holdertrade 19682/287078 ≈7%、stk_holdernumber 54631/472654 ≈12%、pledge_detail
+    18626/89222 ≈21% 的行 ann_date 不在 SSE 开市日）。复现一（SQL）：SELECT SUM(ann_date NOT IN (SELECT cal_date
+    FROM trade_cal WHERE is_open=1)) FROM repurchase。复现二（最小面板）：(交易日, S1) 两行 close=10/11 后插入
+    (周六公告行, S1) close=NaN，btcore.factors.ops._ts_ma(close, 3) 从混入点起连续 NaN 直到混入行滑出窗口
+    （groupby.rolling 默认 min_periods=窗口，窗口内任一 NaN 杀值；且窗口按行数计，混入行挤掉一个真实交易日样本）。
+    影响链：因子闭包引用 rep_amount/holder_num/pledge_*/insider_chg_* 任一列 → query_bars 键外并集把非交易日行
+    带入主/广度面板 → 同 symbol 行情列（close/vol 等）在这些行 NaN → 所有跨过这些行的 ts 因子窗口被静默杀值，
+    截面有效域缩小且无告警。独立期望：§7.2 要求后端定义非交易日公告的进入时点（对齐到下一开市日）后方可进
+    T 日决策；裸 ann_date 对齐违反契约。注意：引擎侧简单按日历过滤面板会丢弃事件值（下一交易日行无该事件列值），
+    不是正确修复；正确修复在适配层把 ann_date 映射到下一开市日。
+    修复（2026-10-24，本项目 adapter 侧，不动上游库）：adapters/tushare.py 内存库只读 ATTACH 行情库 +
+    USE market，建 ddup_cal_align（全日历→下一开市日映射）与四张 ddup_*_daily 对齐 VIEW（公告日→下一开市
+    日；同股同日合并：回购求和、增减持求和+按变动量加权、人数/质押取 MAX），表单四表位置改指 memory.
+    三段式 VIEW，tables 节删除裸 ann_date 覆盖；generic_sql 新增 attach_readonly（与 connect_market_db
+    同源锁重试）。验收：tests/test_tushare_align.py 6 例（非交易日行=0、周六公告对齐周一、同日合并口径、
+    ma(close,3) 杀值消除、端到端无重复键、日历/分红不变）；真实库 2024 全年全市场含四事件列查询
+    2.57s/171 万行，ma(close,20) 有效占比 72.3% 与预热窗口预期一致（无杀值空洞）。周末公告进入时点 =
+    下一开市日收盘决策。影响对象：上述因子及任何声明这些列的策略 REQUIRED_FIELDS 面板。
+    后续（同日）：整改发现收编时遗漏了上游 stk_holdertrade_agg 的带符号口径（in_de='DE'
+    减持为负，上游 defect-3），ddup_holdertrade_daily 裸 SUM 为口径退化——已修：按 in_de
+    带符号、change_ratio 分母保持绝对股数之和，holdernumber 补 NULL 过滤；ddup 测试补
+    带符号断言，真实库验证负值 26 万行。随后按用户授权完成两仓整改：上游 tushare_db
+    退役 stk_holdertrade_agg / stk_holdernumber_agg / pledge_detail_agg 三视图（语义唯
+    一载体收敛到 ddup 对齐层，schema.sql 保留 DROP 供旧库重放清理，上游 364 测试全绿）；
+    两仓分界原则落档双方 README/backend_guide §7.2（无状态对齐归 ddup、有状态携带物化
+    归上游）；pension/national_team/dividend_grid/top_inst_agg 按原则保留上游不动。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
 - id: F-FAC-01
   severity: P1
   rule: docs/factor_library.md 原§8:『where 是对因子值的后置掩码：表达式先完整求值，where 为 False 的位置置 NaN』（结合
