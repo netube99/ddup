@@ -296,3 +296,35 @@ def test_short_window_tracking_error_zero_not_nan():
     te = stats["benchmark_compare"]["tracking_error"]
     assert math.isfinite(te)
     assert te == 0.0
+
+
+def test_corporate_action_rows_excluded_from_trade_counts():
+    """STK_DIV/ADJUST 公司行为行不计入成交笔数与单笔成本（F-STA-02）。
+
+    docs/results_analysis.md 事件表：只有 BUY/SELL 是真实模拟成交、计入交易笔数；
+    送转/调整行 turnover 与费用全 0，混入只会稀释口径。
+    """
+    rows = [
+        ["20240603", "AAA", "BUY", "MANUAL", 10.0, 1000, 10000.0, 5.0, 0.0, 0.1, 2.0,
+         -10007.1, ""],
+        ["20240604", "AAA", "STK_DIV", "CORPORATE", 0.0, 1500, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, "10送5"],
+        ["20240604", "BBB", "ADJUST", "CORPORATE", 0.0, 300, 0.0, 0.0, 0.0, 0.0, 0.0,
+         0.0, "live"],
+        ["20240605", "AAA", "SELL", "MANUAL", 12.0, 1500, 18000.0, 6.0, 18.0, 0.1, 3.0,
+         17972.9, ""],
+    ]
+    adf = make_account_daily(
+        [1_000_000.0, 1_001_000.0, 1_003_000.0], n_holdings=[0, 1, 1]
+    )
+    stats = calculate_statistics(adf, make_trades(rows))
+    mc = stats["management_complexity"]
+    # 3 个交易日、2 笔真实成交（20240603/20240605）
+    assert stats["trade_count"] == 2
+    assert mc["avg_trades_per_day"] == pytest.approx(2 / 3)
+    assert mc["avg_trades_per_active_day"] == pytest.approx(1.0)
+    assert mc["max_trades_per_day"] == 1
+    assert mc["active_day_ratio"] == pytest.approx(2 / 3)
+    assert mc["min_buy_amount"] == pytest.approx(10000.0)
+    total_cost = (5.0 + 0.1 + 2.0) + (6.0 + 18.0 + 0.1 + 3.0)  # 两笔真实成交
+    assert stats["trading_friction"]["cost_per_trade"] == pytest.approx(total_cost / 2)

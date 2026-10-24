@@ -124,6 +124,48 @@ class TestReconstructHoldings:
         # 送转后全额卖出：20240605 空仓（权重列为其他日期并集产生的 NaN）
         assert df.loc["20240605", "portfolio_return"] == 0.0
         assert pd.isna(df.loc["20240605", "银行_weight"])
+
+    def test_same_day_stk_div_before_sell(self, synth_bars, synth_industry_map):
+        """同日 SELL 与 STK_DIV（引擎落库序 id 在后）：公司行为先作用再卖出 → 空仓。
+
+        F-ATT-01 回归：引擎 write_trades 把公司行为行追加在当日成交之后，
+        按 (date, id) 回放会把已卖出的仓位被『设为总数』语义复活。
+        """
+        trade_log = pd.DataFrame([
+            {"id": 3, "date": "20240603", "symbol": "600036.SH",
+             "side": "BUY", "shares": 100},
+            {"id": 4, "date": "20240604", "symbol": "600036.SH",
+             "side": "SELL", "shares": 150},
+            {"id": 5, "date": "20240604", "symbol": "600036.SH",
+             "side": "STK_DIV", "shares": 150},
+        ])
+        df = _reconstruct_daily_holdings(trade_log, synth_bars, synth_industry_map)
+        # 先送转（100→150）再全卖：除权日已空仓，不得复活 150 股
+        assert df.loc["20240604", "portfolio_return"] == 0.0
+        assert pd.isna(df.loc["20240604", "银行_weight"])
+
+    def test_same_day_stk_div_before_buy(self, synth_bars, synth_industry_map):
+        """同日 BUY 与 STK_DIV：先送转再加仓，买入份额不被总数覆盖。
+
+        两股票构造使股数可观测：600036 先买 100，除权日 STK_DIV 设 150、
+        同日再买 50 → 200 股；旧顺序（先买后设）只剩 150 股。
+        """
+        trade_log = pd.DataFrame([
+            {"id": 1, "date": "20240603", "symbol": "600036.SH",
+             "side": "BUY", "shares": 100},
+            {"id": 2, "date": "20240603", "symbol": "600519.SH",
+             "side": "BUY", "shares": 2},
+            {"id": 3, "date": "20240604", "symbol": "600036.SH",
+             "side": "BUY", "shares": 50},
+            {"id": 4, "date": "20240604", "symbol": "600036.SH",
+             "side": "STK_DIV", "shares": 150},
+        ])
+        df = _reconstruct_daily_holdings(trade_log, synth_bars, synth_industry_map)
+        mv_bank = 200 * 35.7   # 先设 150 再 +50 = 200 股 @35.7
+        mv_food = 2 * 1632.0
+        assert df.loc["20240604", "银行_weight"] == pytest.approx(
+            mv_bank / (mv_bank + mv_food)
+        )
     def test_basic_reconstruction(self, synth_trade_log, synth_bars, synth_industry_map):
         df = _reconstruct_daily_holdings(synth_trade_log, synth_bars, synth_industry_map)
         assert not df.empty

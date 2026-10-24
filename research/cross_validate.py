@@ -158,7 +158,9 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0,
     issues = []
     notes = []
 
-    # 0. 基本统计
+    # 0. 基本统计（笔数口径与 stats F-STA-02 / docs 事件表一致：
+    # 只有 BUY/SELL 是真实成交，DIV/STK_DIV/ADJUST 公司行为行不计入）
+    exec_trades = trades[trades["side"].isin(["BUY", "SELL"])]
     n_buys = len(trades[trades["side"] == "BUY"])
     n_sells = len(trades[trades["side"] == "SELL"])
     n_days = trades["date"].nunique()
@@ -172,7 +174,7 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0,
     # 佣金 + 印花税 + 过户费 + 滑点
     total_costs = total_commission + total_stamp + total_transfer + total_slippage
 
-    notes.append(f"交易天数: {n_days}, 总成交: {len(trades)} 笔")
+    notes.append(f"交易天数: {n_days}, 总成交: {len(exec_trades)} 笔")
     notes.append(f"买入 {n_buys} 笔, 卖出 {n_sells} 笔, 涉及 {symbols_traded} 只票")
     notes.append(f"总成交额: {total_turnover:,.0f} 元")
     notes.append(f"总费用: {total_costs:,.1f} 元 (佣金 {total_commission:,.1f}, "
@@ -273,8 +275,8 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0,
         notes.append(f"卖出分类统计（{sell_stats_note}）:\n"
                      f"{sell_stats_df.to_string()}")
 
-    # 8. 交易频率检查
-    avg_trades_per_day = len(trades) / n_days if n_days > 0 else 0
+    # 8. 交易频率检查（分母日历、分子只数真实成交 BUY/SELL）
+    avg_trades_per_day = len(exec_trades) / n_days if n_days > 0 else 0
     notes.append(f"日均交易: {avg_trades_per_day:.1f} 笔")
     if avg_trades_per_day > 10:
         issues.append(f"HIGH_FREQ: 日均交易 {avg_trades_per_day:.1f} 笔（过高）")

@@ -8,24 +8,22 @@ meta:
 open:
 - id: F-FAC-07
   severity: P3
-  rule: btcore/factors/library.py compute_factors『work = df.copy()』深拷贝；与
-    compute_breadth 分块路径叠加的内存放大维护建议
+  rule: btcore/factors/library.py compute_factors『work = df.copy()』深拷贝；与 compute_breadth
+    分块路径叠加的内存放大维护建议
   file: btcore/factors/library.py
   line: 118
-  note: 触发：compute_breadth 每块已持 carry+base 两个面板，compute_factors 再深拷贝一次 → 峰值约
-    2× 面板内存（全市场×多年研究域下 GB 级）。_eval_named 只往 work 写新列（不覆写已有列），
-    copy(deep=False) 语义等价且省一半峰值；需回归确认无原地覆写路径后可改。与 ARCH-PERF-01 同域
-    （carry 线性增长）但独立可修。未做真实规模内存 profile，不推断具体降幅。
+  note: 触发：compute_breadth 每块已持 carry+base 两个面板，compute_factors 再深拷贝一次 → 峰值约 2× 面板内存（全市场×多年研究域下
+    GB 级）。_eval_named 只往 work 写新列（不覆写已有列）， copy(deep=False) 语义等价且省一半峰值；需回归确认无原地覆写路径后可改。与
+    ARCH-PERF-01 同域 （carry 线性增长）但独立可修。未做真实规模内存 profile，不推断具体降幅。
   opened: '2026-10-24'
 - id: F-FAC-08
   severity: P3
   rule: btcore/factors/ops.py 闭式矩（cov = E[xy] − E[x]E[y]）的数值精度边界文档化建议
   file: btcore/factors/ops.py
   line: 80
-  note: 触发：对原始量纲大数列（amount 千元级、total_mv 万元级，E[x²] ~1e12）直接 corr/beta/resid_std
-    时灾难性消除使有效精度降至 ~4-5 位。现役库暴露为零（grep 验证 corr/beta/resid_std 全部作用于
-    roc 收益率 ~0.01 量纲或 idx_ret），属未来用户易踩。建议 factor_library.md 算子表加一句『对大数列
-    先 rank/zscore/roc 变换再回归』；或实现侧先减列均值再矩展开。不改数值行为，不阻塞。
+  note: 触发：对原始量纲大数列（amount 千元级、total_mv 万元级，E[x²] ~1e12）直接 corr/beta/resid_std 时灾难性消除使有效精度降至
+    ~4-5 位。现役库暴露为零（grep 验证 corr/beta/resid_std 全部作用于 roc 收益率 ~0.01 量纲或 idx_ret），属未来用户易踩。建议
+    factor_library.md 算子表加一句『对大数列 先 rank/zscore/roc 变换再回归』；或实现侧先减列均值再矩展开。不改数值行为，不阻塞。
   opened: '2026-10-24'
 - id: F-FAC-03
   severity: P3
@@ -543,44 +541,384 @@ open:
   file: btcore/provider.py
   line: 133
   note: 触发：策略逐日调用 get_benchmark_trend/get_benchmark_returns（缓存键含滑窗起点，逐日必变，缓存不命中，每天回源一次
-    SQL + pct_change 重算）。当前内核与全部策略均无逐日消费者，属投机性优化，故不修。条件触发：当出现逐日消费基准的
-    策略时，仿 provider.attach_bars 模式一次预载整个回测区间基准 frame，逐日本地切片；同时消除 _bench_cache 随回测
-    天数无界增长的条目。
+    SQL + pct_change 重算）。当前内核与全部策略均无逐日消费者，属投机性优化，故不修。条件触发：当出现逐日消费基准的 策略时，仿 provider.attach_bars
+    模式一次预载整个回测区间基准 frame，逐日本地切片；同时消除 _bench_cache 随回测 天数无界增长的条目。
+  opened: '2026-10-24'
+- id: F-ATT-02
+  severity: P2
+  rule: 'docs/results_analysis.md Brinson 返回结构：「industry_detail: 按行业分解，键为行业名 … total_contribution:
+    三效应之和」与口径节「基准收益按全部基准行业累加（含策略从未持有的 行业）」——summary/daily 侧包含未持有行业效应，明细侧静默缺失'
+  file: research/attribution.py
+  line: 473
+  note: '[attr-report] 触发：策略未覆盖全部基准行业（几乎所有真实场景）。_aggregate_period 的 industry_names
+    只取 holdings_df 的 *_weight 列（473-475 行），基准独有行业不生成明细行，但其 allocation 效应计入 summary（_compute_brinson_daily
+    的行业全集=持仓∪基准权重∪行业收益）。复现： /tmp/ddup-review/attr-report/probe_b_c_detail_exposure.py
+    Probe B（3 日，策略满仓行业 X， 基准 X 60%/Y 40%，BF 手算 A_X=-0.16%/日、A_Y=-0.24%/日）。实际值：industry_detail
+    仅 [''X'']，Σ total_contribution=-0.0048，summary A+S+I=-0.012，差 +0.0072=3 日 × A_Y(-0.0024)；独立期望：明细含
+    Y 行（allocation_effect=-0.0072）时 Σ 与 summary 对账 相等。影响对象：行业明细表无法与 summary 对账，低配行业的配置贡献（行业规避收益）在
+    明细中不可见且无告警，读者会把 X 的 -0.0048 误当成全部配置效应。'
+  opened: '2026-10-24'
+- id: F-ATT-03
+  severity: P2
+  rule: 'docs/results_analysis.md Brinson 返回结构：「effective_n_industries: …, # 有效行业数
+    = 1/Σ(w²)，按平均权重」——公式要求权重向量为期间平均（未持有日计 0，和为 1）'
+  file: research/attribution.py
+  line: 536
+  note: '[attr-report] 触发：任何跨行业换仓策略（A 行业持有数日后换 B）。exposure_summary 的平均权重用 pandas mean()
+    跳过 NaN（未持有日该行业无行值），得到"持有日条件均值"而非期间平均：Σ平均 权重可大于 1，1/Σ(w²) 落到公式定义域之外。复现：/tmp/ddup-review/attr-report/
+    probe_b_c_detail_exposure.py Probe C（4 日，前 2 日满仓 X、后 2 日满仓 Y）。实际值： top3 X=1.0、Y=1.0（Σ=2.0），effective_n_industries=0.5，max_single_industry_weight=1.0；
+    独立期望（期间平均：X=0.5、Y=0.5，Σ=1）：effective_n=1/(0.5²+0.5²)=2.0，max_single=0.5。 effective_n
+    小于 1 对任何归一权重向量不可能，0.5 vs 2.0 相差 4 倍。影响对象： max_single_industry_weight/effective_n_industries/top3_industries
+    及 industry_detail 的 avg_portfolio_weight/active_weight（同 mean() 口径），行业轮动策略的集中度结论被系统性
+    高估（effective_n 低估）。'
+  opened: '2026-10-24'
+- id: F-ATT-04
+  severity: P2
+  rule: docs/results_analysis.md Brinson 口径与限制节：「持仓沿交易日逐日结转——无成交日不丢 （买入持有 N 天贡献 N
+    天归因）；summary.total_portfolio_return 是逐日策略收益之和」； research/attribution.py:242 代码注释自述假设「日期轴取
+    bars 的交易日（traded symbols 全区间有 bar）」未经校验
+  file: research/attribution.py
+  line: 244
+  note: '[attr-report] 触发：当日全部交易过标的均无 bar（集中持仓组合的整体停牌日；stk_factor_pro 停牌日无行）。 all_dates
+    取 bars 出现过的日期（244 行），该类交易日整日从持仓重建与 Brinson 日期轴消失： 该日组合收益（停牌=0）与基准收益都不再计入，summary
+    相对用户 start~end 区间静默少计 -r_b。复现：/tmp/ddup-review/attr-report/probe_e_edge_days.py
+    Probe E2（单票 S 20240603 买入，20240604 停牌无 bar，基准每日 +1%）。实际值：recon/daily 日期轴=[20240603,
+    20240605]，total_benchmark_return=0.0200；独立期望（三日基准全计）=0.0300，漏掉 20240604 的 +0.0100。影响对象：集中持仓（单票/少票）策略在停牌日的
+    excess/benchmark 累计口径——多票分散组合需全部同日停牌才触发，影响面小但无告警；日期轴宜以 provider 交易日历为准而非 bars
+    行集。'
+  opened: '2026-10-24'
+- id: F-FD7-01
+  severity: P2
+  rule: 因子自述定义 factors/library.yaml:955『超大单净占比 - 大单净占比』（净占比 = 净额/总成交额，无量纲占比）；同族已修复基准
+    lg_net_rate（L144）现役写法 『(buy_lg_amount - sell_lg_amount) / amount * 10』（2026-09-16
+    审查 F-FD1-01/02 修复：moneyflow 金额列单位万元、amount 千元，需 ×10 才是真实占比）
+  file: factors/library.yaml
+  line: 953
+  note: '[factor-layer] 触发：任何引用 elg_lg_div 的策略/评估；该因子 2026-08-06 第五轮加入，F-FD1-02 修复（对
+    143-158 行六因子补 ×10）漏掉它。复现：/tmp/ddup-review/factor-layer/probe04_units.py + probe04b_units2.py（只读
+    ATTACH 真实行情库）。实际：20240605 全日 median(moneyflow 四档买卖合计/amount)=0.2000、买单四档合计/amount=0.1000（000001.SZ
+    buy4=sell4=111415.6 万元 vs 隐含成交额 vol×100×close=11.08 亿元，证实 moneyflow 金额=万元、amount=千元）；现表达式两项各缺
+    ×10，elg_lg_div(000001.SZ 20240605)=-0.014102。 独立期望：真实净占比差 = ((buy_elg-sell_elg)-(buy_lg-sell_lg))/amount×10
+    = -0.141016， 即现值比自述『净占比差』小 10 倍（同族修复基准 lg_net_rate 已 ×10）。截面排序不受常数 缩放影响（历史 RankIR
+    数字仍有效），但任何按绝对阈值消费（如 where/组合门控 elg_lg_div>0.05） 静默错 10 倍。影响对象：elg_lg_div 及其未来消费方；当前库内/策略无引用（保留区因子），
+    属 F-FD1-02 同类修复漏网，非新缺陷类。'
+  opened: '2026-10-24'
+- id: F-RSR-08
+  severity: P2
+  rule: backlog E2E-01（closed，P1）：'全部策略用 int(YYYYMMDD) 十进制差判调仓间隔与 min_hold…冷却期 20240130+3=20240133
+    立即过期'——同型缺陷在 6 个 exploring 策略残留（修复未覆盖）；docs/strategy_guide.md config 表 'rebalance_interval
+    等自定义键' 与策略 config 注释声明的交易日语义
+  file: strategies/exploring/defensive_vol_gate/strategy.py
+  line: 95
+  note: '[strategy-layer] 触发：运行任一残留策略的回测（config 可直接 run）。E2E-01（2026-09-19 closed，修了
+    selected/examples 的交易日计数器）之后，6 处同型残留：①defensive_vol_gate/strategy.py:95 (date_int-_last_rebalance)>=_interval
+    调仓判定；②loss_contrarian_300/strategy.py:37 同款；③ml_lowcrowd/strategy.py:29 同款；④pension_track/strategy.py:55
+    同款；⑤re_attack_500/strategy.py:34 冷却 int(t.date)+cooldown_days(3)；⑥dv_tg_barbell/strategy.py:84
+    冷却 int(t.date)+tg_cooldown(30)——该文件 docstring 自称''YYYYMMDD 整数差调仓计数…计数器修复''但冷却未修。复现：/tmp/ddup-review/strategy-layer/probe_residuals.py
+    A 段。实际：int(''20240201'')-int(''20240131'')=70 ≥ 20 → 跨月相邻交易日被当作 70 日间隔强插调仓（名义
+    20 日实际月均约 11-17 日随机）；int(''20240531'')+30=20240561 < int(''20240601'') → 30 交易日冷却
+    1 日过期；int(''20240115'')+3=20240118 → 3 日冷却实际 1-3 日随机。独立期望：E2E-01 确立的交易日计数器口径（selected/trend_guard
+    等已改），日历日/整数差语义即错。影响：6 个 exploring 策略的调仓节奏/冷却期全部失真（多为已否决实验，故 P2），重跑其 config 所得数字与声明的
+    rebalance_interval/cooldown 语义不符。'
+  opened: '2026-10-24'
+- id: F-RSR-09
+  severity: P2
+  rule: strategies/selected/trend_guard_bw_300/strategy.py:_update_regime docstring
+    '基于市场广度检测牛熊状态' + '熊态感知门控'（类 docstring）；docs/strategy_guide.md bar 表 '伪列（仅因子表达式引用时附着）'——pct_above_ma20
+    为坍缩因子列，同理仅引用才物化
+  file: strategies/selected/trend_guard_bw_300/strategy.py
+  line: 102
+  note: '[strategy-layer] 触发：TrendGuard config 将 bear_gating 置 true（当前 config 无该键，默认
+    False，故当前运行不可达）。factor_specs 闭包（13 节点，probe_pseudo_columns.py）不含 pct_above_ma20，needs[''market'']=False
+    → 坍缩列不物化 → bar.get(''pct_above_ma20'') 恒 None → _update_regime 首行 return，熊态门控静默永不激活。复现：/tmp/ddup-review/strategy-layer/probe_pseudo_columns.py
+    ②段：bear_gating=True 且连续 20 日 bar 无 pct_above_ma20 后 _bear_regime=False（对照：bar
+    带 pct_above_ma20=0.10 连续 6 日 → True，机制可用）。实际：门控开启后仍恒不触发，无任何告警。独立期望：门控开启时应按广度阈值检测熊态（代码自身逻辑），现状需在
+    factor_specs 声明 pct_above_ma20（materialize_only）才可达。影响：selected/trend_guard_bw_300
+    的可选熊态门控功能不可用（当前 config 未开启，记 P2）；若用户按 docstring 开启将得到静默失效的门控。'
+  opened: '2026-10-24'
+- id: F-STA-01
+  severity: P2
+  rule: btcore/stats.py:40-42 自注契约『np.divide + where= 避免两分支先求值产生除零警告』 （F-INF-03 已登记
+    benchmark_compare 路径同类问题，本条为新位置：主统计路径的 月度/年度区间收益与年化收益）
+  file: btcore/stats.py
+  line: 220
+  note: '[engine-support] 触发条件①account_daily 某 period 末 total_value==0（引擎路径不可达，但实盘
+    衍生库可持久化负现金——backlog LIVE-13 关闭记录实证负现金入账仅 warning， report/cross_validate 直接消费账本库）；②期末
+    total_value<0。复现： /tmp/ddup-review/engine-support/probe_sta_period_guard.py（探针保留可复跑）。
+    实际值——场景 A 触发 RuntimeWarning ''divide by zero encountered in divide''， monthly_returns={''2024-07'':
+    inf}；场景 B annualized_return=NaN + ''invalid value encountered in scalar power''（stats.py:57
+    负底分数幂）； write_run_stats 的 json.dumps 默认 allow_nan 将 inf/NaN 写成 Infinity/NaN 字面量入
+    stats_json（非严格 JSON，Python 外解析器拒收）。独立期望——同文件 daily_returns 主路径对 total_value[:-1]<=0
+    用 np.divide where= 掩蔽为 0.0 且 无告警，period 收益与年化应同守卫（有限值、无告警泄漏、无 inf/NaN 入库）。 影响对象——stats_json.monthly_returns/yearly_returns/annualized_return、
+    报告月度收益表、账本库离线重算消费方。'
+  opened: '2026-10-24'
+- id: F-CLI-01
+  severity: P3
+  rule: 'docs/cli_and_research.md 归因导出表：『sw_returns.parquet | 行业日收益 | index=trade_date，columns=行业名，值为小数（已除以
+    100）』；消费方 research/attribution.py brinson_attribute_from_files docstring『sw_returns:
+    申万行业日收益 parquet（index=date, columns=行业名）』——文件导出口径须与消费方一致（审查授权：导出口径与消费方期望一致、同输入同输出）'
+  file: scripts/dump_brinson_data.py
+  line: 80
+  note: '[scripts-cli] 触发：sw_daily 含同名多 ts_code 行（脚本自身注释自证：『sw_daily 按 (trade_date,
+    name) 有多 ts_code 同名行（如 20180102 水泥制造×3），全表 66,110 组重复』）且同名行 pct_change 不同，或含非
+    L1 层级行。复现：/tmp/ddup-review/scripts-cli/make_synth_market_db.py 构造 synth_market.duckdb（801712.SI
+    与 801713.SI 同名''水泥制造''、pct_change 分别 0.3/0.6），运行 python scripts/dump_brinson_data.py
+    synth_market.duckdb --out out1 --start 20240603 --end 20240604，读回 sw_returns.parquet。实际值：''水泥制造''=0.003（801712.SI
+    首行；801713.SI 的 0.006 被丢弃），且导出含 L2/L3 列（食品饮料Ⅱ 等，全表 5 列而非 L1 的 3 列）。独立期望：消费方 DB
+    路径 _load_sw_returns（research/attribution.py:91）仅按 index_member_all 登记的 L1 ts_code
+    过滤后再透视，文件导出应同口径限定 L1；同名重复组取值不应依赖无 ORDER BY 的扫描顺序（:80-83 无 ORDER BY + drop_duplicates
+    保首行）。同文件两次导出字节一致（cmp 探针 identical），但''首行''绑定扫描顺序，库文件重建/升级后可翻转，跨版本非确定。影响：brinson_attribute_from_files
+    的 sw_returns 值取旧/新分类码中任意一个（同名组内数值若不同则基准行业收益不受控）；非 L1 额外列经 _compute_brinson_daily
+    的 industry_names 并集进入循环但 w_b=0 数值无贡献（仅多耗内存）。同名重复组实际数值是否相异需真实行情库验证（21G 无法复制到 /tmp），故按
+    P3 登记并留待验证。'
+  opened: '2026-10-24'
+- id: F-CLI-02
+  severity: P3
+  rule: scripts/dump_brinson_data.py:61-64 自述设计契约（TOOL-01）：『index 拼错/无数据时归因必然失败，必须在写出任何
+    parquet 前非零退出并给出明确提示』
+  file: scripts/dump_brinson_data.py
+  line: 99
+  note: '[scripts-cli] 触发：--result-db 给出但未同时给 --start/--end。复现：cd /tmp/ddup-review/scripts-cli
+    && python scripts/dump_brinson_data.py synth_market.duckdb --result-db synth_result.duckdb，实际输出依次打印
+    ''industry_map: 3 rows / sw_returns: (1, 5) / benchmark_weights: (2, 1)'' 后才 usage
+    error 退出码 2，out 目录留下 3/4 个 parquet。实际值：exit 2 + 部分导出目录（缺 bars.parquet）。独立期望：按本脚本
+    TOOL-01 注释自述，参数前置校验应先于任何 parquet 写出（--result-db 缺日期的条件在 :99 才检查，晚于 :79-96 的三次写出）。影响：用户得到看似完成的导出目录，下游
+    brinson_attribute_from_files 以 FileNotFoundError 失败；无静默错数，仅工具链可用性问题。对照：index 无数据路径（:68-75）确实在写出前退出（探针
+    out_bad/ 为空），两个前置条件检查位置不一致。'
+  opened: '2026-10-24'
+- id: F-CLI-03
+  severity: P3
+  rule: docs/cli_and_research.md sweep 节：『候选值必须为列表，字符串可能被展开为字符，标量会失败。先 dry-run 检查组合数』；research/cli_common.py
+    fail()『用户输入错误的统一通道：打印到 stderr，返回退出码 1』
+  file: scripts/sweep.py
+  line: 66
+  note: '[scripts-cli] 触发：sweep 配置 params 中某候选值为标量（如 config.top_k: 3）。复现：cd /tmp/ddup-review/scripts-cli
+    && python scripts/sweep.py sw5.yaml --start 20240603 --end 20240628 --dry-run（sw5.yaml
+    base 指向 strategies/examples/rolling_ranker/config.yaml，params.config.top_k: 3），实际输出以
+    ''File ... research/sweep.py, line 36, in expand_params ... TypeError: ''int''
+    object is not iterable'' 结尾的裸 traceback，退出码 1。实际值：裸 TypeError traceback。独立期望：expand_params
+    对''params 为空''的 ValueError 有独立错误语义（research/sweep.py:23 fail-fast TOOL-08），标量候选值是同一类配置错误，应走可操作报错通道（docs
+    明示该输入非法且指引''先 dry-run 检查组合数''——dry-run 本身被 traceback 打断）。影响：sweep.py 的 dry-run
+    与实跑共用 :66 路径，标量候选值配置均裸崩。'
+  opened: '2026-10-24'
+- id: F-CLI-04
+  severity: P3
+  rule: btcore/strategy.py:69 get_universe docstring：『返回本策略需要的股票列表。None 表示全市场。引擎在
+    preload 阶段调用，用于裁剪数据加载范围』
+  file: scripts/bench_universe_preload.py
+  line: 72
+  note: '[scripts-cli] 触发：backend 无 get_index_members 能力或区间内无成分快照（resolve_index_universe
+    返回 None，btcore/filters.py:70）。复现：/tmp/ddup-review/scripts-cli/probe_bench_none.py
+    用无 get_index_members 的 stub 后端调用 resolve_index_universe 得 None，再执行与 :72 相同的 len(symbols)，实际输出
+    ''TypeError: object of type ''NoneType'' has no len()''。实际值：加载层基准段在 :72 len(None)
+    裸 TypeError 崩溃。独立期望：None 是引擎侧合法语义（=全市场），bench 脚本应显式提示''无成分快照，成分并集基准不可用''而非崩溃；端到端段
+    :39-40 RollingRankerCropped.get_universe 直接返回 resolve_index_universe(...)，为 None
+    时引擎静默按全市场处理——''成分并集''计时结果与''全市场''相同，基准数字静默失效。影响：bench_universe_preload.py 两个基准段在无快照数据下的可用性与公平性（后者为静默退化，前者为崩溃）。'
+  opened: '2026-10-24'
+- id: F-CLI-05
+  severity: P3
+  rule: btcore/factors/plan.py:120 derive_idx_ret：『因子引用 idx_ret 需要 benchmark 且 backend
+    提供 get_benchmark_bars』；scripts/board_factor_eval.py docstring『口径与 factor_eval
+    同源』
+  file: scripts/board_factor_eval.py
+  line: 105
+  note: '[scripts-cli] 触发：board_factor_eval 评估任何引用 idx_ret 的因子（factors/library.yaml:745
+    alpha_mom5、:748 alpha_mom20 等）。复现：cd /tmp/ddup-review/scripts-cli && DDUP_BACKEND=stub_panel:PanelStubBackend
+    PYTHONPATH=/tmp/ddup-review/scripts-cli python scripts/board_factor_eval.py alpha_mom5
+    --start 20240604 --end 20240605，实际输出以裸 ValueError 结尾（''因子引用 idx_ret 需要 benchmark
+    且 backend 提供 get_benchmark_bars''，btcore/factors/plan.py:119 抛出），退出码 1。实际值：idx_ret
+    族因子在 board 脚本必然失败。独立期望：同路径的 factor_eval 提供 --benchmark 参数并传入 ensure_pseudo_columns（research/factor_eval.py:96、:170）与
+    compute_breadth；board 脚本无 --benchmark 定义、:105 ensure_pseudo_columns(bars_df, needs,
+    ''main'', backend=backend) 缺 benchmark 实参、:125 compute_breadth 同样缺——宣称''口径与 factor_eval
+    同源''应同源支持或显式拒绝该因子族。附带：:193 --decay 含非数字（--decay abc）同样裸 ValueError traceback（int()
+    未捕获）。影响：board_factor_eval 对 idx_ret 因子族完全不可用，失败通道为裸 traceback。'
+  opened: '2026-10-24'
+- id: F-CLI-06
+  severity: P3
+  rule: 'docs/cli_and_research.md run 节：『--report | HTML 报告路径。缺省 auto...』；scripts/report.py:24
+    对同一 HTML 写操作『except (FileNotFoundError, IsADirectoryError, PermissionError) →
+    错误: 无法写报告』的既有干净通道'
+  file: scripts/run.py
+  line: 86
+  note: '[scripts-cli] 触发：--report 显式路径的父目录不存在。复现：cd /tmp/ddup-review/scripts-cli
+    && DDUP_BACKEND=mock_cli_backend:MockCliBackend PYTHONPATH=/tmp/ddup-review/scripts-cli
+    python scripts/run.py strategies/examples/rolling_ranker/config.yaml --start 20240603
+    --end 20240628 --out /tmp/ddup-review/scripts-cli/e2e_run.duckdb --report /nonexistent_dir/r.html，实际输出以
+    ''File .../research/report.py, line 518, in generate_report ... FileNotFoundError:
+    [Errno 2] No such file or directory'' 裸 traceback 结尾，退出码 1。实际值：回测已完成、结果库已写盘后报告写失败裸崩。独立期望：scripts/report.py:24
+    对同一 generate_report 写失败捕获并打印''错误: 无法写报告 ...''，run.py 的 --report 是同一写操作（含 --report
+    auto 到只读目录的情形），错误通道应一致。影响：run.py 全部 --report 写失败路径；不产生静默错数，回测结果已落盘，仅通道不一致。'
+  opened: '2026-10-24'
+- id: F-CLI-07
+  severity: P3
+  rule: research/cli_common.py fail() docstring：『用户输入错误的统一通道：打印到 stderr，返回退出码 1』；同文件
+    _load_backend 已为格式错误提供 ValueError 通道（『DDUP_BACKEND 需为 module:Class 格式』）
+  file: research/cli_common.py
+  line: 57
+  note: '[scripts-cli] 触发：DDUP_BACKEND=''module:Class'' 中 module 不可导入。复现：DDUP_BACKEND=nope:Nope
+    python scripts/run.py strategies/examples/rolling_ranker/config.yaml --start 20240603
+    --end 20240628，实际输出以 ''ModuleNotFoundError: No module named ''nope'''' 裸 traceback
+    结尾，退出码 1。实际值：裸 traceback。独立期望：_load_backend 对 spec 格式错误与类不存在（AttributeError 分支
+    :58-60）均转为带上下文的 ValueError，模块不存在（:57 importlib.import_module 抛 ModuleNotFoundError）是同一类用户配置错误，应同走
+    fail 通道。影响：所有经 cli_common.make_provider 的 CLI（run.py、factor_eval.py、board_factor_eval.py、bench_universe_preload.py）的
+    DDUP_BACKEND 配置错误路径。'
+  opened: '2026-10-24'
+- id: F-FAC-09
+  severity: P3
+  rule: btcore/factors/library.py:157 自述契约原文『factor_specs 条目 weight 必须是有限数值』 （报错消息即声明接受的值域：有限数值）
+  file: btcore/factors/library.py
+  line: 157
+  note: '[factor-layer] 触发：策略 YAML 中 weight: .inf（PyYAML 解析为 float(''inf'')）或手工构造
+    spec 传 inf/-inf。复现：/tmp/ddup-review/factor-layer/probe08_weight_inf.py。实际： resolve_spec({''factor'':''mom20'',''weight'':float(''inf'')})
+    接受并返回 weight=inf（-inf 同）， 仅 NaN 被 weight != weight 拦截。独立期望：按报错消息声明的『必须是有限数值』，
+    inf/-inf 应抛同款 ValueError（应用 math.isfinite 而非仅 NaN 自反检查）。影响对象： eval_factor_specs
+    评分（score = Σ weight×rank，inf 权重使截面评分退化为 ±inf 并列， 排序由索引顺序决定）；可达路径为手写 YAML 笔误，防御性校验缺口，非现役配置问题。'
+  opened: '2026-10-24'
+- id: F-FEV-01
+  severity: P3
+  rule: docs/factor_research.md API 表 "calc_factor_corr(factor_df, ...) | 每日截面 Pearson
+    相关的均值；不足两列为空，缺有效日为 NaN"
+  file: research/factor_eval.py
+  line: 508
+  note: '[research-quant] 触发：多因子相关性评估中，某因子在任一交易日截面退化为常量（std=0 → 当日 pair corr=NaN；如门控因子整列
+    0 的下跌日、全 0/1 布尔因子当日无变异），avg_corr = sum(corr_mats)/len(corr_mats) 的 DataFrame 加法使该
+    NaN 跨日传播，杀死该因子与全部 因子的整窗均值。复现：.venv/bin/python /tmp/ddup-review/research-quant/probe_factor_corr_nan.py
+    （探针留同目录）。实际值：变体（B 因子在 20240104 常量 0，10 日中 9 日有效） corr(A,B)=NaN。独立期望：9 个非常量日的均值=0.702309（探针内逐日手工
+    corr 再取均值）。 依据：doc 承诺『每日截面 Pearson 相关的均值』；且同一函数对『整日全 NaN 列』的处理是 dropna(axis=1)
+    后 shape<2 跳过该日（探针场景 1：B 缺 1/10 天，输出 0.702309 正确）， 两种退化日语义自相矛盾，常量日把可计算的统计量静默变 NaN。影响对象：run_eval
+    相关性矩阵输出（该因子行/列全显示『—''）。不产生错误数值，只丢失可计算统计量。'
+  opened: '2026-10-24'
+- id: F-FEV-02
+  severity: P3
+  rule: docs/cli_and_research.md factor_eval 参数表 "--forward N 前瞻收益天数，默认 5"； docs/factor_research.md
+    "close 口径是 T 收盘到 T+h 收盘；next-open 是 T+1 开盘到 T+h 收盘"（h 为天数，语义为正整数）
+  file: research/factor_eval.py
+  line: 242
+  note: '[research-quant] 触发：--forward 传 0/负数，或 --decay 列表含 0/负数（--decay=-1,5；互斥检查只拦
+    forward≠5，默认 5 时负 horizon 直接入表）。CLI argparse 接受 --forward -1（已验证 parse 为 -1）；run_eval/calc_ic_decay
+    对 horizon 无正数校验，shift(-forward) 在 forward<0 时反转为 shift(+|h|)。复现： .venv/bin/python
+    /tmp/ddup-review/research-quant/probe_forward_negative.py（探针留 /tmp/ddup-review/research-quant/）。实际值：calc_ic_decay(horizons=[-1,1])
+    无任何异常 正常出表，ic_mean 分别为 +0.9989 与 -0.9986（符号翻转），且 close.shift(+1)/close-1 = 昨收/今收-1，既非前瞻收益也非过去收益的相反数（倒数畸变）。独立期望：horizon<=0
+    fail-fast 拒绝（『前瞻收益天数』语义为正整数）。影响对象：scripts/factor_eval.py IC 汇总/分层/衰减全部输出——方向反转的回顾口径被当作前瞻
+    IC 正常呈现（均值回复因子 会显示成动量），无告警。'
+  opened: '2026-10-24'
+- id: F-RSR-10
+  severity: P3
+  rule: strategies/examples/condition_hunter/strategy.py:24 docstring '波动率自适应止损'（multi_model/strategy.py:26
+    同款）——示例宣称的机制与实际行为不符（AGENTS 五要素：策略实现前写清信号/边界，宣称须可实现）
+  file: strategies/examples/condition_hunter/strategy.py
+  line: 34
+  note: '[strategy-layer] 触发：condition_hunter / multi_model 任一持仓日的 DYNAMIC_STOP 条件单求值。复现：/tmp/ddup-review/strategy-layer/probe_residuals.py
+    B 段（pct_chg∈[0,0.19] × turnover∈[0,0.30] 全组合）。实际：width = max(0.03, min(0.10, vol_ratio*0.02))，而调用方恒传
+    vol_ratio=min(est_vol,0.15) ≤ 0.15 → vol_ratio*0.02 ≤ 0.003 < 0.03 → 宽度在全输入域恒为
+    0.03（实测集合 {0.03}），''波动率自适应止损''实为固定 3% 止损，vol_ratio/max(3%)/min(10%) 三处参数全部死参数。独立期望：docstring
+    声称自适应 → 宽度应随 vol_ratio 变化（如 width=max(0.03, min(0.10, vol_ratio*0.4)) 类量级），或修正宣称为固定止损。影响：两个教学示例演示的''自定义
+    handler 自适应''能力名不副实，照抄示例的用户会复制一个恒定止损。'
+  opened: '2026-10-24'
+- id: F-RSR-11
+  severity: P3
+  rule: docs/strategy_guide.md：'扩展字段…策略访问了 bar["turnover_rate"] 这类扩展字段时必须声明，否则 KeyError'——condition_hunter
+    违反自家指南且以 .get 默认值掩盖
+  file: strategies/examples/condition_hunter/strategy.py
+  line: 195
+  note: '[strategy-layer] 触发：condition_hunter 回测的每个持仓日 calc_conditions。复现：代码走查 + 列裁剪机制——ConditionHunter
+    未声明 REQUIRED_FIELDS（基类默认仅 OHLCV+adj_factor），引擎 preload 列裁剪不请求 turnover_rate →
+    bar 无该键；:195 bar.get(''turnover_rate'', 0) or 0 恒 0。实际：est_vol = abs(pct_chg)*(1+0)
+    = abs(pct_chg)，换手率项静默失效（对照 multi_model 声明 REQUIRED_FIELDS=[''turnover_rate'']
+    的正确写法）。独立期望：strategy_guide ''访问扩展字段时必须声明''，示例应声明 REQUIRED_FIELDS: [''turnover_rate'']；即使声明后
+    DYNAMIC_STOP 宽度仍因 F-RSR-10 的 clamp 结构恒 3%，两缺陷叠加使示例的''自适应''双重落空。影响：examples/condition_hunter
+    教学示例（运行不报错，静默降级）。'
+  opened: '2026-10-24'
+- id: F-RSR-12
+  severity: P3
+  rule: 'strategies/selected/core_lowvol_500/config.yaml:62 ''timing_gate: true #
+    pct_sealed 择时门控：封板占比 < 60日中位 → 清仓避险''；strategy.py gate_triggered docstring ''window:
+    历史窗口（不含今日）'''
+  file: strategies/selected/core_lowvol_500/strategy.py
+  line: 97
+  note: '[strategy-layer] 触发：core_lowvol_500 开启 timing_gate 的运行，_sealed_hist 填满后（第
+    60 个决策日起）。复现：/tmp/ddup-review/strategy-layer/probe_gate_window.py。实际：on_tick :97
+    将 _sealed_hist 截断为 gate_window=60 条（含今日），gate_triggered 用 hist[:-1][-window:]
+    → 历史中位窗口实际 59 个值；probe 构造 [0.01]×30+[0.03]×30 历史 + 今日 0.025：59 值中位=0.03 → 触发清仓（True），而声明的
+    60 历史值中位=0.02 → 不触发（False），判定可分叉。独立期望：config 注释与 docstring 声明''60 日中位（不含今日）''→
+    应保留 60 个历史值（截断上限需为 window+1）或改声明为 59。影响：selected/core_lowvol_500 择时门控的触发边界与声明差一个交易日（幅度小，方向可证明）。'
+  opened: '2026-10-24'
+- id: F-STA-03
+  severity: P3
+  rule: 'btcore/provider.py benchmark_price_column docstring『engine 的 benchmark_nav
+    提取与 get_benchmark_returns 共用此单一口径』+ btcore/backend.py get_benchmark_bars 接口文档『columns:
+    ["hfq_close"]』'
+  file: btcore/stats.py
+  line: 670
+  note: '[engine-support] 触发条件——自定义后端 get_benchmark_bars 返回不含 close/hfq_close 列的 DataFrame（违反
+    backend.py 文档契约；但 provider 侧对该形态显式防御—— benchmark_price_column 返回 None，close-only
+    回退有测试钉住，属被容忍边界）。 stats._compute_benchmark_compare 用 bdf.loc[...].iloc[:,0] 取第一列当价格，
+    绕过共享口径函数。复现——/tmp/ddup-review/engine-support/probe_sta_bench_column.py。 实际值——provider
+    判无有效基准（get_benchmark_returns=None），stats 却对 dummy 常数列算出 benchmark_compare={alpha:0.4226,
+    beta:0.0, information_ratio:11.05, benchmark_total_return:0.0, ...}。独立期望——与 provider
+    同判『无有效基准』，benchmark_compare 应返回空 dict（同一输入两个 消费者结论应一致）。影响对象——自定义后端用户的 benchmark_compare/报告基准
+    对比（静默伪指标）；现役 GenericSQL（恒单列 hfq_close）与 close-only 后端 行为不受影响，故 P3 维护建议（stats 改用
+    benchmark_price_column 共享口径）。'
+  opened: '2026-10-24'
+- id: F-STO-01
+  severity: P3
+  rule: docs/strategy_guide.md §4.4：'index_universe | list[str]…仅交易指数成分股'；backlog
+    F-RSR-02（closed P1）rule 原句 '配置类型错误不应静默降级交易域'——机制层缺口在 F-RSR-02 修复后仍无类型校验
+  file: btcore/strategy_loader.py
+  line: 251
+  note: '[strategy-layer] 触发：filter_rules.index_universe 误写为字符串（F-RSR-02 曾真实发生）。复现：/tmp/ddup-review/strategy-layer/probe_residuals.py
+    C 段（/tmp 配置副本 reattack_str_universe.yaml，仓库未改动）。实际：_attach_universe:251 ''codes
+    = list(codes)'' 把 ''000905.SH'' 拆成 [''0'',''0'',''0'',''9'',''0'',''5'',''.'',''S'',''H'']
+    传入 backend.get_index_members → 真实库查无成分 → resolve_index_universe 返回 None → universe
+    hook 静默回退全市场（get_universe 返回 None），load_strategy 无任何报错；仅 StockFilter 构造时有一条''无成分数据''告警（与
+    preload 裁剪静默回退是两个独立通道）。独立期望：类型声明为 list[str]，字符串输入应在加载期 fail-fast（F-RSR-02 rule
+    原句''配置类型错误不应静默降级交易域''），现状仅修复了单个 config 实例、机制上同一笔误仍会静默退化交易域与规模。影响：所有使用 index_universe/factor_universe
+    的策略配置路径。'
+  opened: '2026-10-24'
+- id: F-STR-01
+  severity: P3
+  rule: btcore/strategy_tools.py eval_factor_specs docstring：'score 为合成得分 Series…（∈
+    [0,1]，越大越优）…factor_specs 为空时 score 为全 1.0'；btcore/factors/library.py resolve_spec
+    仅校验 'weight 必须是有限数值'
+  file: btcore/strategy_tools.py
+  line: 100
+  note: '[strategy-layer] 触发：factor_specs 含非正权重（如 weight: 0 的唯一评分因子，或 +1/-1 权重组合使总和为
+    0/负）。复现：/tmp/ddup-review/strategy-layer/probe_weights.py。实际：resolve_spec(weight=-0.5)
+    通过校验；total_weight<=0 走 else 分支 → score 恒为全 1.0 均匀分（单因子 weight=-1 实测全 1.0；+1/-1
+    组合实测全 1.0）→ sort_values 并列 → 索引序 top-k，负权重既不反转排名也不报错，静默退化为任意选股；docstring 承诺的 [0,1]
+    有区分度得分仅在 total_weight>0 时成立。独立期望：权重笔误应在加载期 fail-fast（AGENTS ''可选能力缺失告警软回退；声明的必需列、因子…缺失应
+    fail-fast'' 的同等精神），或 docstring 明示非正总权重的退化语义。影响：所有经 eval_factor_specs 打分的策略；现役
+    config 无负权重（机械扫描 49 个 YAML 全部 weight>=0），属配置笔误静默陷阱。'
   opened: '2026-10-24'
 closed:
 - id: F-FAC-06
   severity: P1
-  rule: docs/backend_guide.md §7.2『公告在非交易日或盘后时，须定义何时可进入 T 日收盘决策』+
-    factors/library.yaml 现役因子消费（holder_num / pledge_risk / rep_amount 类 / insider_chg_z）
+  rule: docs/backend_guide.md §7.2『公告在非交易日或盘后时，须定义何时可进入 T 日收盘决策』+ factors/library.yaml
+    现役因子消费（holder_num / pledge_risk / rep_amount 类 / insider_chg_z）
   file: adapters/tushare.py
   line: 22
-  note: 触发：ann_date 对齐的四张事件表存在非交易日行（真实库实测 2026-10-24：repurchase 8229/62274 ≈13%、
-    stk_holdertrade 19682/287078 ≈7%、stk_holdernumber 54631/472654 ≈12%、pledge_detail
-    18626/89222 ≈21% 的行 ann_date 不在 SSE 开市日）。复现一（SQL）：SELECT SUM(ann_date NOT IN (SELECT cal_date
-    FROM trade_cal WHERE is_open=1)) FROM repurchase。复现二（最小面板）：(交易日, S1) 两行 close=10/11 后插入
-    (周六公告行, S1) close=NaN，btcore.factors.ops._ts_ma(close, 3) 从混入点起连续 NaN 直到混入行滑出窗口
-    （groupby.rolling 默认 min_periods=窗口，窗口内任一 NaN 杀值；且窗口按行数计，混入行挤掉一个真实交易日样本）。
-    影响链：因子闭包引用 rep_amount/holder_num/pledge_*/insider_chg_* 任一列 → query_bars 键外并集把非交易日行
-    带入主/广度面板 → 同 symbol 行情列（close/vol 等）在这些行 NaN → 所有跨过这些行的 ts 因子窗口被静默杀值，
-    截面有效域缩小且无告警。独立期望：§7.2 要求后端定义非交易日公告的进入时点（对齐到下一开市日）后方可进
-    T 日决策；裸 ann_date 对齐违反契约。注意：引擎侧简单按日历过滤面板会丢弃事件值（下一交易日行无该事件列值），
-    不是正确修复；正确修复在适配层把 ann_date 映射到下一开市日。
-    修复（2026-10-24，本项目 adapter 侧，不动上游库）：adapters/tushare.py 内存库只读 ATTACH 行情库 +
-    USE market，建 ddup_cal_align（全日历→下一开市日映射）与四张 ddup_*_daily 对齐 VIEW（公告日→下一开市
-    日；同股同日合并：回购求和、增减持求和+按变动量加权、人数/质押取 MAX），表单四表位置改指 memory.
-    三段式 VIEW，tables 节删除裸 ann_date 覆盖；generic_sql 新增 attach_readonly（与 connect_market_db
-    同源锁重试）。验收：tests/test_tushare_align.py 6 例（非交易日行=0、周六公告对齐周一、同日合并口径、
-    ma(close,3) 杀值消除、端到端无重复键、日历/分红不变）；真实库 2024 全年全市场含四事件列查询
-    2.57s/171 万行，ma(close,20) 有效占比 72.3% 与预热窗口预期一致（无杀值空洞）。周末公告进入时点 =
-    下一开市日收盘决策。影响对象：上述因子及任何声明这些列的策略 REQUIRED_FIELDS 面板。
-    后续（同日）：整改发现收编时遗漏了上游 stk_holdertrade_agg 的带符号口径（in_de='DE'
-    减持为负，上游 defect-3），ddup_holdertrade_daily 裸 SUM 为口径退化——已修：按 in_de
-    带符号、change_ratio 分母保持绝对股数之和，holdernumber 补 NULL 过滤；ddup 测试补
-    带符号断言，真实库验证负值 26 万行。随后按用户授权完成两仓整改：上游 tushare_db
-    退役 stk_holdertrade_agg / stk_holdernumber_agg / pledge_detail_agg 三视图（语义唯
-    一载体收敛到 ddup 对齐层，schema.sql 保留 DROP 供旧库重放清理，上游 364 测试全绿）；
-    两仓分界原则落档双方 README/backend_guide §7.2（无状态对齐归 ddup、有状态携带物化
-    归上游）；pension/national_team/dividend_grid/top_inst_agg 按原则保留上游不动。
+  note: 触发：ann_date 对齐的四张事件表存在非交易日行（真实库实测 2026-10-24：repurchase 8229/62274 ≈13%、 stk_holdertrade
+    19682/287078 ≈7%、stk_holdernumber 54631/472654 ≈12%、pledge_detail 18626/89222
+    ≈21% 的行 ann_date 不在 SSE 开市日）。复现一（SQL）：SELECT SUM(ann_date NOT IN (SELECT cal_date
+    FROM trade_cal WHERE is_open=1)) FROM repurchase。复现二（最小面板）：(交易日, S1) 两行 close=10/11
+    后插入 (周六公告行, S1) close=NaN，btcore.factors.ops._ts_ma(close, 3) 从混入点起连续 NaN 直到混入行滑出窗口
+    （groupby.rolling 默认 min_periods=窗口，窗口内任一 NaN 杀值；且窗口按行数计，混入行挤掉一个真实交易日样本）。 影响链：因子闭包引用
+    rep_amount/holder_num/pledge_*/insider_chg_* 任一列 → query_bars 键外并集把非交易日行 带入主/广度面板
+    → 同 symbol 行情列（close/vol 等）在这些行 NaN → 所有跨过这些行的 ts 因子窗口被静默杀值， 截面有效域缩小且无告警。独立期望：§7.2
+    要求后端定义非交易日公告的进入时点（对齐到下一开市日）后方可进 T 日决策；裸 ann_date 对齐违反契约。注意：引擎侧简单按日历过滤面板会丢弃事件值（下一交易日行无该事件列值），
+    不是正确修复；正确修复在适配层把 ann_date 映射到下一开市日。 修复（2026-10-24，本项目 adapter 侧，不动上游库）：adapters/tushare.py
+    内存库只读 ATTACH 行情库 + USE market，建 ddup_cal_align（全日历→下一开市日映射）与四张 ddup_*_daily 对齐
+    VIEW（公告日→下一开市 日；同股同日合并：回购求和、增减持求和+按变动量加权、人数/质押取 MAX），表单四表位置改指 memory. 三段式 VIEW，tables
+    节删除裸 ann_date 覆盖；generic_sql 新增 attach_readonly（与 connect_market_db 同源锁重试）。验收：tests/test_tushare_align.py
+    6 例（非交易日行=0、周六公告对齐周一、同日合并口径、 ma(close,3) 杀值消除、端到端无重复键、日历/分红不变）；真实库 2024 全年全市场含四事件列查询
+    2.57s/171 万行，ma(close,20) 有效占比 72.3% 与预热窗口预期一致（无杀值空洞）。周末公告进入时点 = 下一开市日收盘决策。影响对象：上述因子及任何声明这些列的策略
+    REQUIRED_FIELDS 面板。 后续（同日）：整改发现收编时遗漏了上游 stk_holdertrade_agg 的带符号口径（in_de='DE'
+    减持为负，上游 defect-3），ddup_holdertrade_daily 裸 SUM 为口径退化——已修：按 in_de 带符号、change_ratio
+    分母保持绝对股数之和，holdernumber 补 NULL 过滤；ddup 测试补 带符号断言，真实库验证负值 26 万行。随后按用户授权完成两仓整改：上游
+    tushare_db 退役 stk_holdertrade_agg / stk_holdernumber_agg / pledge_detail_agg 三视图（语义唯
+    一载体收敛到 ddup 对齐层，schema.sql 保留 DROP 供旧库重放清理，上游 364 测试全绿）； 两仓分界原则落档双方 README/backend_guide
+    §7.2（无状态对齐归 ddup、有状态携带物化 归上游）；pension/national_team/dividend_grid/top_inst_agg
+    按原则保留上游不动。
   opened: '2026-10-24'
   resolved: '2026-10-24'
 - id: F-FAC-01
@@ -596,62 +934,56 @@ closed:
   resolved: '2026-09-13'
 - id: F-BKD-01
   severity: P3
-  rule: btcore/generic_sql.py query_bars：表单已经 _compile_form 编译缓存，SQL 文本生成与
-    symbols 视图却每次重建的不一致；用户授权的三项打磨之一
+  rule: btcore/generic_sql.py query_bars：表单已经 _compile_form 编译缓存，SQL 文本生成与 symbols
+    视图却每次重建的不一致；用户授权的三项打磨之一
   file: btcore/generic_sql.py
   line: 277
-  note: 修复：SQL 文本提取为模块级纯函数 _build_query_sql，按（被引表、列映射、有无 symbols 过滤）经
-    _cached_query_sql 缓存（表单进程内不可变，dict 迭代序稳定）；_ddup_symbols 视图跨调用复用——同 universe
-    连续查询跳过 register/unregister 与 DataFrame 重建，换 universe 时重注册，close 时统一注销（不再每查 finally
-    unregister）。语义不变：同参数重复查询结果逐元素一致。验收：tests/test_generic_sql.py 新增
-    test_query_bars_sql_cached_and_consistent / test_query_bars_symbols_view_reuse_across_universes，
-    连同既有 74 例（含 test_column_pruning/test_provider/test_foreign_backend）全绿。真实库（21GB market.duckdb）
-    micro-bench：沪深300 成分同列集 4 块季度查询×5 轮，旧中位 0.268s → 新 0.245s（+8.6%）；池交替场景持平
+  note: 修复：SQL 文本提取为模块级纯函数 _build_query_sql，按（被引表、列映射、有无 symbols 过滤）经 _cached_query_sql
+    缓存（表单进程内不可变，dict 迭代序稳定）；_ddup_symbols 视图跨调用复用——同 universe 连续查询跳过 register/unregister
+    与 DataFrame 重建，换 universe 时重注册，close 时统一注销（不再每查 finally unregister）。语义不变：同参数重复查询结果逐元素一致。验收：tests/test_generic_sql.py
+    新增 test_query_bars_sql_cached_and_consistent / test_query_bars_symbols_view_reuse_across_universes，
+    连同既有 74 例（含 test_column_pruning/test_provider/test_foreign_backend）全绿。真实库（21GB
+    market.duckdb） micro-bench：沪深300 成分同列集 4 块季度查询×5 轮，旧中位 0.268s → 新 0.245s（+8.6%）；池交替场景持平
     （噪声内，±5%）。SQL 执行仍是绝对大头，此为小头整洁性收益，非结构性加速。
   opened: '2026-10-24'
   resolved: '2026-10-24'
 - id: F-BKD-02
   severity: P3
-  rule: btcore/generic_sql.py close() 生命周期；research/cli_common.py:68『调用方负责关闭：
-    provider.backend.close()』文档约定——无协议支持，靠调用方自觉，易泄漏
+  rule: btcore/generic_sql.py close() 生命周期；research/cli_common.py:68『调用方负责关闭： provider.backend.close()』文档约定——无协议支持，靠调用方自觉，易泄漏
   file: btcore/generic_sql.py
   line: 252
-  note: 修复：补 __enter__/__exit__（退出调 close），close 同时注销复用中的 _ddup_symbols 视图并保持幂等
-    （DuckDBPyConnection.close 可重入）。with 语法（with TushareBackend(...) as backend）成为合法写法。
-    验收：tests/test_generic_sql.py::test_context_manager_closes_connection——with 内可查询，退出后连接不可执行
-    （duckdb.Error），二次 close 无副作用。
+  note: 修复：补 __enter__/__exit__（退出调 close），close 同时注销复用中的 _ddup_symbols 视图并保持幂等 （DuckDBPyConnection.close
+    可重入）。with 语法（with TushareBackend(...) as backend）成为合法写法。 验收：tests/test_generic_sql.py::test_context_manager_closes_connection——with
+    内可查询，退出后连接不可执行 （duckdb.Error），二次 close 无副作用。
   opened: '2026-10-24'
   resolved: '2026-10-24'
 - id: F-BKD-03
   severity: P3
-  rule: btcore/generic_sql.py _fetch_dividend_rows 每次构建分红索引（含 PERF-08 窗口外
-    单日回表）都重查 information_schema 判断 end_date/ann_date 列存在性
+  rule: btcore/generic_sql.py _fetch_dividend_rows 每次构建分红索引（含 PERF-08 窗口外 单日回表）都重查
+    information_schema 判断 end_date/ann_date 列存在性
   file: btcore/generic_sql.py
   line: 401
-  note: 修复：_check_schema 校验列时顺带缓存各表物理列名集合（原始大小写，与旧回源查询行为一致），
-    _table_column_names 统一取用；只读连接下 schema 不可变，缓存无失效问题，表不在校验集时回源一次并缓存
-    （防御路径，分红表必在表单引用中）。验收：tests/test_generic_sql.py::test_dividend_column_detection_cached
-    （列集合正确、通用表无事件列走值级归并、缓存已填充）；窗口外回表既有测试
-    test_dividends_outside_window_fall_back_to_query 仍绿。
+  note: 修复：_check_schema 校验列时顺带缓存各表物理列名集合（原始大小写，与旧回源查询行为一致）， _table_column_names 统一取用；只读连接下
+    schema 不可变，缓存无失效问题，表不在校验集时回源一次并缓存 （防御路径，分红表必在表单引用中）。验收：tests/test_generic_sql.py::test_dividend_column_detection_cached
+    （列集合正确、通用表无事件列走值级归并、缓存已填充）；窗口外回表既有测试 test_dividends_outside_window_fall_back_to_query
+    仍绿。
   opened: '2026-10-24'
   resolved: '2026-10-24'
 - id: F-BKD-05
   severity: P3
-  rule: 数据对接层异构上游抽象缺口（用户授权的功能增强）：填表法机械被焊死在单 DuckDB
-    文件路径，SQLite/CSV/parquet 上游被迫走手写 ABC 重复拼表逻辑
+  rule: 数据对接层异构上游抽象缺口（用户授权的功能增强）：填表法机械被焊死在单 DuckDB 文件路径，SQLite/CSV/parquet 上游被迫走手写
+    ABC 重复拼表逻辑
   file: btcore/generic_sql.py
   line: 245
-  note: 修复：GenericSQLBackend 构造参数二选一 db_path/conn（互斥 fail-fast），conn 注入连接归调用方持有
-    （_owns_conn=False 时 close 只注销内部视图不关连接）；_parse_loc 改 rpartition 支持三段式 库名.表名.字段名
-    （ATTACH 场景，两段式行为不变）；新增 _qt 表名分段引用（实验验证：整体引号的限定表名是单标识符被 DuckDB
-    拒绝，必须分段引用）；_check_schema/_check_key_types/_table_column_names 按 (table_catalog,
-    table_name) 归属校验（实验验证：文件库 current_database 与 table_catalog 一致，无前缀表限定当前库，
-    同名表跨 ATTACH 库不混淆）；全部 FROM 调用点换 _qt。验收：tests/test_backend_attach.py 7 例——
-    sqlite ATTACH 三段式拼表/日历/分红、列裁剪、CSV 脏数据清洗层（printf 补零/strftime 归一/缺失涨跌停 NULL）、
-    脏键（BIGINT/DATE）被初始化期拒绝、注入连接不被 close、db_path 路径契约不变；连同既有套件全绿。
-    docs/backend_guide.md 新增 §2.3 两份 recipe（SQLite ATTACH / CSV 清洗层），backend.py / generic_sql.py
-    docstring 同步；check_skill_sync 通过。键校验在异构场景的把关为预期特性：read_csv 推断的 BIGINT/DATE 键被
-    fail-fast 拒绝，逼清洗层显式 cast，不产生静默错算。
+  note: 修复：GenericSQLBackend 构造参数二选一 db_path/conn（互斥 fail-fast），conn 注入连接归调用方持有 （_owns_conn=False
+    时 close 只注销内部视图不关连接）；_parse_loc 改 rpartition 支持三段式 库名.表名.字段名 （ATTACH 场景，两段式行为不变）；新增
+    _qt 表名分段引用（实验验证：整体引号的限定表名是单标识符被 DuckDB 拒绝，必须分段引用）；_check_schema/_check_key_types/_table_column_names
+    按 (table_catalog, table_name) 归属校验（实验验证：文件库 current_database 与 table_catalog 一致，无前缀表限定当前库，
+    同名表跨 ATTACH 库不混淆）；全部 FROM 调用点换 _qt。验收：tests/test_backend_attach.py 7 例—— sqlite
+    ATTACH 三段式拼表/日历/分红、列裁剪、CSV 脏数据清洗层（printf 补零/strftime 归一/缺失涨跌停 NULL）、 脏键（BIGINT/DATE）被初始化期拒绝、注入连接不被
+    close、db_path 路径契约不变；连同既有套件全绿。 docs/backend_guide.md 新增 §2.3 两份 recipe（SQLite
+    ATTACH / CSV 清洗层），backend.py / generic_sql.py docstring 同步；check_skill_sync 通过。键校验在异构场景的把关为预期特性：read_csv
+    推断的 BIGINT/DATE 键被 fail-fast 拒绝，逼清洗层显式 cast，不产生静默错算。
   opened: '2026-10-24'
   resolved: '2026-10-24'
 - id: F-FAC-02
@@ -2079,3 +2411,115 @@ closed:
     覆盖Engine持久化、配置覆盖/构造后变更、声明变更、 模型meta、规范化、无Git、数据身份与旧结果report读回。 清单不是完整可重放快照：不覆盖全部动态模块或任意策略运行态，旧run/实盘衍生run无清单。
   opened: '2026-10-19'
   resolved: '2026-10-19'
+- id: F-CST-01
+  severity: P1
+  rule: btcore/slippage.py 模块 docstring『滑点价四舍五入到分』与 apply_slippage docstring『滑点价：price
+    ± ticks × 0.01，四舍五入到分』；ARCHITECTURE.md contracts『固定 0.01 元 tick』；同仓 limits._round2_half_up
+    注释对同一操作确立的标准（『避免二进制浮点把 x.xx5 压小后被 round() 银行家舍入错方向』，Decimal HALF_UP 为准）
+  file: btcore/slippage.py
+  line: 8
+  note: '[match-core] 触发条件：成交价经 ±n×0.01 后的十进制精确值落在半分位 x.xx5（策略侧条件价均有多位小数：ConditionBuilder
+    以 high×(1-pct)/entry×(1±pct) 生成 STOP_LOSS/TAKE_PROFIT/TRAILING_TP 触发价，LIMIT_BUY/BREAKOUT_BUY
+    price 由策略给定；如 close=10.10、trailing_pct=0.05 → 触发价 9.5950）。复现：.venv/bin/python
+    /tmp/ddup-review/match-core/probe_01_slippage_tie.py——纯函数对照 apply_slippage(10.10*0.95,
+    2, -1)=9.57，而 Decimal(repr) HALF_UP=9.58；端到端 exit_conditions（1000 股 TRAILING_TP
+    触发，2 tick 卖出滑点）实际 Trade.price=9.57。独立期望：9.58——十进制精确值 9.5950−0.02=9.5750，按 slippage.py
+    自述『四舍五入到分』及 limits.py 同口径 Decimal HALF_UP 应进位到 9.58；实际 round() 对二进制存储 9.574999…向下舍入（dyadic
+    半分位如同源 case apply_slippage(8.625,0,-1)=8.62 走银行家舍入，同样偏离）。影响对象：所有条件单（STOP_LOSS/TAKE_PROFIT/TRAILING_TP/LIMIT_BUY/BREAKOUT_BUY/自定义
+    handler）与滑点后成交价落在半分位的成交——fill price、turnover、费用（佣金/印花税/过户费以滑点后金额计）、net_amount、现金与
+    PnL 每笔偏差 0.01 元/股（示例 1000 股卖出净额少 10.00 元）；半分位邻界的涨跌停判定（slipped 与 limit 相邻一分）可能随之翻转。
+    修复（2026-10-24）：apply_slippage 改为 Decimal(repr)+ROUND_HALF_UP，与 limits._round2_half_up
+    同口径。回归 tests/test_slippage.py（dyadic 半分位 8.625→8.63 等，RED→GREEN，保留原有 grid 断言），match/costs/limits
+    46 例不变。 边界：上游触发价浮点表示（10.10×0.95=9.5949…）的十进制意图偏差（9.57 vs 9.58） 非舍入模式缺陷，彻底对齐需 ConditionBuilder
+    Decimal 化，另行评估不阻塞。 旧回测仅 dyadic 半分位成交价差 1 tick，无需强制重跑。'
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-STA-02
+  severity: P1
+  rule: docs/results_analysis.md 事件表『BUY / SELL | 真实模拟成交；才计入交易笔数』 + management_complexity
+    行『单日最多成交、交易日占比、单票市值等执行负担』； stats.py:140 自注『真实成交行（BUY/SELL）：STK_DIV/ADJUST 公司行为行不计入
+    笔数与标的数』
+  file: btcore/stats.py
+  line: 189
+  note: '[engine-support] 触发条件——任意含送转事件（STK_DIV 行）的回测，A股年报季普遍（corporate. derived_trades
+    每次送转落一行 side=STK_DIV）；含 ADJUST 行的实盘衍生库同样 触发。stats.py:133 的 trades 仅剔除 side=="DIV"，STK_DIV/ADJUST
+    行残留在 trades 中，:189 _compute_management_complexity 与 :579 cost_per_trade 用未 过滤
+    trades 计数（:140 已构造 exec_trades 供 trade_count/unique_symbols 使用， 两处未跟进）。复现——/tmp/ddup-review/engine-support/probe_sta_stkdiv_counts.py
+    （引擎字段形态：1 BUY + 1 STK_DIV + 1 SELL，3 个交易日）。实际值—— avg_trades_per_day=1.0、active_day_ratio=1.0、cost_per_trade=4.57（13.71/3）。
+    独立期望——成交笔数只数 BUY/SELL：avg_trades_per_day=2/3≈0.6667、 active_day_ratio=0.6667、cost_per_trade=13.71/2=6.855（依据上述书面契约与
+    同文件 exec_trades 注释；送转行 turnover/费用全 0，不影响金额类指标）。 影响对象——stats_json.management_complexity
+    的 avg_trades_per_day/ avg_trades_per_active_day/max_trades_per_day/active_day_ratio、
+    trading_friction.cost_per_trade 及报告『执行负担』表；宽基策略送转行与真实 成交同量级时偏差可达数十个百分点。 修复（2026-10-24）：_compute_management_complexity
+    改收 exec_trades； _compute_trading_friction 的 cost_per_trade 分母只数 BUY/SELL。回归 tests/test_stats.py::test_corporate_action_rows_excluded_from_trade_counts（RED→GREEN）；探针复验
+    avg_trades_per_day=0.6667、cost_per_trade=6.855 与独立 期望一致。旧 stats_json 的 management_complexity/cost_per_trade
+    需重算（重跑报告 即可，不影响引擎现金流与 round-trip）。研究层同根因 F-MRD-03（P2）另行处置。'
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-ATT-01
+  severity: P1
+  rule: docs/results_analysis.md 事件与净额节：「部分卖出/加仓采用 FIFO lot；同日公司行为应先作用于 当时持仓。持仓股数重建时
+    STK_DIV 是"设为送转后总数"，不能再把这个总数加到原持仓上」； btcore/constants.py TRADE_EVENT_PRIORITY 同口径（DIV/STK_DIV=0
+    先于 BUY=1/SELL=2， stats.py 事件流已按此排序）
+  file: research/attribution.py
+  line: 258
+  note: '[attr-report] 触发：除权日与 pending 订单同日执行（调仓/止损单恰逢送转除权日）。attribution 持仓重建按 SQL「ORDER
+    BY date, id」逐行处理，而引擎 _settle（btcore/engine.py:824 write_trades(list(trades)+corporate.derived_trades(...))）把公司行为行追加在当日成交之后
+    （id 更大）——同日顺序变成「先 BUY/SELL、后 STK_DIV」。STK_DIV 是"设为总数"语义， 后执行会把当日已成交的份额静默覆盖/复活。复现：/tmp/ddup-review/attr-report/probe_a_stkdiv_order.py
+    （仓库 fixtures 真实引擎 run：920469.BJ 20240604 买入 18200 股，20240607 决策全仓卖出 后 20240611
+    除权日成交，trade_log id 顺序 SELL 23660、STK_DIV 23660、DIV 0；20240612 再买 24800）。实际值：_reconstruct_daily_holdings
+    在 20240611 隐含持股 23660 股（IND_A 权重 0.4842），20240612 隐含 48460 股；独立期望（文档口径：先 STK_DIV
+    设 23660，再 SELL 23660 清零）：20240611 持股 0（引擎 account_daily n_holdings=1、终态 holdings
+    无 该票为真值），20240612 持股 24800。影响对象：自除权日起该票市值/行业权重/组合日收益 全部错误直至仓位再变动，summary 三效应与
+    industry_detail 随之失真；同日 BUY 变体 （除权日买入）同根因，买入份额被总数覆盖丢失。修复方向：同日行按 side 优先级 （公司行为先行）排序后再回放。
+    修复（2026-10-24）：_reconstruct_daily_holdings 回放前按 TRADE_EVENT_PRIORITY 稳定排序（公司行为先于
+    BUY/SELL，未知 side 殿后），SQL 侧排序不再被信任。回归 tests/test_attribution.py 两例（同日 SELL/STK_DIV
+    复活、同日 BUY/STK_DIV 覆盖， RED→GREEN）；fixtures 真实引擎 run 探针复验：除权日隐含持股 23660→0、次日 48460→24800，与引擎
+    account_daily/终态 holdings 一致。含除权日同日成交的历史 归因结果需重跑。'
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-RSR-07
+  severity: P1
+  rule: strategies/selected/value_momentum/config.yaml:18 'CSI300 价值动量 v8 final —
+    自管理调仓 + 基准趋势感知'；strategy.py docstring 'CSI300 价值底座 × 基准趋势感知因子切换'（五要素信号声明）；docs/strategy_guide.md
+    bar 表 '伪列（仅因子表达式引用时附着）idx_ret'
+  file: strategies/selected/value_momentum/strategy.py
+  line: 77
+  note: '[strategy-layer] 触发：value_momentum 在产运行任一回测——factor_specs（dv_z/ep_z/turnover_z/close_vs_bbi/macd_z）闭包无任何表达式引用
+    idx_ret（probe_pseudo_columns.py：FACTOR_NODES=[close_vs_bbi,dv_z,ep_ttm,ep_z,macd_z,turnover_z]，factor
+    plan needs[''index'']=False），按 strategy_guide ''伪列仅因子表达式引用时附着''，面板无 idx_ret 列，bars_to_dict
+    产出的 bar 无该键。复现：/tmp/ddup-review/strategy-layer/probe_pseudo_columns.py（load_strategy
+    → build_factor_plan → on_tick 35 个决策日模拟）。实际：bar.get(''idx_ret'',0) 恒 0.0，_bench_returns
+    全 0，第 30 个决策日起 sum(0)>0=False → _bull_mode 永久 False，策略从此恒用 BEAR_SPECS(0.5/0.3/0.2)
+    打分，与基准实际趋势无关；对照 bars 带 idx_ret=+0.01 时 _bull_mode=True（机制本身可用）。独立期望：config/ docstring
+    声明的''基准趋势感知因子切换''应按基准 30 日累计收益符号切换 BULL/BEAR_SPECS；依据为策略自身五要素书面声明与 on_tick 代码意图（sum(idx_ret)>0）。影响：selected/
+    在产策略 value_momentum 全部回测与实盘信号从第 6 周起选股权重错误（BEAR 权重缺 close_vs_bbi 0.2 与 macd_z
+    0.15 两个 bull 分量），静默无告警。 修复（2026-10-24）：factors/library.yaml 新增 bench_ret（expr:
+    idx_ret）直通 因子；value_momentum factor_specs 以 materialize_only 声明 bench_ret（不参与
+    评分，五大因子权重和仍 1.0）；on_tick 对首日 NaN idx_ret 按 0 计不再污染趋势窗。 回归 tests/test_value_momentum_benchmark.py
+    四例（plan needs[index]=True、 materialize_only 不入评分、引擎 e2e 决策 bars 携带真实基准日收益、NaN
+    防污染， RED→GREEN）。影响：value_momentum 历史回测作废需重跑（趋势感知首次真正生效）； 无 benchmark 的后端从静默全 0
+    变为加载期 fail-fast。'
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: F-MRD-03
+  severity: P2
+  rule: docs/results_analysis.md 事件表 "BUY / SELL | 真实模拟成交；才计入交易笔数"；同文档 cross-validation
+    检查项表 "交易频率 | 日均成交 > 10 笔"（日均成交的口径即交易笔数）
+  file: research/cross_validate.py
+  line: 277
+  note: '[research-quant] 触发：run 的 trade_log 含 DIV/STK_DIV 公司行为行（btcore/corporate.py
+    derived_trades 落库，任何含分红的回测都有；实盘衍生库另有 ADJUST 行），validate_trades 用 len(trades) 统计总成交与日均交易并判定
+    HIGH_FREQ，公司行为行被计入。复现： .venv/bin/python /tmp/ddup-review/research-quant/probe_cross_validate_corp_rows.py
+    （探针留在同目录，trades 构造与 corporate.derived_trades 同构）。实际值：场景 A （2 笔 BUY + 6 行 DIV/STK_DIV、3
+    个交易日）输出 note『总成交: 8 笔』『日均交易: 2.7 笔』； 场景 B（单日 5 笔 BUY + 6 行 DIV）输出『日均交易: 11.0 笔』并产出
+    issue『HIGH_FREQ: 日均交易 11.0 笔（过高）』。独立期望：按契约只计 BUY/SELL → 场景 A 总成交=2 笔、 日均=0.7；场景
+    B 日均=5 笔，HIGH_FREQ 不应触发。依据：docs/results_analysis.md 事件表明示只有 BUY/SELL 才计入交易笔数；stats.py
+    已按同口径修复（btcore/stats.py:139-145 exec_trades 只取 side∈{BUY,SELL}，即本轮 F-STA-02），本处为同根因在研究层的残留。
+    n_buys/n_sells/turnover/费用不受影响（已分别只筛 BUY/SELL、公司行为行金额为 0）。 影响对象：scripts/cross_validate.py
+    输出（总成交/日均交易虚高）、HIGH_FREQ 检查可被 公司行为行推过 10 笔/日阈值造成误报（退出码=问题数，断言脚本假失败）；同一 run 与 stats
+    trade_count 口径互相矛盾。 修复（2026-10-24，用户点名扩大范围）：validate_trades 统一 exec_trades 口径，总成交与日均交易只数
+    BUY/SELL。回归 tests/test_cross_validate.py::test_corporate_rows_excluded_from_trade_count_notes（HEAD
+    版 RED→修复 GREEN）；探针复验场景 A 总成交 2 笔/日均 0.7、场景 B 日均 5 笔不再误报 HIGH_FREQ。与 stats F-STA-02
+    口径对齐。'
+  opened: '2026-10-24'
+  resolved: '2026-10-24'

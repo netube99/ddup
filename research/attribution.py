@@ -41,6 +41,7 @@ import duckdb
 import pandas as pd
 
 from btcore import database
+from btcore.constants import TRADE_EVENT_PRIORITY
 from btcore.generic_sql import connect_market_db
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,17 @@ def _reconstruct_daily_holdings(
         logger.warning("trade_log 为空，无法重建持仓")
         return pd.DataFrame()
 
-    # trade_log 已按 (date, id) 排序（SQL ORDER BY）；按日期分组，避免逐日全表扫描
+    # 同日行按事件优先级回放（TRADE_EVENT_PRIORITY：公司行为先于 BUY/SELL）。
+    # 引擎 write_trades 把公司行为行追加在当日成交之后，仅按 (date, id) 排序会得到
+    # 相反顺序；STK_DIV 是『设为送转后总数』语义，后于当日成交执行会把已成交
+    # 份额静默覆盖/复活（docs：同日公司行为应先作用于当时持仓）。
+    trade_log_df = trade_log_df.assign(
+        _prio=trade_log_df["side"]
+        .map(TRADE_EVENT_PRIORITY)
+        .fillna(len(TRADE_EVENT_PRIORITY))
+    ).sort_values(["date", "_prio", "id"]).drop(columns="_prio")
+
+    # trade_log 已按 (date, 优先级, id) 排序；按日期分组，避免逐日全表扫描
     trades_by_date = {
         d: list(g) for d, g in groupby(
             trade_log_df.to_dict("records"), key=lambda t: t["date"]

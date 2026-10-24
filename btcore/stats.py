@@ -186,7 +186,7 @@ def calculate_statistics(
             total_values, initial_capital, n_days, avg_total_value,
         )
     )
-    result.update(_compute_management_complexity(trades, account_daily_df))
+    result.update(_compute_management_complexity(exec_trades, account_daily_df))
 
     result["benchmark_compare"] = _compute_benchmark_compare(
         account_daily_df, benchmark_df, annual_days, risk_free_rate
@@ -571,12 +571,16 @@ def _compute_trading_friction(trades: pd.DataFrame, cost_breakdown: dict,
     total_cost = float(cost_breakdown["total_cost"])
     n_years = n_days / annual_days if n_days > 0 else 1.0
 
+    # 单笔成本分母只数 BUY/SELL 真实成交：公司行为行（STK_DIV/ADJUST）费用为 0，
+    # 混入会稀释口径（docs 事件表：只有 BUY/SELL 计入交易笔数）
+    n_exec = int(trades["side"].isin(["BUY", "SELL"]).sum())
+
     total_turnover = float(trades["turnover"].sum())
     gross_profit = sum(t["pnl"] for t in trip_detail if t["pnl"] > 0)
 
     friction = {
         "total_cost": total_cost,
-        "cost_per_trade": total_cost / len(trades) if len(trades) > 0 else 0.0,
+        "cost_per_trade": total_cost / n_exec if n_exec > 0 else 0.0,
         "cost_pct_of_turnover": total_cost / total_turnover if total_turnover > 0 else 0.0,
         "annualized_cost_drag": (
             (total_cost / avg_total_value) / n_years

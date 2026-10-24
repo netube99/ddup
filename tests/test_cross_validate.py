@@ -232,3 +232,22 @@ def test_ledger_cli_uses_ledger_capital(tmp_path):
     assert r.returncode == 0
     assert "(10.00%)" in r.stdout
     assert "-95.60%" not in r.stdout
+
+
+def test_corporate_rows_excluded_from_trade_count_notes():
+    """F-MRD-03：总成交/日均交易只数 BUY/SELL，公司行为行不推高 HIGH_FREQ。"""
+    rows = [
+        ["20240603", "000001.SZ", "BUY", "MANUAL", 13.4, 3000, 40200.0,
+         6.03, 0.0, 0.0, 0.0, -40206.03, ""],
+        ["20240604", "000001.SZ", "STK_DIV", "CORPORATE", 0.0, 4200, 0.0,
+         0.0, 0.0, 0.0, 0.0, 0.0, "stk_div"],
+        ["20240604", "000001.SZ", "DIV", "CORPORATE", 0.0, 0, 0.0,
+         0.0, 0.0, 0.0, 0.0, 60.0, "div"],
+        ["20240605", "000001.SZ", "SELL", "MANUAL", 7.1, 4200, 29820.0,
+         5.0, 14.91, 0.0, 0.0, 29800.09, ""],
+    ]
+    issues, notes = validate_trades(make_trades(rows), {"initial_capital": 100000})
+    # 3 个交易日、2 笔真实成交
+    assert any("总成交: 2 笔" in n for n in notes)
+    assert any("日均交易: 0.7 笔" in n for n in notes)
+    assert not any("HIGH_FREQ" in i for i in issues)
