@@ -6,8 +6,8 @@
 [回测](#run) · [因子评估](#factor-eval) · [报告](#report) · [对比](#compare) ·
 [交叉验证](#cross-validate) · [扫描](#sweep) · [回放](#replay) · [归因导出](#brinson-export)
 
-ML 训练参数在 [ML 指南](ml_guide.md#training-cli)；实盘 init/sync/signal/status 参数在
-[账本指南](live_guide.md#commands)；开发/门禁命令在[开发指南](development.md)。
+ML 训练参数在 [ML 指南](ml_guide.md#training-cli)；实盘 CLI 参数在
+[实盘指南](live_guide.md#workflow)；开发/门禁命令在[开发指南](development.md)。
 
 <a id="run"></a>
 ## `run.py` — 运行回测
@@ -142,7 +142,7 @@ python scripts/cross_validate.py <结果库.duckdb> [--run-id N] [--strategy nam
 | `--strategy` | 策略名（仅用于输出标注） |
 | `--capital` | 初始资金，用于磨损动态阈值；默认 0 = 从 run 的 config 读取，再兜底 1,000,000 |
 
-**退出码 = 发现的问题数**（0 = 通过），可直接用于脚本断言。卖出分类统计的 `total_pnl/win_rate` 来自 `stats_json.round_trip.trip_detail`（按 sell_trigger 聚合，与 `total_realized_pnl` 同源）；无 stats_json 时改列 `net_proceeds`（成交净额，非盈亏）。消费实盘账本库时初始资金取 `ledger_meta.initial_capital`。
+**退出码 = 发现的问题数**（0 = 通过），可直接用于脚本断言。卖出分类统计的 `total_pnl/win_rate` 来自 `stats_json.round_trip.trip_detail`（按 sell_trigger 聚合，与 `total_realized_pnl` 同源）；无 stats_json 时改列 `net_proceeds`（成交净额，非盈亏）。V1 实盘账本消费路径已随实盘重制移除（docs/live_redesign.md）。
 
 检查项、磨损阈值与解释边界见[结果分析](results_analysis.md#cross-validation)。
 

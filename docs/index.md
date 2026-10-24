@@ -17,7 +17,8 @@ skill 提供操作流程；历史记录只证明其标注版本和样本。
 | 训练/使用 ML 模型 | [ML 指南](ml_guide.md) | [训练](ml_guide.md#training)、[观测](ml_guide.md#observability) |
 | 回测、扫描、报告、回放 | [CLI 参考](cli_and_research.md) | [实验方法](factor_research.md#experiments) |
 | 解释收益和交易 | [结果分析](results_analysis.md) | [统计](results_analysis.md#statistics)、[Brinson](results_analysis.md#attribution) |
-| 实盘建账、对账、操作单 | [实盘指南](live_guide.md) | [排错](live_guide.md#troubleshooting)、[回放验收](live_guide.md#verification) |
+| 实盛建账、对账、预览与执行 | [实盘指南](live_guide.md) | [每日闭环](live_guide.md#workflow)、[排错](live_guide.md#troubleshooting)、[离线演练](live_guide.md#verification) |
+| 实盘 V2 重制与验收 | [重制方案](live_redesign.md) | 账户事实、执行计划、实施所有权与 A01–A24 验收矩阵 |
 | 修改代码与维护文档 | [开发指南](development.md) | [AGENTS](../AGENTS.md)、[审查协议](review_protocol.md) |
 | 有边界审查/独立核算 | [核查矩阵](audit_checklist.md) | [backlog](review_backlog.yaml)、[历史证据](reviews/README.md) |
 

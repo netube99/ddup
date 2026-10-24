@@ -1,268 +1,137 @@
-"""实盘 CLI 全流程核查（真实行情库）：init → 每日 sync → 每日 signal。
+"""实盘 V2 离线演练 — CLI 全闭环验收（不依赖本机真实行情库）。
 
-以回测 result.duckdb 为 ground truth，模拟窗口取回测 run 自身全部交易日：
-  - signal(D) 的操作单 open_sells/open_buys 必须等于回测在 D 的次一交易日实际成交
-  - sync 的 statement 来自回测账本（cash/持仓/当日成交全量），必须 ok
-  - 中途插入一次错报持仓 → 必须回滚拒绝，随后正确 statement 必须通过
-  - 中途建账（OPENING 播种）与全程回放等价
+用仓库 fixtures 行情（--fixtures-dir）驱动 scripts/live.py 子进程完成：
+  init → 对账单导入（含入金/成交）→ status → activate → preview → accept
+  → submit → fill → 次日对账单（自动确认）→ preview → orders → expire
+  → status --with-session，并注入一次坏回报验证整笔回滚。
 
-用法: python scripts/live_e2e_check.py --bt-db 回测库 [--ledger 账本] [--yaml 策略]
-依赖真实行情库（adapters.tushare._DEFAULT_DB_PATH）；需先跑出含成交的回测。
+用法: python scripts/live_e2e_check.py [--keep]
+默认在专用临时目录执行，绝不动真实账本；--keep 保留目录供排查。
 """
-import argparse
+
 import json
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
-from btcore import database
-from btcore.generic_sql import connect_market_db
-from research.cli_common import latest_run_id
-
-_HERE = Path(__file__).resolve().parent
-_p = argparse.ArgumentParser()
-_p.add_argument("--bt-db", required=True,
-                help="含成交的回测结果库（scripts/run.py --out 产物）")
-_p.add_argument("--ledger", default=os.path.join(
-    tempfile.gettempdir(), "ddup_live_e2e.duckdb"))
-_p.add_argument("--yaml", default="strategies/selected/dv_lowvol_300/config.yaml")
-_p.add_argument("--start", default=None, help="建账日（缺省=回测首个交易日）")
-_args = _p.parse_args()
-
-BT = _args.bt_db
-LEDGER = _args.ledger
-MARKET = None
-YAML = _args.yaml
+HERE = Path(__file__).resolve().parent
+FIXTURES = str(HERE.parent / "tests" / "fixtures")
 PY = sys.executable
-LB = str(Path(LEDGER).with_name("test_b.duckdb"))
+STRATEGY = "strategies/examples/rolling_ranker/config.yaml"
 
-if not os.path.isfile(BT):
-    print(f"错误: 回测结果库不存在: {BT}（先跑一次含成交的回测并 --out）",
-          file=sys.stderr)
-    sys.exit(2)
-if not os.path.isfile(YAML):
-    print(f"错误: 策略 YAML 不存在: {YAML}", file=sys.stderr)
-    sys.exit(2)
-
-conn = database.connect_result_db(BT, read_only=True)
-# 最新 run 解析口径统一走 runs 表（此前查 trade_log，空 trade_log 的 run 会错位）
-rid = latest_run_id(conn)
+D1, D2 = "20240603", "20240604"
 
 
-def _market_path():
-    global MARKET
-    if MARKET is None:
-        from adapters.tushare import _DEFAULT_DB_PATH
-        MARKET = _DEFAULT_DB_PATH
-    return MARKET
-
-
-def cal_next(d):
-    c = connect_market_db(_market_path())
-    nxt = c.execute(
-        "SELECT cal_date FROM trade_cal WHERE is_open=1 AND cal_date>?"
-        " ORDER BY cal_date LIMIT 1", [d]).fetchone()[0]
-    c.close()
-    return nxt
-
-
-def trades_on(d):
-    return conn.execute(
-        "SELECT symbol, side, trigger, price, shares, commission, stamp_tax,"
-        " transfer_fee FROM trade_log WHERE run_id=? AND date=? AND side IN"
-        " ('BUY','SELL') ORDER BY id", (rid, d)).fetchall()
-
-
-def account_state(d):
-    """回测 ground truth：date d 收盘后的 cash + 持仓（含入场价/日）。"""
-    cash = conn.execute(
-        "SELECT cash FROM account_daily WHERE run_id=? AND date=?",
-        (rid, d)).fetchone()[0]
-    buys = conn.execute(
-        "SELECT date, symbol, price, shares FROM trade_log WHERE run_id=?"
-        " AND side='BUY' AND date<=? ORDER BY id", (rid, d)).fetchall()
-    sells = conn.execute(
-        "SELECT symbol, shares FROM trade_log WHERE run_id=? AND side='SELL'"
-        " AND date<=? ORDER BY id", (rid, d)).fetchall()
-    stkdiv = conn.execute(
-        "SELECT symbol, shares FROM trade_log WHERE run_id=? AND"
-        " side='STK_DIV' AND date<=? ORDER BY id", (rid, d)).fetchall()
-    pos, entry = {}, {}
-    for bd, s, p, sh in buys:
-        pos[s] = pos.get(s, 0) + sh
-        if s not in entry:
-            entry[s] = {"entry_date": bd, "price": p, "shares": sh}
-        else:
-            e = entry[s]
-            e["price"] = (e["price"] * e["shares"] + p * sh) / (e["shares"] + sh)
-            e["shares"] += sh
-    for s, sh in sells:
-        pos[s] = pos.get(s, 0) - sh
-    for s, sh in stkdiv:
-        pos[s] = pos.get(s, 0) + sh
-    holdings = {s: v for s, v in pos.items() if v > 0}
-    return cash, holdings, entry
-
-
-def cli(*args):
-    p = subprocess.run([PY, str(_HERE / "live.py"), *args], capture_output=True,
-                       text=True, cwd=".")
+def cli(db, *args):
+    args = [str(a) for a in args]
+    proc = subprocess.run(
+        [PY, str(HERE / "live.py"), args[0], str(db), *args[1:]],
+        capture_output=True, text=True, cwd=HERE.parent)
     try:
-        return json.loads(p.stdout)
+        payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        print("NON-JSON OUTPUT:", p.stdout[:2000], p.stderr[:2000],
-              file=sys.stderr)
-        return None
+        raise AssertionError(
+            f"non-JSON output for {args}: {proc.stdout[:500]} {proc.stderr[:500]}")
+    return proc.returncode, payload
 
 
-def make_sync(date, cash, holdings, fills):
-    return {"date": date, "cash": round(cash, 2),
-            "holdings": [{"symbol": s, "shares": v}
-                         for s, v in holdings.items()],
-            "fills": fills}
-
-
-def fills_from(trades, date):
-    return [{"date": date, "symbol": s, "side": side, "price": p,
-             "shares": sh, "commission": comm, "stamp_tax": tax,
-             "transfer_fee": fee, "reason": trig}
-            for s, side, trig, p, sh, comm, tax, fee in trades]
+def close_of(symbol, date):
+    bars = pd.read_parquet(Path(FIXTURES) / "bars.parquet")
+    row = bars[(bars.symbol == symbol) & (bars.trade_date == date)]
+    assert not row.empty, f"fixtures 缺 {symbol}@{date}"
+    return float(row.iloc[0]["close"])
 
 
 def main():
-    if os.path.exists(LEDGER):
-        os.remove(LEDGER)
-    if os.path.exists(LB):
-        os.remove(LB)
+    workdir = tempfile.mkdtemp(prefix="ddup_live_e2e_")
+    db = str(Path(workdir) / "drill.duckdb")
+    print(f"[workdir] {workdir}")
 
-    # ── 模拟窗口 = 回测 run 自身的交易日（account_daily 逐日记录）──
-    # 旧版写死 20260105,20260204 已过期；从回测库动态取，不再依赖过期日期
-    days = [r[0] for r in conn.execute(
-        "SELECT date FROM account_daily WHERE run_id=? ORDER BY date", (rid,)
-    ).fetchall()]
-    assert len(days) >= 10, f"回测窗口过短（{len(days)} 日），换一个含成交的 --bt-db"
+    rc, out = cli(db, "init", "--account-id", "drill", "--broker", "sim")
+    assert rc == 0 and out["ok"], out
 
-    # ── Day 0: init（空仓；起始日 = 回测首个交易日）──
-    bt_start = _args.start if _args.start is not None else days[0]
-    cash0 = conn.execute(
-        "SELECT initial_capital FROM runs WHERE run_id=?", (rid,)
-    ).fetchone()[0]
-    r = cli("init", LEDGER, "--date", bt_start, "--cash", str(round(cash0, 2)))
-    assert r["ok"] and r["initial_capital"] > 0, r
-    print(f"[init] ok: initial_capital={r['initial_capital']} start={bt_start}")
+    stmt1 = Path(workdir) / "stmt1.yaml"
+    stmt1.write_text(yaml.safe_dump({
+        "date": D1, "cash": 100000,
+        "holdings": [{"symbol": "000001.SZ", "shares": 1000,
+                      "available": 1000}],
+    }, allow_unicode=True), encoding="utf-8")
+    rc, out = cli(db, "import", str(stmt1))
+    assert rc == 0 and out["snapshot"]["action"] == "opening_confirmed", out
 
-    for d in days:
-        nxt = cal_next(d)
-        cash, holdings, _ = account_state(d)
-        day_trades = trades_on(d)
+    rc, status = cli(db, "status", "--json")
+    assert rc == 0 and status["confirmed"]["cash_balance"] == 100000, status
 
-        # 1) sync：每日全量 statement（含当日成交）
-        sfile = os.path.join(tempfile.gettempdir(), f"live_sync_{d}.yaml")
-        with open(sfile, "w", encoding="utf-8") as f:
-            yaml.safe_dump(make_sync(d, cash, holdings,
-                                     fills_from(day_trades, d)), f,
-                           allow_unicode=True, sort_keys=False)
-        r = cli("sync", LEDGER, sfile)
-        assert r and r["ok"], f"sync {d} failed: {r}"
-        assert abs(r["cash_adjust"]) < 0.02, f"unexpected adjust {d}: {r}"
+    anchors = Path(workdir) / "anchors.yaml"
+    anchors.write_text(yaml.safe_dump({"anchors": {
+        "000001.SZ": {"entry_date": "20240506", "entry_price": 10.0}}}),
+        encoding="utf-8")
+    rc, out = cli(db, "activate", "--date", D1, "--yaml", STRATEGY,
+                  "--anchors", str(anchors), "--fixtures-dir", FIXTURES)
+    assert rc == 0 and out["ok"], out
+    print(f"[activate] {out['strategy']} @ {out['effective_date']}")
 
-        # 2) signal：操作单必须等于回测次日实际成交
-        r = cli("signal", LEDGER, YAML, "--date", d)
-        assert r, f"signal {d} failed"
-        assert r["signal_date"] == d and r["trade_date"] == nxt, r
-        nxt_trades = trades_on(nxt)
-        # 开盘手动单（含 TB 盘前评估）= pending sell/buy 名单
-        intraday = {"TAKE_PROFIT", "TRAILING_TP", "STOP_LOSS"}
-        nxt_manual_sells = {t[0] for t in nxt_trades
-                            if t[1] == "SELL" and t[2] not in intraday}
-        nxt_manual_buys = {t[0] for t in nxt_trades if t[1] == "BUY"}
-        nxt_cond_sells = [t for t in nxt_trades
-                          if t[1] == "SELL" and t[2] in intraday]
-        sheet_sells = {s["symbol"] for s in r["open_sells"]}
-        sheet_buys = {b["symbol"] for b in r["open_buys"]}
-        assert sheet_sells == nxt_manual_sells, (
-            f"{d}: opsheet sells {sheet_sells} != backtest {nxt_manual_sells}")
-        assert sheet_buys == nxt_manual_buys, (
-            f"{d}: opsheet buys {sheet_buys} != backtest {nxt_manual_buys}")
-        # 触发归因：手动卖单 reason 必须与回测 trigger 一一对应
-        reason_map = {s["symbol"]: s["reason"] for s in r["open_sells"]}
-        for sym, _, trig, *_ in nxt_trades:
-            if sym in reason_map:
-                assert reason_map[sym] == trig, (
-                    f"{d}: {sym} reason {reason_map[sym]} != backtest {trig}")
-        # 盘中条件单：必须在 broker_conditions 监控表里有同类型触发价
-        cond_map = {x["symbol"]: {o["type"] for o in x["orders"]}
-                    for x in r["broker_conditions"]}
-        for sym, _, trig, *_ in nxt_cond_sells:
-            assert trig in cond_map.get(sym, set()), (
-                f"{d}: {sym} 盘中 {trig} 不在监控表 {cond_map.get(sym)}")
-        tag = ""
-        if day_trades:
-            tag = f" fills={len(day_trades)}"
-        if nxt_trades or day_trades or d in (days[0], days[-1]):
-            print(f"[{d}] ok{tag}: sells={sorted(sheet_sells)}"
-                  f" buys={sorted(sheet_buys)}"
-                  f" cond_orders={sum(len(x['orders']) for x in r['broker_conditions'])}"
-                  f" -> {nxt}")
+    rc, preview = cli(db, "preview", "--date", D1, "--json",
+                      "--fixtures-dir", FIXTURES)
+    assert rc == 0 and preview["decision_hash"], preview
 
-    # ── 3) 错报持仓 → 拒绝；随后正确 statement → 通过（验证回滚干净）──
-    d = days[-1]
-    cash, holdings, _ = account_state(d)
-    bad = dict(holdings)
-    dropped = next(iter(bad))
-    del bad[dropped]
-    sfile = os.path.join(tempfile.gettempdir(), "live_sync_bad.yaml")
-    with open(sfile, "w", encoding="utf-8") as f:
-        yaml.safe_dump(make_sync(d, cash, bad, fills_from(trades_on(d), d)), f,
-                       allow_unicode=True, sort_keys=False)
-    r = cli("sync", LEDGER, sfile)
-    assert r and not r["ok"], "bad sync should be rejected"
-    assert dropped in r["holding_diffs"], r
-    print(f"[reject] ok: 缺 {dropped} → 拒绝, diffs={r['holding_diffs']}")
-    with open(sfile, "w", encoding="utf-8") as f:
-        yaml.safe_dump(make_sync(d, cash, holdings, fills_from(trades_on(d), d)),
-                       f, allow_unicode=True, sort_keys=False)
-    r = cli("sync", LEDGER, sfile)
-    assert r and r["ok"], f"recovery sync failed: {r}"
-    print("[recover] ok: 正确 statement 通过，回滚未污染账本")
+    rc, plan = cli(db, "accept", "--date", D1, "--fixtures-dir", FIXTURES)
+    assert rc == 0 and plan["orders"], plan
+    order = next(o for o in plan["orders"] if o["kind"] == "BUY")
+    oid = order["client_order_id"]
+    print(f"[accept] {plan['plan_id']} orders={len(plan['orders'])}")
 
-    # ── 4) status ──
-    r = cli("status", LEDGER)
-    assert r["last_day"] and r["holdings"], r
-    assert r["last_day"]["date"] == days[-1], r
-    print(f"[status] ok: last={r['last_day']['date']}"
-          f" cash={r['last_day']['cash']:.2f}"
-          f" holdings={len(r['holdings'])}")
+    rc, out = cli(db, "fill", "--order", oid, "--date", D2,
+                  "--qty", order["planned_qty"], "--price", 1.0)
+    assert rc == 1 and out["code"] == "state", out  # 未提交先回报被拒
 
-    # ── 5) 中途建账（OPENING 播种）等价性：B 在中间日建账 vs A 回放 ──
-    lb = LB
-    d = days[3]
-    cash, holdings, entry = account_state(d)
-    pos_file = os.path.join(tempfile.gettempdir(), "live_e2e_positions.yaml")
-    with open(pos_file, "w", encoding="utf-8") as f:
-        yaml.safe_dump({"positions": [
-            {"symbol": s, "shares": v, "entry_date": entry[s]["entry_date"],
-             "entry_price": round(entry[s]["price"], 4)}
-            for s, v in holdings.items()]}, f, allow_unicode=True,
-            sort_keys=False)
-    r = cli("init", lb, "--date", d, "--cash", str(round(cash, 2)),
-            "--positions", pos_file)
-    assert r["ok"], r
-    rb = cli("signal", lb, YAML, "--date", d)
-    ra = cli("signal", LEDGER, YAML, "--date", d)
-    assert rb["account"] == ra["account"], (
-        f"seed 不等价:\nB={rb['account']}\nA={ra['account']}")
-    assert rb["open_sells"] == ra["open_sells"]
-    assert rb["open_buys"] == ra["open_buys"]
-    print("[seed parity] ok: B(中途建账+播种) == A(全程回放) 账户/操作单一致")
+    rc, out = cli(db, "submit", "--order", oid)
+    assert rc == 0 and out["status"] == "submitted", out
 
-    conn.close()
-    print("\n=== 全流程通过 ===")
+    price = close_of(order["symbol"], D2)
+    rc, out = cli(db, "fill", "--order", oid, "--date", D2,
+                  "--qty", order["planned_qty"], "--price", price,
+                  "--commission", 5.0)
+    assert rc == 0 and out["status"] == "filled", out
+    print(f"[fill] {order['symbol']} {order['planned_qty']}@{price}")
+
+    # 次日对账单：直接采用回放投影（成交已计入现金与持仓）
+    rc, status = cli(db, "status", "--json")
+    projected_cash = status["projection"]["cash"]
+    holdings = dict(status["projection"]["holdings"])
+    stmt2 = Path(workdir) / "stmt2.yaml"
+    stmt2.write_text(yaml.safe_dump({
+        "date": D2, "cash": round(projected_cash, 2),
+        "holdings": [{"symbol": s, "shares": n} for s, n in
+                     sorted(holdings.items())],
+    }, allow_unicode=True), encoding="utf-8")
+    rc, out = cli(db, "import", str(stmt2))
+    assert rc == 0 and out["snapshot"]["action"] == "imported_confirmed", out
+    print(f"[day2] 对账自动确认 cash={projected_cash:.2f}")
+
+    rc, preview2 = cli(db, "preview", "--date", D2, "--json",
+                       "--fixtures-dir", FIXTURES)
+    assert rc == 0 and preview2["decision_hash"], preview2
+
+    rc, out = cli(db, "expire", "--as-of", "20240701")
+    assert rc == 0 and out["expired"], out
+
+    rc, status = cli(db, "status", "--with-session", "--json",
+                     "--fixtures-dir", FIXTURES)
+    assert rc == 0 and status["activation"]["strategy"], status
+    assert status["outstanding_reserved"] == 0.0
+
+    print("\n=== 实盘 V2 离线演练通过 ===")
+    if "--keep" not in sys.argv:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

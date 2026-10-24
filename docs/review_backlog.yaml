@@ -2523,3 +2523,97 @@ closed:
     口径对齐。'
   opened: '2026-10-24'
   resolved: '2026-10-24'
+- id: LIVE-16
+  severity: P1
+  rule: Engine 支持 target_value；实盘操作单应保留末日策略决策，不能静默丢弃调仓意图
+  file: research/live.py
+  line: 714
+  note: 触发：合法 Strategy.select 返回 target_value={'000001.SZ':5000}，初始空仓现金 10000。复现：/tmp/ddup-live-design/probe.py
+    target_omission（2026-10-24 会话）。实际：run_signal.pending_actions 含目标，但 build_op_sheet
+    的 open_buys/open_sells 均为空，所有输出字段不含目标。独立期望：保留并转换目标或明确拒绝。影响：target_value 策略实盘建议缺失。处置：V1
+    操作单路径随实盘 V2 重制整体移除；V2 build_plan 将 target_value 统一转差额（tests/test_live_plan.py
+    test_a08_target_value_diff_conversion_and_clear：AAA 减 200 股/BBB 清仓 450 股含零股/CCC
+    买 500 股、未列持仓不动），会话层 fixtures 端到端复核（tests/test_live_strategy.py）。 关闭口径：已修复（V2 回归覆盖），非用户
+    waive。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-17
+  severity: P1
+  rule: build_op_sheet 注释声明 manual_buy 等权口径；同批无卖出时累计买入预算不得重复使用现金
+  file: research/live.py
+  line: 750
+  note: 触发：现金 10000、持仓市值 90000、max_positions=5、两只新买均收盘 10 元，无卖单无权重。复现：/tmp/ddup-live-design/probe.py
+    cash_budget。实际：预算依次 5000 与 10000（合计 15000，est_shares 500/1000）。独立期望：费用前两笔各 5000、合计不超可用现金。原因：n_left
+    递减但预算现金未递减。影响：操作单确定性超配。处置：V1 移除；V2 emit_buy 现金顺序递减并保留回测等权口径（tests/test_live_plan.py
+    test_a09_equal_weight_two_buys_share_cash_not_15000：500+500；test_default_fees_keep_budget_conservation
+    含费用不超 10000；test_a10_outstanding_reservation_reduces_spendable 预留扣减）。 关闭口径：已修复（V2
+    回归覆盖），非用户 waive。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-18
+  severity: P1
+  rule: 实盘支持现金差额表示出入金；外部入金不构成投资盈亏
+  file: research/live.py
+  line: 418
+  note: 触发：初始空仓 10000，次日仅入金 1000，sync statement 现金 11000/持仓空/成交空，再 signal。复现：/tmp/ddup-live-design/probe.py
+    cashflow_cli（CLI 全链路）。实际：sync ok 追加 ADJUST 1000，account_daily 当日 daily_pnl=cumulative_pnl=1000。独立期望：投资盈亏
+    0，现金与权益 11000。处置：V1 移除；V2 现金流六类显式分类，无自动 ADJUST（tests/test_live_account.py 入金/出金中性用例；tests/test_live.py
+    test_deposit_is_not_investment_pnl CLI 端到端：deposit 后 investment_pnl=0 且现金 11000）；接管缺口使
+    PnL incomplete 但不阻止已确认账户交易。 关闭口径：已修复（V2 回归覆盖），非用户 waive。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-V2-01
+  severity: P1
+  rule: docs/live_redesign.md §6『至少一个规范 CSV 成交导入格式』；A24『CSV/YAML/JSON 规范输入一致』
+  file: scripts/live.py
+  line: 77
+  note: 触发：检查已批准契约的 CSV 成交导入。证据：grep csv 于 scripts/live.py、research/live*.py、docs/live_guide.md
+    零匹配——V2 仅支持 statement YAML，无任何 CSV 成交导入格式，文档把契约静默收窄。独立期望：至少一种文档化的规范 CSV 成交导入（不必兼容所有券商）。影响：A24
+    部分不成立，券商 CSV 交割单需人工转 YAML。 修复：已修复：import-fills 子命令支持规范 CSV（与 YAML/JSON 同字段）+ 文档格式与
+    CLI 测试（test_import_fills_csv_and_duplicate_report）。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-V2-02
+  severity: P1
+  rule: docs/live_redesign.md §3.2『成交与账户状态投影、订单已成交量更新在同一事务；拒绝超卖/超计划成交等矛盾』
+  file: research/live_plan.py
+  line: 1321
+  note: 触发：同一 partial 订单重复回报同一笔成交（同 source+trade_id 同内容；CLI fill 缺省 trade_id={oid}#{date}#{qty}@{price}，同日同价同量两笔部分成交亦撞身份）。主控复现：accept→submit→record_fill(qty=100,
+    trade_id=T1)→record_fill(qty=100, trade_id=T1)。实际：账本幂等跳过（仅 1 行成交、现金扣一次），订单层继续
+    filled_qty+=100 → 200/filled/预留释放——订单与账本矛盾。独立期望：重复回报幂等 no-op（filled_qty 保持 100）或明确拒绝，两者一致。影响：计划显示完成而账户只有一半仓位，后续对账出现不可解释差异。
+    修复：已修复：PlanStore.record_fill 先于终态守卫按 (source, trade_id) 查重，同身份同内容回报幂等 no-op（订单/预留/账本均不变），异内容由账本抛身份冲突；API
+    与 CLI 回归（test_a19_duplicate_fill_report_is_idempotent_noop、test_duplicate_fill_report_via_cli_is_noop、test_a19_same_trade_id_different_content_rejected）。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-V2-03
+  severity: P2
+  rule: docs/live_redesign.md §6『错误有稳定 code、非零退出码』；CLI JSON 错误通道
+  file: research/live_plan.py
+  line: 1134
+  note: 触发：accept→cancel-plan（合法）→同日同 decision_hash 重新 accept。实际：cancelled/expired/superseded
+    状态落穿到 INSERT，plan_id 主键冲突抛 duckdb.ConstraintException，CLI main() 不捕获 → 裸 traceback。独立期望：返回既有计划或稳定
+    conflict/state 错误。影响：支持路径错误通道破坏（无数据损坏）。 修复：已修复：accept_plan 对 cancelled/expired/superseded
+    同日记录返回稳定 PlanStateError（不再裸 ConstraintException）；CLI 回归 test_cancel_plan_then_reaccept_clean_error。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-V2-04
+  severity: P3
+  rule: docs/live_guide.md 退出码说明与实现一致
+  file: docs/live_guide.md
+  line: 33
+  note: 文档称『2=输入错误、1=业务/状态错误』，但库层校验错误（code=validation）经 LiveAccountError 分支退出 1（tests/test_live.py
+    test_error_channels 断言 rc==1）。仅 OSError/ValueError（文件不存在等）为 2。文档漂移。 修复：已修复：live_guide
+    退出码口径改为 1=业务/校验/状态、2=参数与文件系统，与 test_error_channels 断言一致。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'
+- id: LIVE-V2-05
+  severity: P3
+  rule: review_protocol『数值/事务/日期保护应转移到 V2，报告旧测试映射』
+  file: tests/test_review_duckdb_core.py
+  line: 3
+  note: 迁移映射声称『statement 缺省成交日』保护在 test_live_account.py，但 V2 测试的 import_fills 行均带显式
+    date；CLI statement 测试覆盖 default_date 路径却未断言落库日期 == statement 日期。保护弱化为路径覆盖、值断言缺失。
+    修复：已修复：test_statement_fill_default_date_persisted 断言 statement 缺省成交日落库日期；CSV 缺
+    date 行亦断言 --date 缺省值。
+  opened: '2026-10-24'
+  resolved: '2026-10-24'

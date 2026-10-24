@@ -1,1175 +1,473 @@
-"""实盘账本（research.live）测试：成交应用 / 对账 / 操作单 / 回测往返一致性。
+"""实盘 V2 CLI 集成测试 — 每日闭环与错误通道（docs/live_redesign.md §6）。
 
-核心不变式：把回测 trade_log 当账本灌进回放，衍生账户轨迹必须与回测
-逐日逐分钱一致，末日 pending_actions 逐键相等——证明实盘路径 ≡ 回测路径。
+策略会话命令用仓库 fixtures 行情离线运行（--fixtures-dir），不依赖
+本机真实行情库；账户/计划命令不需要行情。全部经 scripts/live.main
+驱动，独立期望来自手算现金/股数与协议约定。
 """
 
-import argparse
 import json
-import sys
-from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 import yaml
 
 import scripts.live as live_cli
-from btcore import database, types
-from btcore.backend import DataBackend
-from btcore.engine import Engine
-from btcore.provider import DataProvider
-from btcore.strategy import Strategy
-from btcore.strategy_loader import load_strategy
-from research.live import (
-    LEDGER_SCHEMA_VERSION,
-    LedgerStore,
-    apply_fill,
-    build_op_sheet,
-    reconcile,
-    replay_ledger,
-    run_signal,
-    seed_opening,
-    validate_fill_dates,
-)
-from tests.conftest import MockDataBackend, make_account
+from research.live_account import AccountLedger
 
-EXAMPLE_YAML = "strategies/examples/rolling_ranker/config.yaml"
-START, END = "20240603", "20240628"
-NOW = "2026-08-03T00:00:00"
+FIXTURES = "tests/fixtures"
+YAML_STRATEGY = "strategies/examples/rolling_ranker/config.yaml"
+APPROX = pytest.approx
 
 
-def _fill(date, symbol, side, price=10.0, shares=100, commission=0.0,
-          stamp_tax=0.0, transfer_fee=0.0, reason="MANUAL"):
-    return {"date": date, "symbol": symbol, "side": side, "price": price,
-            "shares": shares, "commission": commission, "stamp_tax": stamp_tax,
-            "transfer_fee": transfer_fee, "reason": reason}
-
-
-def _run_backtest(tmp_path):
-    """跑一次 rolling_ranker 回测（TestBacktestParity / TestOpSheet 共用）。"""
-    strategy = load_strategy(EXAMPLE_YAML)
-    provider = DataProvider(MockDataBackend())
-    engine = Engine(strategy, provider, initial_capital=1_000_000,
-                    db_path=str(tmp_path / "bt.duckdb"))
-    engine.run(START, END)
-    return engine
-
-
-def _ledger_from_backtest(bt_engine, tmp_path):
-    """把回测 trade_log 灌进 LedgerStore（BUY/SELL 行按 id 顺序）。"""
-    store = LedgerStore(str(tmp_path / "ledger.duckdb"))
-    store.init_account(START, 1_000_000.0, 1_000_000.0)
-    conn = database.connect_result_db(str(tmp_path / "bt.duckdb"), read_only=True)
-    rows = conn.execute(
-        "SELECT date, symbol, side, trigger, price, shares, commission,"
-        " stamp_tax, transfer_fee FROM trade_log"
-        " WHERE side IN ('BUY','SELL') ORDER BY id"
-    ).fetchall()
-    conn.close()
-    for date, symbol, side, trig, price, shares, comm, tax, fee in rows:
-        store.append_fill(date, symbol, side, price=price, shares=shares,
-                          commission=comm, stamp_tax=tax, transfer_fee=fee,
-                          reason=trig, created_at=NOW)
-    store.conn.commit()
-    return store
-
-
-class TestApplyFill:
-    def test_buy_new_creates_locked_holding(self):
-        acc = make_account(cash=100_000)
-        trade = apply_fill(acc, _fill("20240603", "A", "BUY", price=10.0,
-                                      shares=1000, commission=2.0), "20240603")
-        h = acc.holdings["A"]
-        assert h.shares == 1000 and h.locked is True
-        assert h.entry_date == "20240603" and h.entry_price == 10.0
-        assert acc.cash == pytest.approx(100_000 - 10_000 - 2.0)
-        assert trade.net_amount == pytest.approx(-10_002.0)
-
-    def test_buy_add_weighted_average_keeps_entry_date(self):
-        acc = make_account(cash=100_000)
-        apply_fill(acc, _fill("20240603", "A", "BUY", price=10.0, shares=1000), "20240603")
-        apply_fill(acc, _fill("20240604", "A", "BUY", price=20.0, shares=1000), "20240604")
-        h = acc.holdings["A"]
-        assert h.shares == 2000
-        assert h.entry_price == pytest.approx(15.0)
-        assert h.entry_date == "20240603"  # 保留原买入日（红利税持股期口径）
-
-    def test_sell_partial_and_full(self):
-        acc = make_account(cash=100_000)
-        apply_fill(acc, _fill("20240603", "A", "BUY", price=10.0, shares=1000), "20240603")
-        acc.cash = 0  # 聚焦卖出现金流（持仓已在账）
-        trade = apply_fill(acc, _fill("20240604", "A", "SELL", price=12.0,
-                                      shares=400, stamp_tax=6.0), "20240604")
-        assert acc.holdings["A"].shares == 600
-        assert acc.cash == pytest.approx(4800 - 6.0)
-        assert trade.net_amount == pytest.approx(4794.0)
-        apply_fill(acc, _fill("20240605", "A", "SELL", price=12.0, shares=600), "20240605")
-        assert "A" not in acc.holdings
-
-    def test_sell_unheld_raises(self):
-        acc = make_account(cash=0)
-        with pytest.raises(ValueError, match="缺买入记录"):
-            apply_fill(acc, _fill("20240603", "A", "SELL"), "20240603")
-
-    def test_oversell_raises(self):
-        acc = make_account(cash=100_000)
-        apply_fill(acc, _fill("20240603", "A", "BUY", shares=100), "20240603")
-        with pytest.raises(ValueError, match="账本不一致"):
-            apply_fill(acc, _fill("20240604", "A", "SELL", shares=200), "20240604")
-
-    def test_adjust_moves_cash_without_trade(self):
-        acc = make_account(cash=1000)
-        assert apply_fill(acc, _fill("20240603", "", "ADJUST", price=-50.0),
-                          "20240603") is None
-        assert acc.cash == pytest.approx(950.0)
-
-
-class TestSeedOpening:
-    def test_holding_days_seed_matches_continuous_run(self):
-        """种子 holding_days + 回放递增 = 引擎从买入日起连续运行的口径。"""
-        provider = DataProvider(MockDataBackend())
-        init = "20240605"
-        store = LedgerStore(":memory:")
-        store.init_account(init, 50_000.0, 60_000.0)
-        # entry 20240603 买入 → 0603/0604 两晚结算 → init 日递增前种子=2
-        store.append_fill("20240603", "000001.SZ", "OPENING", price=10.0,
-                          shares=100, reason="OPENING", created_at=NOW)
-        acc = types.Account(cash=50_000.0, initial_capital=60_000.0)
-        seed_opening(acc, store, provider, init)
-        h = acc.holdings["000001.SZ"]
-        assert h.holding_days == 2  # 种子 = entry 至 init 前的结算次数
-        assert h.locked is False    # entry < init
-        h.holding_days += 1         # 模拟 init 日 compute_pending 递增
-        assert h.holding_days == 3  # 与 0603 买入、0605 晚结算的引擎口径一致
-
-    def test_locked_when_entry_is_init_date(self):
-        provider = DataProvider(MockDataBackend())
-        store = LedgerStore(":memory:")
-        store.init_account(START, 50_000.0, 60_000.0)
-        store.append_fill(START, "000001.SZ", "OPENING", price=10.0,
-                          shares=100, reason="OPENING", created_at=NOW)
-        acc = types.Account(cash=50_000.0, initial_capital=60_000.0)
-        seed_opening(acc, store, provider, START)
-        assert acc.holdings["000001.SZ"].locked is True
-
-
-class TestReplayMissingBarDay:
-    def test_gap_day_advances_holding_and_clears_day_state_without_hooks(self, request):
-        days = ["20240603", "20240604", "20240605", "20240606"]
-        symbol = "000001.SZ"
-
-        class SparseBackend(DataBackend):
-            def get_calendar(self, start, end):
-                return [day for day in days if start <= day <= end]
-
-            def get_dividends_on_date(self, date_str):
-                if date_str == "20240604":
-                    return {symbol: {"stk_div": 0.1, "cash_div": 0.5}}
-                return {}
-
-            def query_bars(self, symbols, start, end, columns=None):
-                dates = [d for d in days if d != "20240604" and start <= d <= end]
-                if symbols is not None and symbol not in symbols:
-                    dates = []
-                index = pd.MultiIndex.from_tuples(
-                    [(d, symbol) for d in dates], names=["trade_date", "symbol"]
-                )
-                closes = [100.0 if d == days[-1] else 10.0 for d in dates]
-                frame = pd.DataFrame({
-                    "open": closes, "high": closes, "low": closes, "close": closes,
-                    "vol": [1000.0] * len(index), "adj_factor": [1.0] * len(index),
-                    "pre_close": closes, "up_limit": [110.0 if p == 100 else 11.0
-                                                         for p in closes],
-                    "down_limit": [90.0 if p == 100 else 9.0 for p in closes],
-                }, index=index)
-                return frame if columns is None else frame[columns]
-
-        class AgeExit(Strategy):
-            def __init__(self):
-                super().__init__({"benchmark": "", "initial_capital": 10_000})
-                self.hook_dates = {name: [] for name in
-                                   ("on_fills", "on_tick", "select", "calc_conditions")}
-                self.conditions_seen = []
-
-            def on_fills(self, trades, provider):
-                self.hook_dates["on_fills"].append(provider.get_as_of())
-
-            def on_tick(self, bars, snapshot, provider):
-                self.hook_dates["on_tick"].append(provider.get_as_of())
-                self._provider = provider
-                return None
-
-            def select(self, bars, snapshot, provider):
-                self.hook_dates["select"].append(provider.get_as_of())
-                self.conditions_seen.append(
-                    list(snapshot.holdings[symbol].conditions)
-                    if symbol in snapshot.holdings else []
-                )
-                return {
-                    "sell": [s for s, h in snapshot.holdings.items()
-                             if h.holding_days == 1 or h.holding_days >= 3]
-                }
-
-            def calc_conditions(self, symbol, entry_price, bar, holding_days):
-                self.hook_dates["calc_conditions"].append(
-                    self._provider.get_as_of() if hasattr(self, "_provider") else None
-                )
-                return [{"type": "STOP_LOSS", "price": 9.0}]
-
-        store = LedgerStore(":memory:")
-        request.addfinalizer(store.close)
-        store.init_account(days[0], 9_000.0, 10_000.0)
-        store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
-                          reason="OPENING", created_at=NOW)
-        store.conn.commit()
-        strategy = AgeExit()
-        engine, calendar = run_signal(
-            strategy, DataProvider(SparseBackend()), store, days[2]
-        )
-
-        assert calendar == days[:3]
-        assert engine.account.holdings[symbol].holding_days == 3
-        assert engine.pending_actions["sell"] == [symbol]
-        assert all(dates == days[:1] + days[2:3]
-                   for dates in strategy.hook_dates.values())
-        assert strategy.conditions_seen[-1] == []
-        assert engine.account.holdings[symbol].shares == 110
-        assert engine.account.cash == pytest.approx(9_040.0)
-        corporate_sides = store.conn.execute(
-            "SELECT side FROM trade_log WHERE side IN ('DIV', 'STK_DIV')"
-        ).fetchall()
-        assert {side for (side,) in corporate_sides} == {"DIV", "STK_DIV"}
-
-        # 短窗和含极端未来价格的长窗共有前缀，账户日状态必须相同。
-        long_store = LedgerStore(":memory:")
-        request.addfinalizer(long_store.close)
-        long_store.init_account(days[0], 9_000.0, 10_000.0)
-        long_store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
-                               reason="OPENING", created_at=NOW)
-        long_store.conn.commit()
-        long_strategy = AgeExit()
-        long_provider = DataProvider(SparseBackend())
-        long_engine = Engine(long_strategy, long_provider, initial_capital=10_000.0)
-        long_engine.account.cash = 9_000.0
-        seed_opening(long_engine.account, long_store, long_provider, days[0])
-        long_calendar = long_engine.prepare(days[0], days[-1])
-        long_daily, _ = replay_ledger(
-            long_engine, long_provider, long_store, long_calendar,
-            run_decisions=True, collect=True,
-        )
-        short_daily = store.conn.execute(
-            "SELECT date, cash, total_value, n_holdings FROM account_daily "
-            "WHERE run_id = 1 ORDER BY date"
-        ).fetchall()
-        long_prefix = [tuple(row[k] for k in
-                             ("date", "cash", "total_value", "n_holdings"))
-                       for row in long_daily[:3]]
-        assert [row[0] for row in long_prefix] == [row[0] for row in short_daily]
-        for long_row, short_row in zip(long_prefix, short_daily):
-            assert long_row[1:] == pytest.approx(short_row[1:])
-        assert engine.account.cash + sum(
-            h.shares * h.last_price for h in engine.account.holdings.values()
-        ) == pytest.approx(engine.account.total_value)
-
-        # 单独回放到缺 bar 日，直接观察生命周期推进和当日状态清理。
-        gap_store = LedgerStore(":memory:")
-        request.addfinalizer(gap_store.close)
-        gap_store.init_account(days[0], 9_000.0, 10_000.0)
-        gap_store.append_fill(days[0], symbol, "OPENING", price=10.0, shares=100,
-                              reason="OPENING", created_at=NOW)
-        gap_store.conn.commit()
-        gap_strategy = AgeExit()
-        gap_provider = DataProvider(SparseBackend())
-        gap_engine = Engine(gap_strategy, gap_provider, initial_capital=10_000.0)
-        gap_engine.account.cash = 9_000.0
-        seed_opening(gap_engine.account, gap_store, gap_provider, days[0])
-        gap_calendar = gap_engine.prepare(days[0], days[1])
-        gap_daily, _ = replay_ledger(
-            gap_engine, gap_provider, gap_store, gap_calendar,
-            run_decisions=True, collect=True,
-        )
-        gap_holding = gap_engine.account.holdings[symbol]
-        assert gap_holding.holding_days == 2
-        assert gap_holding.locked is False
-        assert gap_holding.conditions == []
-        assert gap_engine.pending_actions == {"buy": [], "sell": []}
-        assert gap_strategy.hook_dates == {
-            name: [days[0]] for name in gap_strategy.hook_dates
-        }
-        assert gap_daily[-1]["cash"] + sum(
-            h.shares * h.last_price for h in gap_engine.account.holdings.values()
-        ) == pytest.approx(gap_daily[-1]["total_value"])
-        previous_total = 10_000.0
-        for row in gap_daily:
-            assert row["daily_pnl"] == pytest.approx(
-                row["total_value"] - previous_total
-            )
-            previous_total = row["total_value"]
-        assert gap_daily[-1]["total_value"] == pytest.approx(10_040.0)
-
-        no_decision_store = LedgerStore(":memory:")
-        request.addfinalizer(no_decision_store.close)
-        no_decision_store.init_account(days[0], 9_000.0, 10_000.0)
-        no_decision_store.append_fill(
-            days[0], symbol, "OPENING", price=10.0, shares=100,
-            reason="OPENING", created_at=NOW,
-        )
-        no_decision_store.conn.commit()
-        no_decision_strategy = AgeExit()
-        no_decision_provider = DataProvider(SparseBackend())
-        no_decision_engine = Engine(
-            no_decision_strategy, no_decision_provider, initial_capital=10_000.0
-        )
-        no_decision_engine.account.cash = 9_000.0
-        seed_opening(no_decision_engine.account, no_decision_store,
-                     no_decision_provider, days[0])
-        no_decision_calendar = no_decision_engine.prepare(days[0], days[0])
-        no_decision_holding = no_decision_engine.account.holdings[symbol]
-        no_decision_holding.holding_days = 7
-        no_decision_holding.locked = True
-        no_decision_holding.conditions = [{"type": "STOP_LOSS", "price": 9.0}]
-        no_decision_engine.pending_actions = {"buy": [symbol], "sell": [symbol]}
-        replay_ledger(
-            no_decision_engine, no_decision_provider, no_decision_store,
-            no_decision_calendar, run_decisions=False,
-        )
-        assert no_decision_holding.holding_days == 7
-        assert no_decision_holding.locked is True
-        assert no_decision_holding.conditions == [{"type": "STOP_LOSS", "price": 9.0}]
-        assert no_decision_engine.pending_actions == {"buy": [symbol], "sell": [symbol]}
-        assert all(not dates for dates in no_decision_strategy.hook_dates.values())
-
-
-
-class TestReconcile:
-    def _store_with_fills(self):
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.append_fill(START, "000001.SZ", "BUY", price=10.0,
-                          shares=1000, commission=2.0, created_at=NOW)
-        store.conn.commit()
-        return store
-
-    def test_match(self):
-        store = self._store_with_fills()
-        provider = DataProvider(MockDataBackend())
-        report = reconcile(store, provider, "20240604", 989_998.0,
-                           {"000001.SZ": 1000})
-        assert report.ok and report.holding_diffs == {}
-        assert report.cash_delta == pytest.approx(0.0)
-
-    def test_holding_mismatch_detected(self):
-        store = self._store_with_fills()
-        provider = DataProvider(MockDataBackend())
-        report = reconcile(store, provider, "20240604", 989_998.0,
-                           {"000001.SZ": 900})
-        assert not report.ok
-        assert report.holding_diffs == {"000001.SZ": (1000, 900)}
-
-    def test_cash_delta_reported(self):
-        store = self._store_with_fills()
-        provider = DataProvider(MockDataBackend())
-        report = reconcile(store, provider, "20240604", 989_000.0,
-                           {"000001.SZ": 1000})
-        assert report.ok
-        assert report.cash_delta == pytest.approx(-998.0)
-
-    def test_non_trading_date_fill_not_replayed(self):
-        """账本回放只遍历开市日：非开市 fill 是死行（CLI sync 已归一化日期）。
-
-        回归护栏：提示任何直接写账本的调用方必须落到交易日，否则对账永远不收敛。
-        """
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.append_fill("20240608", "000001.SZ", "BUY", price=10.0,
-                          shares=100, created_at=NOW)  # 周六
-        store.conn.commit()
-        provider = DataProvider(MockDataBackend())
-        report = reconcile(store, provider, "20240611", 1_000_000.0, {})
-        assert report.holding_diffs == {}
-
-
-class TestSyncIdempotency:
-    """sync 幂等：重复 statement 不双重入账（agent 重跑安全）。"""
-
-    def test_duplicate_fills_skipped(self):
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        fills = [_fill(START, "000001.SZ", "BUY", price=10.0, shares=1000,
-                       commission=2.0)]
-        appended, skipped = store.append_fills_idempotent(fills, NOW)
-        assert (appended, skipped) == (1, 0)
-        appended, skipped = store.append_fills_idempotent(fills, NOW)
-        assert (appended, skipped) == (0, 1)  # 完全重复 → 跳过
-        # 同交易不同费用 → 视为不同（reconcile 会暴露差额），不静默吞
-        fills[0]["commission"] = 2.5
-        appended, skipped = store.append_fills_idempotent(fills, NOW)
-        assert (appended, skipped) == (1, 0)
-        assert len(store.fills()) == 2
-
-    def test_lowercase_side_is_idempotent(self):
-        """side 大小写归一化后判重（入库统一 upper），重跑不得双写。"""
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        fills = [_fill(START, "000001.SZ", "buy", price=10.0, shares=1000,
-                       commission=2.0)]
-        assert store.append_fills_idempotent(fills, NOW) == (1, 0)
-        assert store.append_fills_idempotent(fills, NOW) == (0, 1)
-        assert [f["side"] for f in store.fills()] == ["BUY"]
-
-    def test_duplicate_fill_within_one_batch_skipped(self):
-        """同一 statement 内完全重复的两条 fill 只入一条。"""
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        f = _fill(START, "000001.SZ", "buy", price=10.0, shares=1000)
-        assert store.append_fills_idempotent([f, dict(f)], NOW) == (1, 1)
-        assert len(store.fills()) == 1
-
-    def test_bad_data_reports_error_json_not_crash(self):
-        """缺买入记录的卖出 → data_error 而非堆栈崩溃（CLI 层由 cmd_sync 兜底，
-        此处验证 append + reconcile 路径抛 ValueError）。"""
-        store = LedgerStore(":memory:")
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.append_fills_idempotent(
-            [_fill(START, "000001.SZ", "SELL", price=10.0, shares=100)],
-            NOW,
-        )
-        provider = DataProvider(MockDataBackend())
-        with pytest.raises(ValueError, match="缺买入记录"):
-            reconcile(store, provider, START, 990_000.0, {})
-
-
-class TestBacktestParity:
-    """验收测试：回测 trade_log → 账本 → 回放 ≡ 回测。"""
-
-    def test_round_trip_parity(self, tmp_path):
-        bt = _run_backtest(tmp_path)
-        assert bt.run_id > 0
-        n_trades = database.connect_result_db(
-            str(tmp_path / "bt.duckdb"), read_only=True
-        ).execute("SELECT 1 FROM trade_log").fetchall()
-        assert len(n_trades) > 0, "回测无成交，parity 测试失去意义"
-
-        store = _ledger_from_backtest(bt, tmp_path)
-        strategy = load_strategy(EXAMPLE_YAML)
-        provider = DataProvider(MockDataBackend())
-        live_engine, calendar = run_signal(strategy, provider, store, END)
-        assert calendar[-1] == END
-
-        # 1) 期末账户逐分钱一致
-        la, ba = live_engine.account, bt.account
-        assert la.cash == pytest.approx(ba.cash, abs=1e-6)
-        assert la.total_value == pytest.approx(ba.total_value, abs=1e-6)
-        assert set(la.holdings) == set(ba.holdings)
-        for symbol in ba.holdings:
-            lh, bh = la.holdings[symbol], ba.holdings[symbol]
-            assert lh.shares == bh.shares
-            assert lh.entry_price == pytest.approx(bh.entry_price, abs=1e-9)
-            assert lh.holding_days == bh.holding_days
-
-        # 2) 末日 pending_actions 逐键相等（明日操作单与回测决策一致）
-        assert live_engine.pending_actions == bt.pending_actions
-
-        # 3) 衍生 account_daily 与回测逐日一致
-        bt_conn = database.connect_result_db(
-            str(tmp_path / "bt.duckdb"), read_only=True
-        )
-        bt_daily = bt_conn.execute(
-            "SELECT date, cash, total_value FROM account_daily ORDER BY date"
-        ).fetchall()
-        bt_conn.close()
-        live_daily = store.conn.execute(
-            "SELECT date, cash, total_value FROM account_daily"
-            " WHERE run_id = 1 ORDER BY date"
-        ).fetchall()
-        assert len(live_daily) == len(bt_daily)
-        for (ld, lc, lv), (bd, bc, bv) in zip(live_daily, bt_daily):
-            assert ld == bd
-            assert lc == pytest.approx(bc, abs=1e-6)
-            assert lv == pytest.approx(bv, abs=1e-6)
-
-        # 4) 幂等：再跑一次 signal，衍生表不变
-        strategy2 = load_strategy(EXAMPLE_YAML)
-        provider2 = DataProvider(MockDataBackend())
-        run_signal(strategy2, provider2, store, END)
-        live_daily2 = store.conn.execute(
-            "SELECT date, cash, total_value FROM account_daily"
-            " WHERE run_id = 1 ORDER BY date"
-        ).fetchall()
-        assert live_daily2 == live_daily
-
-
-class TestOpSheet:
-    def test_op_sheet_structure_and_reasons(self, tmp_path):
-        bt = _run_backtest(tmp_path)
-        store = _ledger_from_backtest(bt, tmp_path)
-        strategy = load_strategy(EXAMPLE_YAML)
-        provider = DataProvider(MockDataBackend())
-        engine, calendar = run_signal(strategy, provider, store, END)
-        sheet = build_op_sheet(engine, provider, calendar[-1])
-
-        assert sheet["signal_date"] == END
-        assert sheet["trade_date"] and sheet["trade_date"] > END
-        acct = sheet["account"]
-        assert acct["cash"] == pytest.approx(engine.account.cash, abs=0.01)
-        # 卖单带 reason（缺省 MANUAL），买单带预估股数口径
-        for s in sheet["open_sells"]:
-            assert s["reason"] and s["shares"]
-        for b in sheet["open_buys"]:
-            assert "est_shares" in b and "ref_close" in b
-        # 条件单监控表覆盖所有带条件单的持仓
-        cond_syms = {c["symbol"] for c in sheet["broker_conditions"]}
-        expected = {s for s, h in engine.account.holdings.items() if h.conditions}
-        assert cond_syms == expected
-
-
-class TestSellReasonsProtocol:
-    """select 协议 sell_reasons 键（TREND_BREAK 归因透传）。"""
-
-    def _strategy(self, reasons):
-        from btcore.strategy import Strategy
-
-        class _R(Strategy):
-            def select(self, bars, snapshot, provider):
-                sells = list(snapshot.holdings.keys())
-                if not sells and not snapshot.holdings:
-                    # 首日建仓一只，次日卖出带 reason
-                    return {"buy": ["000001.SZ"], "sell": []}
-                return {"buy": [], "sell": sells,
-                        "sell_reasons": {s: reasons for s in sells}}
-
-            def calc_conditions(self, symbol, entry_price, bar, holding_days):
-                return []
-
-        return _R(config={"max_positions": 5, "initial_capital": 1_000_000})
-
-    def test_reason_becomes_trade_trigger(self, tmp_path):
-        engine = Engine(self._strategy("TREND_BREAK"),
-                        DataProvider(MockDataBackend()),
-                        initial_capital=1_000_000, db_path=str(tmp_path / "r.duckdb"))
-        engine.run("20240603", "20240607")
-        conn = database.connect_result_db(str(tmp_path / "r.duckdb"), read_only=True)
-        triggers = [r[0] for r in conn.execute(
-            "SELECT trigger FROM trade_log WHERE side = 'SELL'").fetchall()]
-        conn.close()
-        assert triggers and all(t == "TREND_BREAK" for t in triggers)
-
-    def test_reason_symbol_must_be_in_sell(self):
-        from btcore.strategy import Strategy
-
-        class _Bad(Strategy):
-            def select(self, bars, snapshot, provider):
-                return {"buy": [], "sell": [],
-                        "sell_reasons": {"000001.SZ": "X"}}
-
-            def calc_conditions(self, symbol, entry_price, bar, holding_days):
-                return []
-
-        engine = Engine(_Bad(config={"max_positions": 5,
-                                     "initial_capital": 1_000_000}),
-                        DataProvider(MockDataBackend()), db_path=":memory:")
-        with pytest.raises(ValueError, match="不在 sell 名单"):
-            engine.run("20240603", "20240607")
-
-
-# ── 审计修复回归（LIVE-01..15 / INFRA-05）──
-
-
-class _ClosableMockBackend(MockDataBackend):
-    """MockDataBackend + close()：LIVE CLI 会关闭 provider.backend。"""
-
-    def close(self):
-        pass
-
-
-class _ExtraCalendarBackend(_ClosableMockBackend):
-    """trade_cal 含 20240702（开市）但无 bars——模拟日历先行、数据未更新。"""
-
-    def __init__(self):
-        super().__init__()
-        extra = pd.DataFrame([{
-            "cal_date": "20240702", "is_open": 1, "exchange": "SSE",
-        }])
-        self._trade_cal = pd.concat([self._trade_cal, extra], ignore_index=True)
-
-
-def _mock_provider() -> DataProvider:
-    return DataProvider(_ClosableMockBackend())
-
-
-def _extra_cal_provider() -> DataProvider:
-    return DataProvider(_ExtraCalendarBackend())
-
-
-def _json_out(capsys) -> dict:
+def run_cli(capsys, *argv):
+    rc = live_cli.main([str(a) for a in argv])
     out = capsys.readouterr().out
-    return json.loads(out[out.index("{"):out.rindex("}") + 1])
+    assert out.strip().startswith("{"), f"non-JSON output: {out[:200]}"
+    return rc, json.loads(out)
 
 
-def _ledger_with_buy(tmp_path, name="ledger.duckdb", date=START,
-                     cash=1_000_000.0, symbol="000001.SZ",
-                     price=10.0, shares=1000) -> LedgerStore:
-    store = LedgerStore(str(tmp_path / name))
-    store.init_account(date, cash, cash)
-    store.append_fill(date, symbol, "BUY", price=price, shares=shares,
-                      commission=2.0, created_at=NOW)
-    store.conn.commit()
-    return store
-
-
-def _sync_yaml(tmp_path, name, *, date, cash, holdings=None, fills=None) -> str:
+def write_yaml(tmp_path, name, payload):
     path = tmp_path / name
-    path.write_text(yaml.safe_dump({
-        "date": date, "cash": cash,
-        "holdings": holdings if holdings is not None else [],
-        "fills": fills or [],
-    }, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    path.write_text(yaml.safe_dump(payload, allow_unicode=True,
+                                   sort_keys=False), encoding="utf-8")
     return str(path)
 
 
-class TestLedgerSchemaVersion:
-    """LIVE-14：init 写 schema_version；未知版本 fail-fast，缺失兼容旧账本。"""
-
-    def test_init_writes_schema_version(self):
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account(START, 1_000_000.0, 1_000_000.0)
-            assert store.get_meta("schema_version") == str(LEDGER_SCHEMA_VERSION)
-        finally:
-            store.close()
-
-    def test_unknown_version_rejected(self, tmp_path):
-        db = str(tmp_path / "ledger.duckdb")
-        store = LedgerStore(db)
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.set_meta("schema_version", "99")
-        store.conn.commit()
-        store.close()
-        with pytest.raises(ValueError, match="schema_version"):
-            LedgerStore(db)
-
-    def test_missing_version_is_legacy_compatible(self, tmp_path):
-        db = str(tmp_path / "ledger.duckdb")
-        store = LedgerStore(db)
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.conn.execute("DELETE FROM ledger_meta WHERE key = 'schema_version'")
-        store.conn.commit()
-        store.close()
-        reopened = LedgerStore(db)
-        try:
-            assert reopened.is_initialized()
-        finally:
-            reopened.close()
-
-
-class TestNumericGuards:
-    """LIVE-02：NaN/Inf 在 init/append_fill/apply_fill/reconcile 全部拒绝。"""
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-    def test_init_account_rejects_nonfinite(self, bad):
-        store = LedgerStore(":memory:")
-        try:
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.init_account(START, bad, 1_000_000.0)
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.init_account(START, 1_000_000.0, bad)
-            assert not store.is_initialized()
-        finally:
-            store.close()
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
-    def test_append_fill_rejects_nonfinite(self, bad):
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account(START, 1_000_000.0, 1_000_000.0)
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.append_fill(START, "000001.SZ", "BUY", price=bad,
-                                  shares=100, created_at=NOW)
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.append_fill(START, "000001.SZ", "BUY", price=10.0,
-                                  shares=100, commission=bad, created_at=NOW)
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.append_fill(START, "", "ADJUST", price=bad, created_at=NOW)
-            assert store.fills() == []
-        finally:
-            store.close()
-
-    def test_apply_fill_rejects_nonfinite(self):
-        acc = make_account(cash=100_000)
-        with pytest.raises(ValueError, match="NaN/Inf|非法"):
-            apply_fill(acc, _fill(START, "A", "BUY", price=float("nan")), START)
-        with pytest.raises(ValueError, match="NaN/Inf|非法"):
-            apply_fill(acc, _fill(START, "A", "BUY", commission=float("inf")), START)
-
-    def test_reconcile_rejects_nonfinite_cash(self):
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account(START, 1_000_000.0, 1_000_000.0)
-            provider = _mock_provider()
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                reconcile(store, provider, START, float("nan"), {})
-        finally:
-            store.close()
-
-    def test_legacy_nan_ledger_meta_fails_fast(self, tmp_path):
-        db = str(tmp_path / "ledger.duckdb")
-        store = LedgerStore(db)
-        store.init_account(START, 1_000_000.0, 1_000_000.0)
-        store.set_meta("initial_cash", "nan")
-        store.conn.commit()
-        store.close()
-        store = LedgerStore(db)
-        try:
-            with pytest.raises(ValueError, match="NaN/Inf|非法"):
-                store.initial_cash
-        finally:
-            store.close()
-
-
-class TestApplyFillNegativeCash:
-    """LIVE-13：应用 fill 后现金为负 → fail-fast，不允许持久化负现金。"""
-
-    def test_buy_insufficient_cash_raises(self):
-        acc = make_account(cash=500.0)
-        with pytest.raises(ValueError, match="现金为负"):
-            apply_fill(acc, _fill(START, "A", "BUY", price=10.0, shares=100), START)
-
-    def test_adjust_below_zero_raises(self):
-        acc = make_account(cash=100.0)
-        with pytest.raises(ValueError, match="现金为负"):
-            apply_fill(acc, _fill(START, "", "ADJUST", price=-200.0), START)
-
-    def test_cmd_sync_negative_statement_cash_rejected(self, tmp_path, monkeypatch,
-                                                       capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        path = _sync_yaml(tmp_path, "neg.yaml", date=START, cash=-5000.0,
-                          holdings=[{"symbol": "000001.SZ", "shares": 1000}])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb"), file=path))
-        assert rc == 2
-        out = _json_out(capsys)
-        assert out["ok"] is False and out["stage"] == "parse_error"
-        assert "负" in out["message"] or "negative" in out["message"]
-
-
-class TestIdempotencyPrecision:
-    """LIVE-15：幂等归一化仅用于判重，落库保留原始数值。"""
-
-    def test_original_price_and_fees_preserved(self):
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account(START, 1_000_000.0, 1_000_000.0)
-            fills = [_fill(START, "000001.SZ", "BUY", price=11.12345678,
-                           shares=1000, commission=2.12345678)]
-            assert store.append_fills_idempotent(fills, NOW) == (1, 0)
-            assert store.append_fills_idempotent(fills, NOW) == (0, 1)
-            row = store.fills()[0]
-            assert row["price"] == 11.12345678
-            assert row["commission"] == 2.12345678
-        finally:
-            store.close()
-
-    def test_fractional_shares_rejected(self):
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account(START, 1_000_000.0, 1_000_000.0)
-            with pytest.raises(ValueError, match="整数"):
-                store.append_fills_idempotent(
-                    [_fill(START, "000001.SZ", "BUY", shares=1000.9)], NOW)
-            assert store.fills() == []
-        finally:
-            store.close()
-
-
-class TestSeedOpeningAnchor:
-    """LIVE-06：init 非开市日时 seed 锚定 ≤init 的最近开市日（bisect 防御）。"""
-
-    def test_init_on_non_trading_day_anchors_to_prev_open_day(self):
-        provider = _mock_provider()
-        store = LedgerStore(":memory:")
-        try:
-            store.init_account("20240608", 50_000.0, 60_000.0)  # 周六
-            store.append_fill("20240603", "000001.SZ", "OPENING", price=10.0,
-                              shares=100, reason="OPENING", created_at=NOW)
-            acc = types.Account(cash=50_000.0, initial_capital=60_000.0)
-            seed_opening(acc, store, provider, "20240608")
-            h = acc.holdings["000001.SZ"]
-            assert h.holding_days == 4  # 0603→0607 的结算次数
-            assert h.locked is False
-        finally:
-            store.close()
-
-
-class TestCmdInitDateValidation:
-    """INFRA-05 / LIVE-06：init --date 格式 + 开市日校验。"""
-
-    def _ns(self, db, date, cash=1_000_000.0, positions=None):
-        return argparse.Namespace(db=db, date=date, cash=cash,
-                                  positions=positions)
-
-    def test_bad_format_rejected_without_creating_db(self, tmp_path, capsys):
-        db = tmp_path / "l.duckdb"
-        rc = live_cli.cmd_init(self._ns(str(db), "abc"), provider=_mock_provider())
-        assert rc == 2
-        out = _json_out(capsys)
-        assert out["ok"] is False and out["stage"] == "bad_args"
-        assert not db.exists()
-
-    def test_bad_calendar_date_rejected(self, tmp_path, capsys):
-        rc = live_cli.cmd_init(self._ns(str(tmp_path / "l.duckdb"), "20261301"),
-                               provider=_mock_provider())
-        assert rc == 2
-        assert _json_out(capsys)["ok"] is False
-
-    def test_non_trading_day_rejected_with_hint(self, tmp_path, capsys):
-        rc = live_cli.cmd_init(self._ns(str(tmp_path / "l.duckdb"), "20240608"),
-                               provider=_mock_provider())
-        assert rc == 2
-        out = _json_out(capsys)
-        assert out["ok"] is False
-        assert "20240607" in out["message"]
-
-    def test_nan_cash_rejected(self, tmp_path, capsys):
-        rc = live_cli.cmd_init(
-            self._ns(str(tmp_path / "l.duckdb"), START, cash=float("nan")),
-            provider=_mock_provider())
-        assert rc == 2
-        assert _json_out(capsys)["ok"] is False
-
-    def test_valid_day_ok(self, tmp_path, capsys):
-        rc = live_cli.cmd_init(self._ns(str(tmp_path / "l.duckdb"), START),
-                               provider=_mock_provider())
-        assert rc == 0
-        out = _json_out(capsys)
-        assert out["ok"] is True and out["start_date"] == START
-
-    def test_nonfinite_position_rejected(self, tmp_path, capsys):
-        positions = tmp_path / "p.yaml"
-        positions.write_text(yaml.safe_dump({"positions": [
-            {"symbol": "000001.SZ", "entry_date": START,
-             "entry_price": float("nan"), "shares": 100},
-        ]}))
-        rc = live_cli.cmd_init(
-            self._ns(str(tmp_path / "l.duckdb"), START,
-                     positions=str(positions)), provider=_mock_provider())
-        assert rc == 2
-        assert _json_out(capsys)["ok"] is False
-
-    def test_main_injects_provider_for_open_day_check(self, tmp_path, monkeypatch,
-                                                      capsys):
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        monkeypatch.setattr(sys, "argv", [
-            "live.py", "init", str(tmp_path / "l.duckdb"),
-            "--date", "20240608", "--cash", "1000",
-        ])
-        assert live_cli.main() == 2
-        out = _json_out(capsys)
-        assert out["ok"] is False and "20240607" in out["message"]
-
-
-class TestValidateFillDates:
-    def test_flags_nontrading_and_uses_default_date(self):
-        calendar = ["20240603", "20240604", "20240605"]
-        fills = [
-            _fill("20240603", "A", "BUY", shares=100),
-            _fill("20240608", "B", "BUY", shares=100),
-            _fill("", "000001.SZ", "BUY", shares=100),  # 缺省日 20240604
-        ]
-        problems = validate_fill_dates(fills, calendar, default_date="20240604")
-        assert len(problems) == 1
-        assert "第 2 行" in problems[0]
-        assert "20240608" in problems[0] and "B" in problems[0]
-
-
-class TestSyncFillDateValidation:
-    """LIVE-01：非交易日/早于账本起始日的 fill 整体拒绝、不落库。"""
-
-    def test_nontrading_fill_date_rejected_without_write(self, tmp_path, monkeypatch,
-                                                         capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        path = _sync_yaml(
-            tmp_path, "s.yaml", date="20240608", cash=989_998.0,
-            holdings=[{"symbol": "000001.SZ", "shares": 1000}],
-            fills=[_fill("20240608", "000001.SZ", "BUY", price=10.0, shares=100)])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb"), file=path))
-        assert rc == 1
-        out = _json_out(capsys)
-        assert out["ok"] is False and out["stage"] == "invalid_fill_date"
-        assert any("第 1 行" in p and "20240608" in p for p in out["problems"])
-        store = LedgerStore(str(tmp_path / "ledger.duckdb"))
-        try:
-            assert [f["side"] for f in store.fills()] == ["BUY"]  # 无死行/ADJUST
-        finally:
-            store.close()
-
-    def test_fill_before_start_date_rejected(self, tmp_path, monkeypatch, capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        path = _sync_yaml(
-            tmp_path, "s.yaml", date="20240604", cash=989_998.0,
-            holdings=[{"symbol": "000001.SZ", "shares": 1000}],
-            fills=[_fill("20240601", "000001.SZ", "BUY", price=10.0, shares=100)])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb"), file=path))
-        assert rc == 1
-        assert _json_out(capsys)["stage"] == "invalid_fill_date"
-
-    def test_valid_fill_date_accepted(self, tmp_path, monkeypatch, capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        path = _sync_yaml(
-            tmp_path, "s.yaml", date="20240604", cash=991_097.0,
-            holdings=[{"symbol": "000001.SZ", "shares": 900}],
-            fills=[_fill("20240604", "000001.SZ", "SELL", price=11.0, shares=100,
-                         commission=1.0)])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb"), file=path))
-        assert rc == 0
-        out = _json_out(capsys)
-        assert out["ok"] is True and out["fills_applied"] == 1
-
-
-class TestSyncFutureDate:
-    """LIVE-07：statement date 晚于行情数据 → fail-fast（与 signal 口径一致）。"""
-
-    def _prep(self, tmp_path):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        return str(tmp_path / "ledger.duckdb")
-
-    def test_future_trading_day_without_data_rejected(self, tmp_path, monkeypatch,
-                                                      capsys):
-        db = self._prep(tmp_path)
-        path = _sync_yaml(tmp_path, "f.yaml", date="20240702", cash=989_998.0,
-                          holdings=[{"symbol": "000001.SZ", "shares": 1000}])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider",
-                            _extra_cal_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(db=db, file=path))
-        assert rc == 1
-        out = _json_out(capsys)
-        assert out["ok"] is False and out["stage"] == "no_market_data"
-        store = LedgerStore(db)
-        try:
-            assert [f["side"] for f in store.fills()] == ["BUY"]  # 未落 ADJUST
-        finally:
-            store.close()
-
-    def test_last_data_day_accepted(self, tmp_path, monkeypatch, capsys):
-        db = self._prep(tmp_path)
-        path = _sync_yaml(tmp_path, "ok.yaml", date="20240701", cash=989_998.0,
-                          holdings=[{"symbol": "000001.SZ", "shares": 1000}])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(db=db, file=path))
-        assert rc == 0
-        assert _json_out(capsys)["ok"] is True
-
-
-class TestSyncOpeningRejected:
-    """LIVE-08：sync fills 拒绝 side: OPENING（仅 init positions 使用）。"""
-
-    def test_opening_side_rejected(self, tmp_path, monkeypatch, capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        path = _sync_yaml(
-            tmp_path, "o.yaml", date="20240604", cash=989_998.0,
-            holdings=[{"symbol": "000001.SZ", "shares": 1100}],
-            fills=[_fill("20240604", "000002.SZ", "OPENING", price=10.0,
-                         shares=100)])
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb"), file=path))
-        assert rc == 1
-        out = _json_out(capsys)
-        assert out["ok"] is False and out["stage"] == "data_error"
-        assert "OPENING" in out["message"]
-        store = LedgerStore(str(tmp_path / "ledger.duckdb"))
-        try:
-            assert [f["side"] for f in store.fills()] == ["BUY"]
-        finally:
-            store.close()
-
-
-class TestSyncStatementParsing:
-    """LIVE-11：statement 解析错误进入 JSON 错误通道，不再裸异常。"""
-
-    def _run(self, tmp_path, monkeypatch, capsys, *, statement=None, file=None):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        db = str(tmp_path / "ledger.duckdb")
-        path = file
-        if path is None and statement is not None:
-            path = tmp_path / "s.yaml"
-            path.write_text(yaml.safe_dump(statement, allow_unicode=True,
-                                           sort_keys=False), encoding="utf-8")
-            path = str(path)
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_sync(argparse.Namespace(db=db, file=path))
-        return rc, _json_out(capsys)
-
-    def test_cash_not_a_number(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys, statement={
-            "date": "20240604", "cash": "abc",
-            "holdings": [{"symbol": "000001.SZ", "shares": 1000}],
-        })
-        assert rc == 2
-        assert out["ok"] is False and out["stage"] == "parse_error"
-        assert "cash" in out["message"]
-
-    def test_cash_nan(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys, statement={
-            "date": "20240604", "cash": float("nan"),
-            "holdings": [{"symbol": "000001.SZ", "shares": 1000}],
-        })
-        assert rc == 2
-        assert out["ok"] is False and out["stage"] == "parse_error"
-
-    def test_holdings_missing_shares(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys, statement={
-            "date": "20240604", "cash": 989_998.0,
-            "holdings": [{"symbol": "000001.SZ"}],
-        })
-        assert rc == 2
-        assert out["ok"] is False and out["stage"] == "parse_error"
-        assert "shares" in out["message"]
-
-    def test_missing_file(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys,
-                            file=str(tmp_path / "no_such.yaml"))
-        assert rc == 2
-        assert out["ok"] is False and out["stage"] == "parse_error"
-
-    def test_fill_not_a_mapping(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys, statement={
-            "date": "20240604", "cash": 989_998.0,
-            "holdings": [{"symbol": "000001.SZ", "shares": 1000}],
-            "fills": ["oops"],
-        })
-        assert rc == 2
-        assert out["ok"] is False and out["stage"] == "parse_error"
-
-    def test_fill_missing_side_is_data_error(self, tmp_path, monkeypatch, capsys):
-        rc, out = self._run(tmp_path, monkeypatch, capsys, statement={
-            "date": "20240604", "cash": 989_998.0,
-            "holdings": [{"symbol": "000001.SZ", "shares": 1000}],
-            "fills": [{"symbol": "000001.SZ", "price": 10.0, "shares": 100}],
-        })
-        assert rc == 1
-        assert out["ok"] is False and out["stage"] == "data_error"
-
-
-class TestCmdStatus:
-    """LIVE-09：status 对不存在的库路径报错 exit 2，不静默建库。"""
-
-    def test_missing_db_errors_without_creating(self, tmp_path, capsys):
-        db = tmp_path / "nope.duckdb"
-        rc = live_cli.cmd_status(argparse.Namespace(db=str(db)))
-        assert rc == 2
-        assert not db.exists()
-        out = _json_out(capsys)
-        assert out["ok"] is False
-
-    def test_uninitialized_db_rejected(self, tmp_path, capsys):
-        db = str(tmp_path / "empty.duckdb")
-        LedgerStore(db).close()
-        assert live_cli.cmd_status(argparse.Namespace(db=db)) == 2
-        assert _json_out(capsys)["ok"] is False
-
-    def test_non_ledger_duckdb_not_mutated(self, tmp_path, capsys):
-        db = str(tmp_path / "bt.duckdb")
-        conn = database.init_backtest_db(db)
-        conn.execute("CREATE TABLE foo (x INTEGER)")
-        conn.close()
-        assert live_cli.cmd_status(argparse.Namespace(db=db)) == 2
-        assert _json_out(capsys)["ok"] is False
-        conn = database.connect_result_db(db, read_only=True)
-        try:
-            tables = {r[0] for r in conn.execute(
-                "SELECT table_name FROM information_schema.tables").fetchall()}
-        finally:
-            conn.close()
-        assert "foo" in tables and "ledger_meta" not in tables
-
-    def test_initialized_db_ok(self, tmp_path, capsys):
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        rc = live_cli.cmd_status(argparse.Namespace(
-            db=str(tmp_path / "ledger.duckdb")))
-        assert rc == 0
-        assert _json_out(capsys)["start_date"] == START
-
-
-class TestCmdSignalErrors:
-    """LIVE-12：signal 业务错误打可读消息，不裸 traceback。"""
-
-    def _ledger(self, tmp_path) -> str:
-        store = _ledger_with_buy(tmp_path)
-        store.close()
-        return str(tmp_path / "ledger.duckdb")
-
-    def _ns(self, db, yaml_path, date=None, out=None):
-        return argparse.Namespace(db=db, yaml=yaml_path, date=date, out=out)
-
-    def test_missing_yaml_readable(self, tmp_path, monkeypatch, capsys):
-        db = self._ledger(tmp_path)
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_signal(self._ns(db, "no/such.yaml", date=START))
-        assert rc == 2
-        err = capsys.readouterr().err
-        assert "YAML" in err and "Traceback" not in err
-
-    def test_missing_out_dir_readable(self, tmp_path, monkeypatch, capsys):
-        db = self._ledger(tmp_path)
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        out = str(tmp_path / "nodir" / "o.json")
-        rc = live_cli.cmd_signal(self._ns(db, EXAMPLE_YAML, date=START, out=out))
-        assert rc == 2
-        err = capsys.readouterr().err
-        assert "目录" in err and "Traceback" not in err
-
-    def test_non_trading_date_readable(self, tmp_path, monkeypatch, capsys):
-        db = self._ledger(tmp_path)
-        monkeypatch.setattr(live_cli.cli_common, "make_provider", _mock_provider)
-        rc = live_cli.cmd_signal(self._ns(db, EXAMPLE_YAML, date="20240608"))
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "交易日" in err and "Traceback" not in err
-
-    def test_no_market_data_readable(self, tmp_path, monkeypatch, capsys):
-        db = self._ledger(tmp_path)
-        monkeypatch.setattr(live_cli.cli_common, "make_provider",
-                            _extra_cal_provider)
-        rc = live_cli.cmd_signal(self._ns(db, EXAMPLE_YAML, date="20240702"))
-        assert rc == 1
-        err = capsys.readouterr().err
-        assert "无行情数据" in err and "Traceback" not in err
-
-
-class TestOpSheetNotices:
-    """LIVE-03/04：universe 外持仓用补价面板判停牌；t1_lock 死代码删除。"""
-
-    def _engine(self, account):
-        return SimpleNamespace(pending_actions={"buy": [], "sell": []},
-                               account=account, max_positions=5,
-                               bars_by_date={}, bars_df=None)
-
-    def test_price_fallback_suppresses_false_suspended(self):
-        provider = _mock_provider()
-        acc = types.Account(cash=10_000.0, initial_capital=10_000.0)
-        acc.holdings["000002.SZ"] = types.Holding(
-            symbol="000002.SZ", shares=100, entry_date="20240603",
-            entry_price=10.0, cost=1000.0, last_price=10.0, locked=True)
-        acc.holdings["999999.XX"] = types.Holding(
-            symbol="999999.XX", shares=100, entry_date="20240603",
-            entry_price=10.0, cost=1000.0, last_price=10.0)
-        sheet = build_op_sheet(self._engine(acc), provider, "20240628")
-        suspended = {n["symbol"] for n in sheet["notices"]
-                     if n["type"] == "suspended"}
-        assert suspended == {"999999.XX"}
-        assert all(n["type"] != "t1_lock" for n in sheet["notices"])
+@pytest.fixture()
+def db(tmp_path, capsys):
+    path = str(tmp_path / "main.duckdb")
+    live_cli.main(["init", path, "--account-id", "main", "--broker", "test"])
+    capsys.readouterr()  # 排空 init 输出，避免污染后续读取
+    return path
+
+
+def statement(tmp_path, *, date, cash, holdings, fills=None, cash_flows=None,
+              import_id=None):
+    payload = {"date": date, "cash": cash, "holdings": holdings}
+    if fills:
+        payload["fills"] = fills
+    if cash_flows:
+        payload["cash_flows"] = cash_flows
+    if import_id:
+        payload["import_id"] = import_id
+    return write_yaml(tmp_path, f"stmt_{date}.yaml", payload)
+
+
+# ── 建账与状态 ──
+
+
+def test_init_duplicate_refused_and_missing_status_errors(tmp_path, capsys):
+    path = str(tmp_path / "a.duckdb")
+    rc, out = run_cli(capsys, "init", path, "--account-id", "a")
+    assert rc == 0 and out["ok"]
+    rc, out = run_cli(capsys, "init", path, "--account-id", "a")
+    assert rc == 1 and out["ok"] is False and out["code"] == "conflict"
+    assert not (tmp_path / "missing.duckdb").exists()
+    rc, out = run_cli(capsys, "status", str(tmp_path / "missing.duckdb"))
+    assert rc == 1 and out["code"] == "not_found"
+
+
+def test_import_clean_confirms_and_status_fresh(tmp_path, capsys, db):
+    """A02：sync/import 成功后 status 立即反映新状态，无需运行策略。"""
+    stmt = statement(tmp_path, date="20240603", cash=100000, holdings=[
+        {"symbol": "000001.SZ", "shares": 1000, "available": 1000}])
+    rc, out = run_cli(capsys, "import", db, stmt)
+    assert rc == 0 and out["ok"]
+    assert out["snapshot"]["action"] == "opening_confirmed"
+    rc, out = run_cli(capsys, "status", db, "--json")
+    assert rc == 0
+    assert out["confirmed"]["as_of"] == "20240603"
+    assert out["confirmed"]["cash_balance"] == 100000
+    assert out["projection"]["cash"] == 100000
+    assert out["pending_candidates"] == []
+
+
+def test_import_idempotent_rerun(tmp_path, capsys, db):
+    stmt = statement(tmp_path, date="20240603", cash=100000, holdings=[])
+    rc, first = run_cli(capsys, "import", db, stmt)
+    assert rc == 0
+    rc, second = run_cli(capsys, "import", db, stmt)
+    assert rc == 0 and second["snapshot"]["action"] == "idempotent_noop"
+    ledger = AccountLedger.open(db)
+    try:
+        assert ledger.status().counts["snapshots"] == 1
+    finally:
+        ledger.close()
+
+
+def test_identical_fills_different_trade_id_both_kept(tmp_path, capsys, db):
+    """A03：内容完全相同的两笔真实成交（不同 trade_id）都保留。"""
+    stmt = statement(tmp_path, date="20240603", cash=2000, holdings=[
+        {"symbol": "000001.SZ", "shares": 200}], fills=[
+        {"symbol": "000001.SZ", "side": "BUY", "quantity": 100,
+         "price": 10.0, "trade_id": "T1"},
+        {"symbol": "000001.SZ", "side": "BUY", "quantity": 100,
+         "price": 10.0, "trade_id": "T2"},
+    ], cash_flows=[{"category": "deposit", "amount": 1000}])
+    rc, out = run_cli(capsys, "import", db, stmt)
+    assert rc == 0 and out["fills"]["appended"] == 2
+    ledger = AccountLedger.open(db)
+    try:
+        fills = ledger.fills()
+        assert [f.trade_id for f in fills] == ["T1", "T2"]
+        assert all(f.quantity == 100 for f in fills)
+    finally:
+        ledger.close()
+
+
+def test_deposit_is_not_investment_pnl(tmp_path, capsys, db):
+    """A04：入金改变现金但不产生投资盈亏。"""
+    stmt = statement(tmp_path, date="20240603", cash=10000, holdings=[])
+    run_cli(capsys, "import", db, stmt)
+    rc, out = run_cli(capsys, "cashflow", db, "--category", "deposit",
+                      "--amount", "1000", "--date", "20240604")
+    assert rc == 0 and out["ok"]
+    stmt2 = statement(tmp_path, date="20240604", cash=11000, holdings=[])
+    rc, out = run_cli(capsys, "import", db, stmt2)
+    assert rc == 0 and out["snapshot"]["action"] == "imported_confirmed"
+    ledger = AccountLedger.open(db)
+    try:
+        pnl = ledger.investment_pnl()
+        assert pnl.complete is True
+        assert pnl.investment_pnl == APPROX(0.0)
+        assert ledger.projection().cash == APPROX(11000.0)
+    finally:
+        ledger.close()
+
+
+def test_candidate_diff_blocks_until_classified(tmp_path, capsys, db):
+    """A06：不明差异存候选；分类事实后 confirm 通过；期间 status 可见。"""
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240603", cash=10000, holdings=[]))
+    # 未入账的 500 元分红 → 候选
+    stmt = statement(tmp_path, date="20240606", cash=10500, holdings=[])
+    rc, out = run_cli(capsys, "import", db, stmt)
+    assert rc == 0 and out["snapshot"]["action"] == "stored_candidate"
+    assert out["pending_diffs"]["cash"]["delta"] == APPROX(500.0)
+    rc, status = run_cli(capsys, "status", db, "--json")
+    assert len(status["pending_candidates"]) == 1
+    snapshot_id = status["pending_candidates"][0]["snapshot_id"]
+    # 未解释前 confirm 仍 pending
+    rc, out = run_cli(capsys, "confirm", db, "--snapshot", snapshot_id)
+    assert rc == 0 and out["confirmed"] is False
+    # 分类为分红后确认
+    rc, out = run_cli(capsys, "cashflow", db, "--category", "dividend",
+                      "--amount", "500", "--date", "20240606")
+    assert rc == 0
+    rc, out = run_cli(capsys, "confirm", db, "--snapshot", snapshot_id)
+    assert rc == 0 and out["confirmed"] is True
+    rc, status = run_cli(capsys, "status", db, "--json")
+    assert status["confirmed"]["cash_balance"] == 10500
+    assert status["pending_candidates"] == []
+
+
+def test_takeover_leaves_pnl_incomplete_but_tradable(tmp_path, capsys, db):
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240603", cash=10000, holdings=[]))
+    stmt = statement(tmp_path, date="20240606", cash=10000, holdings=[
+        {"symbol": "000001.SZ", "shares": 300, "available": 300}])
+    rc, out = run_cli(capsys, "import", db, stmt)
+    assert out["snapshot"]["action"] == "stored_candidate"
+    snapshot_id = out["snapshot"]["snapshot_id"]
+    rc, out = run_cli(capsys, "confirm", db, "--snapshot", snapshot_id,
+                      "--takeover", "--reason", "历史不完整的转入持仓")
+    assert rc == 0 and out["action"] == "takeover_confirmed"
+    ledger = AccountLedger.open(db)
+    try:
+        pnl = ledger.investment_pnl(closing_prices={"000001.SZ": 10.0})
+        assert pnl.complete is False
+        assert any("takeover_gap" in r for r in pnl.reasons)
+        # 显式接管后可继续交易：预算不被封锁
+        from research.live_plan import PlanStore
+        store = PlanStore.attach(ledger)
+        assert store.budget_context().blocked_reason is None
+    finally:
+        ledger.close()
+
+
+# ── 政策 ──
+
+
+def test_policy_managed_requires_anchor(tmp_path, capsys, db):
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240603", cash=10000, holdings=[
+            {"symbol": "000001.SZ", "shares": 500, "available": 500}]))
+    rc, out = run_cli(capsys, "policy", db, "--symbol", "000001.SZ",
+                      "--policy", "managed")
+    assert rc == 2 and out["ok"] is False
+    rc, out = run_cli(capsys, "policy", db, "--symbol", "000001.SZ",
+                      "--policy", "managed", "--anchor-date", "20240520",
+                      "--anchor-price", "9.8", "--reason", "接管")
+    assert rc == 0 and out["policy"] == "managed"
+    rc, out = run_cli(capsys, "policy", db, "--symbol", "000001.SZ",
+                      "--policy", "exit_only", "--reason", "只管退出")
+    assert rc == 0 and out["policy"] == "exit_only"
+    rc, status = run_cli(capsys, "status", db, "--json")
+    assert status["policies"]["000001.SZ"] == "exit_only"
+
+
+# ── 策略会话闭环 ──
+
+
+def _activated(tmp_path, capsys, db):
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240603", cash=100000, holdings=[
+            {"symbol": "000001.SZ", "shares": 1000, "available": 1000}]))
+    anchors = write_yaml(tmp_path, "anchors.yaml", {"anchors": {
+        "000001.SZ": {"entry_date": "20240506", "entry_price": 10.0}}})
+    rc, out = run_cli(capsys, "activate", db, "--date", "20240603",
+                      "--yaml", YAML_STRATEGY, "--anchors", anchors,
+                      "--fixtures-dir", FIXTURES)
+    assert rc == 0 and out["ok"]
+    return out
+
+
+def test_activate_preview_accept_flow(tmp_path, capsys, db):
+    _activated(tmp_path, capsys, db)
+    rc, preview = run_cli(capsys, "preview", db, "--date", "20240603",
+                          "--fixtures-dir", FIXTURES, "--json")
+    assert rc == 0 and preview["ok"]
+    assert preview["decision_hash"] and preview["trade_date"] == "20240604"
+    assert preview["instruction_sheet"]
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    assert rc == 0 and plan["ok"] and plan["orders"]
+    plan_id = plan["plan_id"]
+    # 同快照立即重复接受：预览被本计划自身预留改变 → 明确拒绝不双倍预留
+    rc, again = run_cli(capsys, "accept", db, "--date", "20240603",
+                        "--fixtures-dir", FIXTURES)
+    assert rc == 1 and again["code"] == "conflict"
+    rc, status = run_cli(capsys, "status", db, "--with-session", "--json",
+                         "--fixtures-dir", FIXTURES)
+    assert status["outstanding_reserved"] > 0
+    assert status["activation"]["strategy"]
+    rc, plans = run_cli(capsys, "plans", db)
+    assert {p["plan_id"] for p in plans["plans"]} == {plan_id}
+
+
+def test_accept_after_sync_same_day_is_idempotent(tmp_path, capsys, db):
+    """A14：接受后快照推进，同日重复接受返回既有计划，不双倍预留。"""
+    _activated(tmp_path, capsys, db)
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    assert rc == 0 and plan["ok"]
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240604", cash=100000, holdings=[
+            {"symbol": "000001.SZ", "shares": 1000, "available": 1000}]))
+    rc, again = run_cli(capsys, "accept", db, "--date", "20240603",
+                        "--fixtures-dir", FIXTURES)
+    assert rc == 0 and again["plan_id"] == plan["plan_id"]
+    ledger = AccountLedger.open(db)
+    try:
+        from research.live_plan import PlanStore
+        store = PlanStore.attach(ledger)
+        assert len(store.plans()) == 1
+    finally:
+        ledger.close()
+
+
+def test_skip_records_reason_and_conflicts_with_accept(tmp_path, capsys, db):
+    _activated(tmp_path, capsys, db)
+    rc, out = run_cli(capsys, "skip", db, "--date", "20240603",
+                      "--reason", "人工判断不调仓", "--fixtures-dir", FIXTURES)
+    assert rc == 0 and out["status"] == "skipped"
+    rc, out = run_cli(capsys, "skip", db, "--date", "20240603",
+                      "--reason", "人工判断不调仓", "--fixtures-dir", FIXTURES)
+    assert rc == 0 and out["plan_id"]  # 幂等
+    rc, out = run_cli(capsys, "accept", db, "--date", "20240603",
+                      "--fixtures-dir", FIXTURES)
+    assert rc == 1 and out["code"] == "conflict"
+
+
+def test_execution_lifecycle_via_cli(tmp_path, capsys, db):
+    """A18/A24：submit → 部分成交 → 撤单；超计划回报整笔回滚。"""
+    _activated(tmp_path, capsys, db)
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    order = next(o for o in plan["orders"] if o["kind"] == "BUY")
+    oid = order["client_order_id"]
+    rc, out = run_cli(capsys, "fill", db, "--order", oid,
+                      "--date", "20240604", "--qty", order["planned_qty"],
+                      "--price", order["ref_price"])
+    assert rc == 1 and out["code"] == "state"  # 未提交先回报 → 拒绝
+    rc, out = run_cli(capsys, "submit", db, "--order", oid)
+    assert rc == 0 and out["status"] == "submitted"
+    half = order["planned_qty"] // 2 // 100 * 100
+    rc, out = run_cli(capsys, "fill", db, "--order", oid,
+                      "--date", "20240604", "--qty", half,
+                      "--price", order["ref_price"])
+    assert rc == 0 and out["status"] == "partial"
+    rc, out = run_cli(capsys, "fill", db, "--order", oid,
+                      "--date", "20240604", "--qty", order["planned_qty"],
+                      "--price", order["ref_price"])
+    assert rc == 1 and "超计划" in out["message"]  # 整笔回滚
+    rc, out = run_cli(capsys, "cancel-order", db, "--order", oid,
+                      "--reason", "剩余撤单")
+    assert rc == 0 and out["status"] == "cancelled"
+    assert out["filled_qty"] == half
+    rc, orders = run_cli(capsys, "orders", db, "--plan", plan["plan_id"])
+    cancelled = next(o for o in orders["orders"]
+                     if o["client_order_id"] == oid)
+    assert cancelled["budget_reserved"] == 0.0
+    ledger = AccountLedger.open(db)
+    try:
+        from research.live_plan import PlanStore
+        store = PlanStore.attach(ledger)
+        others = sum(o.budget_reserved for o in store.orders()
+                     if o.client_order_id != oid)
+        assert store.outstanding_reserved() == APPROX(others)
+        linked = ledger.fills(plan_id=plan["plan_id"])
+        assert len(linked) == 1 and linked[0].quantity == half
+    finally:
+        ledger.close()
+
+
+def test_unknown_requires_resolve_no_blind_resubmit(tmp_path, capsys, db):
+    _activated(tmp_path, capsys, db)
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    order = next(o for o in plan["orders"] if o["kind"] == "BUY")
+    oid = order["client_order_id"]
+    run_cli(capsys, "submit", db, "--order", oid)
+    rc, out = run_cli(capsys, "unknown", db, "--order", oid,
+                      "--note", "券商超时")
+    assert rc == 0 and out["status"] == "unknown"
+    rc, out = run_cli(capsys, "submit", db, "--order", oid)
+    assert rc == 1  # unknown 不能盲目重发
+    fills = write_yaml(tmp_path, "fills.yaml", {"fills": [
+        {"quantity": order["planned_qty"], "price": order["ref_price"],
+         "date": "20240604"}]})
+    rc, out = run_cli(capsys, "resolve", db, "--order", oid,
+                      "--status", "filled", "--fills", fills)
+    assert rc == 0 and out["status"] == "filled"
+    assert out["filled_qty"] == order["planned_qty"]
+
+
+def test_preview_human_table_and_trial(tmp_path, capsys, db):
+    _activated(tmp_path, capsys, db)
+    rc = live_cli.main(["preview", db, "--date", "20240603",
+                        "--fixtures-dir", FIXTURES])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "信号日 20240603" in out and "操作单" in out
+    rc = live_cli.main(["preview", db, "--date", "20240603",
+                        "--fixtures-dir", FIXTURES, "--json",
+                        "--trial-yaml", YAML_STRATEGY])
+    trial = json.loads(capsys.readouterr().out)
+    assert rc == 0 and trial["is_trial"] is True
+
+
+# ── 错误通道 ──
+
+
+def test_import_fills_csv_and_duplicate_report( tmp_path, capsys, db):
+    """LIVE-V2-01/02：规范 CSV 成交导入；重复回报幂等；缺省成交日落库断言。"""
+    run_cli(capsys, "import", db, statement(
+        tmp_path, date="20240603", cash=5000, holdings=[
+            {"symbol": "000001.SZ", "shares": 200, "available": 200}]))
+    csv_path = tmp_path / "fills.csv"
+    csv_path.write_text(
+        "trade_id,date,symbol,side,quantity,price,fee_commission\n"
+        "T1,,000001.SZ,SELL,100,11.0,1.0\n"
+        "T2,20240604,000001.SZ,SELL,0,,\n",
+        encoding="utf-8")
+    rc, out = run_cli(capsys, "import-fills", db, str(csv_path),
+                      "--date", "20240604")
+    # 第 2 行 quantity=0 非法 → 整批拒绝且不落库
+    assert rc == 1 and out["code"] == "validation"
+    csv_path.write_text(
+        "trade_id,date,symbol,side,quantity,price,fee_commission\n"
+        "T1,,000001.SZ,SELL,100,11.0,1.0\n"
+        "T2,20240605,000001.SZ,SELL,50,11.5,0.5\n",
+        encoding="utf-8")
+    rc, out = run_cli(capsys, "import-fills", db, str(csv_path),
+                      "--date", "20240604")
+    assert rc == 0 and out["appended"] == 2
+    ledger = AccountLedger.open(db)
+    try:
+        fills = ledger.fills()
+        # LIVE-V2-05：CSV 缺 date 行落库日期 = --date 缺省日
+        assert [(f.trade_id, f.date) for f in fills] == [
+            ("T1", "20240604"), ("T2", "20240605")]
+    finally:
+        ledger.close()
+    rc, out = run_cli(capsys, "import-fills", db, str(csv_path),
+                      "--date", "20240604")
+    assert rc == 0 and out["appended"] == 0 and out["skipped"] == 2
+
+
+def test_statement_fill_default_date_persisted(tmp_path, capsys, db):
+    """LIVE-V2-05：statement fills 不带 date → 落库日期 = statement 日期。"""
+    stmt = statement(tmp_path, date="20240604", cash=5000, holdings=[
+        {"symbol": "000001.SZ", "shares": 100, "available": 100}], fills=[
+        {"symbol": "000001.SZ", "side": "SELL", "quantity": 100,
+         "price": 11.0, "trade_id": "S1"}])
+    rc, out = run_cli(capsys, "import", db, stmt)
+    assert rc == 0
+    ledger = AccountLedger.open(db)
+    try:
+        assert ledger.fills()[0].date == "20240604"
+    finally:
+        ledger.close()
+
+
+def test_duplicate_fill_report_via_cli_is_noop(tmp_path, capsys, db):
+    """LIVE-V2-02 CLI：重复 fill 回报不改订单状态也不双记账。"""
+    _activated(tmp_path, capsys, db)
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    order = next(o for o in plan["orders"] if o["kind"] == "BUY")
+    oid = order["client_order_id"]
+    run_cli(capsys, "submit", db, "--order", oid)
+    args = ["fill", db, "--order", oid, "--date", "20240604",
+            "--qty", str(order["planned_qty"]),
+            "--price", str(order["ref_price"]), "--trade-id", "B1"]
+    rc, first = run_cli(capsys, *args)
+    assert rc == 0 and first["status"] == "filled"
+    rc, repeat = run_cli(capsys, *args)
+    assert rc == 0 and repeat["status"] == "filled"
+    ledger = AccountLedger.open(db)
+    try:
+        linked = ledger.fills(plan_id=plan["plan_id"])
+        assert len(linked) == 1
+    finally:
+        ledger.close()
+
+
+def test_cancel_plan_then_reaccept_clean_error(tmp_path, capsys, db):
+    """LIVE-V2-03 CLI：取消后同日重接受返回稳定 state 错误而非堆栈。"""
+    _activated(tmp_path, capsys, db)
+    rc, plan = run_cli(capsys, "accept", db, "--date", "20240603",
+                       "--fixtures-dir", FIXTURES)
+    rc, out = run_cli(capsys, "cancel-plan", db, "--plan", plan["plan_id"],
+                      "--reason", "改主意")
+    assert rc == 0
+    rc, out = run_cli(capsys, "accept", db, "--date", "20240603",
+                      "--fixtures-dir", FIXTURES)
+    assert rc == 1 and out["code"] == "state"
+    assert "不能重建" in out["message"]
+
+
+def test_error_channels(tmp_path, capsys, db):
+    rc, out = run_cli(capsys, "import", db, str(tmp_path / "nope.yaml"))
+    assert rc == 2 and out["code"] == "validation"
+    rc, out = run_cli(capsys, "import", db, write_yaml(
+        tmp_path, "bad.yaml", {"date": "20240603", "cash": 100,
+                               "holdings": [{"symbol": "X"}]}))
+    assert rc == 1 and out["code"] == "validation"
+    rc, out = run_cli(capsys, "activate", db, "--date", "20240603",
+                      "--yaml", "no/such.yaml", "--fixtures-dir", FIXTURES)
+    assert rc == 2 and out["code"] == "validation"
+    rc, out = run_cli(capsys, "preview", db, "--fixtures-dir", FIXTURES,
+                      "--json")
+    assert rc == 1 and out["code"] == "state"  # 未启用策略
+    # 旧 V1 账本（有 ledger_meta 无 acct 表）明确拒绝且不写坏文件
+    import duckdb
+
+    old_db = str(tmp_path / "v1.duckdb")
+    conn = duckdb.connect(old_db)
+    conn.execute("CREATE TABLE ledger_meta (key VARCHAR, value VARCHAR)")
+    conn.execute("INSERT INTO ledger_meta VALUES"
+                 " ('schema_version', '1'), ('initial_capital', '1000')")
+    conn.close()
+    rc, out = run_cli(capsys, "status", old_db, "--json")
+    assert rc == 1 and out["code"] == "schema"
