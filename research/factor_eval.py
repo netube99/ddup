@@ -72,6 +72,11 @@ def run_eval(
     library_path: 因子库 YAML 路径；缺省顶层 factors/library.yaml，
         策略本地库（如 strategies/.../factors.yaml）用此评估。
     """
+    # 前瞻天数语义为正整数：负数会把 shift(-h) 反转为回顾口径，
+    # 方向翻转的 IC 仍会正常出表（F-FEV-02）
+    if forward <= 0:
+        print("错误：--forward 前瞻天数需为正整数", file=sys.stderr)
+        return 1
     # ML 模型：spec 解析（fail-fast），特征并入因子计算与请求列
     model_spec = None
     if model_path:
@@ -110,6 +115,9 @@ def run_eval(
         horizons = [int(h.strip()) for h in decay.split(",") if h.strip()]
         if not horizons:
             print("错误：--decay 需要至少一个天数", file=sys.stderr)
+            return 1
+        if any(h <= 0 for h in horizons):
+            print("错误：--decay 前瞻天数需为正整数", file=sys.stderr)
             return 1
         print(f"区间: {start} ~ {end}  |  前瞻: {horizons} (衰减模式)  |  "
               f"分档: {n_quantiles}  |  {exec_label}")
@@ -505,7 +513,12 @@ def calc_factor_corr(
         columns = list(factor_df.columns)
         return pd.DataFrame(np.nan, index=columns, columns=columns)
 
-    avg_corr = sum(corr_mats) / len(corr_mats)
+    # 逐对取均值：某因子当日截面退化为常量时该日 pair corr 为 NaN，只跳过
+    # 该对的该日（与整列缺失日跳过整日的口径一致），不让 NaN 跨日传播
+    avg_corr = (
+        pd.concat(corr_mats).groupby(level=0).mean()
+        .reindex(index=factor_df.columns, columns=factor_df.columns)
+    )
     return avg_corr
 
 
@@ -534,6 +547,10 @@ def calc_ic_decay(
         DataFrame，索引为 horizon，列为：
           ic_mean, ic_ir, ic_win, rank_ic_mean, rank_ic_ir, rank_ic_win, n_days
     """
+    # 前瞻天数必须为正整数：h<0 会把 shift(-h) 反转为回顾口径，
+    # 方向翻转的 IC 仍正常出表（F-FEV-02）
+    if any(h <= 0 for h in horizons):
+        raise ValueError(f"horizons 需为正整数天数: {horizons}")
     rows = []
     for h in horizons:
         if open_hfq is not None:

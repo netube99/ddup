@@ -265,6 +265,15 @@ class TestResolve:
         with pytest.raises(ValueError, match="未知因子"):
             resolve_spec({"factor": "nope"})
 
+    def test_resolve_spec_rejects_nonfinite_weight(self):
+        """F-FAC-09：报错文案自述『必须是有限数值』，inf/-inf 须与 NaN 同拒。
+
+        PyYAML 会把手写的 .inf / -.inf 解析为 float('inf')，手写 YAML
+        笔误可达；inf 权重使截面评分退化为 ±inf 并列。"""
+        for w in (float("inf"), float("-inf"), float("nan")):
+            with pytest.raises(ValueError, match="有限数值"):
+                resolve_spec({"factor": "mom20", "weight": w})
+
     def test_resolve_closure_transitive(self):
         closure = resolve_closure(["mom_z"])
         assert set(closure) == {"mom_z", "mom20"}
@@ -631,4 +640,212 @@ class TestBreadthGroupMean:
         pd.testing.assert_series_equal(
             group_mean.loc[common].astype(float), result.loc[common].astype(float),
             check_names=False, rtol=1e-6,
+        )
+
+
+class TestBacklogDefinitionFixes:
+    """2026-10-25 backlog 清理批回归：因子定义修复（F-FD4-06/08/09、
+    F-FD5-02/04/06、F-FD7-01）。期望值一律手算或从原始输入独立重建，
+    不用被测实现生成答案。"""
+
+    def test_mom_diverge_single_side_nan_masked(self):
+        """F-FD4-08：新股 roc_10 未满时不再被比较式折 False 编码成假分歧。
+
+        B 仅 8 行历史：roc_3 自第 4 行可算而 roc_10 恒 NaN，旧定义
+        (roc_3>0) != (roc_10>0) 对 B 输出 0/1 假信号；修复后须整段 NaN。
+        A 全历史：末行 roc_3>0 且 roc_10<0，独立期望 diverge=1。"""
+        n = 12
+        dates = list(pd.date_range("2024-01-02", periods=n).strftime("%Y%m%d"))
+        a_close = [20.0, 19.8, 19.6, 19.4, 19.2, 19.0,
+                   18.8, 18.6, 18.4, 18.2, 19.0, 19.6]
+        b_close = [10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4]
+        index = pd.MultiIndex.from_tuples(
+            [(d, "A") for d in dates] + [(d, "B") for d in dates[4:]],
+            names=["trade_date", "symbol"],
+        )
+        df = pd.DataFrame(
+            {"close_hfq": a_close + b_close}, index=index
+        )
+        out = compute_factors(["mom_diverge"], df, load_library())["mom_diverge"]
+        assert out.xs("B", level="symbol").isna().all()  # 8 行 < 10，恒 NaN
+        roc3 = a_close[-1] / a_close[-4] - 1      # 19.6/18.4-1 > 0
+        roc10 = a_close[-1] / a_close[1] - 1      # 19.6/19.8-1 < 0
+        assert roc3 > 0 and roc10 < 0
+        assert out.loc[(dates[-1], "A")] == 1.0
+
+    def test_volume_impulse_and_turnover_chg_zero_denominator_masked(self):
+        """F-FD4-09：分母 delay(x,5)==0 的行掩码为 NaN，不再产出 ±inf。
+
+        volume_ratio 第 3 日（下标 2）为 0 → 第 8 日（下标 7）分母为 0；
+        实库 2024 年 volume_ratio=0 有 36 行，落到分母位即 inf 入面板。"""
+        n = 12
+        dates = pd.date_range("2024-01-02", periods=n).strftime("%Y%m%d")
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A"]], names=["trade_date", "symbol"]
+        )
+        vr = [1.0, 1.1, 0.0, 1.2, 1.3, 1.5, 1.1, 1.0, 1.2, 1.4, 1.6, 1.8]
+        tr = [2.0, 2.0, 0.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+        df = pd.DataFrame({"volume_ratio": vr, "turnover_rate": tr}, index=idx)
+        lib = load_library()
+        out = compute_factors(["volume_impulse", "turnover_chg"], df, lib)
+        expected = {
+            "volume_impulse": {7: None, 9: 1.4 / 1.3 - 1, 10: 1.6 / 1.5 - 1},
+            "turnover_chg": {7: None, 9: 0.0, 10: 0.0},
+        }
+        for col, cases in expected.items():
+            s = out[col]
+            assert not np.isinf(s.to_numpy()).any()
+            assert np.isnan(s.iloc[:5]).all()      # delay 窗口预热
+            for i, want in cases.items():
+                got = s.iloc[i]
+                if want is None:
+                    assert got != got, (col, i)    # 分母 0 → NaN（旧值 inf）
+                else:
+                    assert got == pytest.approx(want), (col, i)
+
+    def test_rep_intensity_normalized_to_dimensionless(self):
+        """F-FD5-02：rep_amount 单位元、circ_mv 单位万元，×1e-4 归一。
+
+        独立依据：实库 33217 条同日样本 median(amount/vol/close)=0.976，
+        证实 amount 为元；旧表达式比值偏大 1e4（本例 A 旧值 64.13）。"""
+        dates = ["20240605"]
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B", "C"]], names=["trade_date", "symbol"]
+        )
+        df = pd.DataFrame(
+            {
+                "rep_amount": [25_652_800.0, 0.0, 100_000_000.0],
+                "circ_mv": [400_000.0, 500_000.0, 1_000_000.0],
+            },
+            index=idx,
+        )
+        out = compute_factors(["rep_intensity"], df, load_library())["rep_intensity"]
+        assert out.loc[(dates[0], "A")] == pytest.approx(25_652_800 / 4e9)
+        assert out.loc[(dates[0], "B")] != out.loc[(dates[0], "B")]  # where 掩码
+        assert out.loc[(dates[0], "C")] == pytest.approx(0.01)
+
+    def test_dist_to_limit_sentinel_masked(self):
+        """F-FD5-04：新股无涨跌停日的 up_limit 哨兵值（999999.999 等）掩码。
+
+        实库 2024-2025 哨兵 910 行（864 行 close>0 可过旧 where）；
+        非哨兵行 up_limit/close 实测最大 1.857、≥2 为 0 行，close*2 上界安全。"""
+        dates = ["20241103"]
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B", "C"]], names=["trade_date", "symbol"]
+        )
+        df = pd.DataFrame(
+            {
+                "close": [10.0, 33.85, 5.0],
+                "up_limit": [11.0, 99999.999, 999999.999],
+            },
+            index=idx,
+        )
+        out = compute_factors(["dist_to_limit"], df, load_library())["dist_to_limit"]
+        assert out.loc[(dates[0], "A")] == pytest.approx(0.1)
+        for sym in ("B", "C"):
+            v = out.loc[(dates[0], sym)]
+            assert v != v  # 哨兵 → NaN（旧值 ~2951 / ~199999）
+
+    def test_cvw_mkt_gate_where_nan_gating(self):
+        """F-FD5-06：门控关闭日整列 NaN（旧乘积形式整列 0，与近 0 值混叠）。"""
+        n = 30
+        dates = list(pd.date_range("2024-01-02", periods=n).strftime("%Y%m%d"))
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B"]], names=["trade_date", "symbol"]
+        )
+        ret = [0.01] * 25 + [-0.05] * 5
+        rv = np.linspace(9.5, 10.5, n)
+        # 面板行序为日期主序（d0A,d0B,d1A,d1B...）：逐符号序列按列交错，
+        # 日期常数（idx_ret）用 repeat 广播到两个符号
+        df = pd.DataFrame(
+            {
+                "close": np.stack([rv, rv], axis=1).ravel(),
+                "avg_price": np.stack([rv * 0.999, rv * 0.999], axis=1).ravel(),
+                "idx_ret": np.repeat(ret, 2),
+            },
+            index=idx,
+        )
+        lib = load_library()
+        out = compute_factors(["cvw_mkt_gate", "cvw_ma5"], df, lib)
+        gate = out["cvw_mkt_gate"]
+        # 独立重建门控日：原始 idx_ret 的 20 日滚动和（窗口满且 ≤0）
+        raw = pd.Series(ret)
+        gate_off = {
+            dates[i] for i in range(n)
+            if i >= 19 and raw.iloc[max(0, i - 19):i + 1].sum() <= 0
+        }
+        warmup = set(dates[:19])  # sum20 窗口未满 → NaN
+        for d in dates:
+            col = gate.xs(d, level="trade_date")
+            if d in gate_off or d in warmup:
+                assert col.isna().all(), d
+            else:
+                expected = out["cvw_ma5"].xs(d, level="trade_date")
+                pd.testing.assert_series_equal(
+                    col, expected, check_names=False
+                )
+
+    def test_elg_lg_div_unit_normalized(self):
+        """F-FD7-01：moneyflow 万元/千元 ×10 归一（F-FD1-02 同族漏网）。
+
+        独立依据：实库 000001.SZ 20240605 四档买单合计 111415.6 万元 ==
+        stk_factor_pro.amount 1114156 千元（同值异单位）；旧表达式缺 ×10
+        偏小 10 倍，且应恒等于 elg_net_rate - lg_net_rate。"""
+        dates = ["20240605"]
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A"]], names=["trade_date", "symbol"]
+        )
+        buy_elg, sell_elg = 24799.25, 40527.94
+        buy_lg, sell_lg = 30842.4, 30859.68
+        amount = 1_114_156.0
+        df = pd.DataFrame(
+            {
+                "buy_elg_amount": [buy_elg], "sell_elg_amount": [sell_elg],
+                "buy_lg_amount": [buy_lg], "sell_lg_amount": [sell_lg],
+                "amount": [amount],
+            },
+            index=idx,
+        )
+        lib = load_library()
+        out = compute_factors(
+            ["elg_lg_div", "elg_net_rate", "lg_net_rate"], df, lib
+        )
+        expected = ((buy_elg - sell_elg) - (buy_lg - sell_lg)) / amount * 10
+        got = out["elg_lg_div"].iloc[0]
+        assert got == pytest.approx(expected)
+        assert got == pytest.approx(-0.1410, abs=1e-4)   # 旧值 -0.0141
+        assert got == pytest.approx(
+            out["elg_net_rate"].iloc[0] - out["lg_net_rate"].iloc[0]
+        )
+
+    def test_alpha_z_identity_after_constant_shift(self):
+        """F-FD4-06：zscore 对逐日截面常数平移不变——alpha_z5/20 逐值恒等
+        zscore(mom5)/mom_z（factor_specs 双引用即同一信号双倍权重）。"""
+        n = 26
+        dates = pd.date_range("2024-01-02", periods=n).strftime("%Y%m%d")
+        idx = pd.MultiIndex.from_product(
+            [dates, ["A", "B", "C"]], names=["trade_date", "symbol"]
+        )
+        closes = np.array(
+            [10 + 0.3 * i + j for i in range(n) for j in range(3)]
+        ) * np.array([1.0, 0.97, 1.05] * n)
+        df = pd.DataFrame(
+            {"close_hfq": closes, "idx_ret": 0.008}, index=idx
+        )
+        lib = load_library()
+        out = compute_factors(["alpha_z5", "alpha_z20", "mom_z"], df, lib)
+        # 独立期望：手算 mom5/mom20 与逐日截面 zscore（ddof=1）
+        close_df = df["close_hfq"].unstack("symbol")
+        for win, col in ((5, "alpha_z5"), (20, "alpha_z20")):
+            mom = close_df / close_df.shift(win) - 1
+            z = (mom.sub(mom.mean(axis=1), axis=0)
+                 .div(mom.std(axis=1, ddof=1), axis=0))
+            got = out[col].unstack("symbol")
+            pd.testing.assert_frame_equal(
+                got, z, check_names=False, check_freq=False
+            )
+        # alpha_z20 与库内 mom_z 逐值一致（描述已声明恒等）
+        pd.testing.assert_series_equal(
+            out["alpha_z20"].sort_index(), out["mom_z"].sort_index(),
+            check_names=False,
         )

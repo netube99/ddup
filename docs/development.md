@@ -39,7 +39,8 @@ uv run python scripts/review_gate.py done --full
 | 已发生的发现、证据与处置 | review_backlog.yaml、reviews/YYYY-MM-DD |
 
 接口变动同批更新代码、对应指南和受影响 skill 链接/流程。check_skill_sync 对账
-算子、select/filter/conditions、引擎默认值、ML 契约、CLI 参数及本地链接；
+算子、select/filter/conditions、引擎默认值、ML 契约、CLI 参数（文档/skill 中与
+`scripts/` 命令行同现的 flag；正文孤立提及或外部工具参数不在对账范围）及本地链接；
 它不能证明文档语义全部正确。不要为通过检查删除事实覆盖。
 
 ## 文档和 skill 写作约定

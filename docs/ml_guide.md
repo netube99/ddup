@@ -240,7 +240,7 @@ trigger 为 ML_EXIT，附带 model 和 score。阈值属于策略，模型不自
 | --- | --- |
 | `runs.config_json` 的 `models_meta` | 每条只有 `name` / `scope` / `label` / `train_window` / `artifact_sha256`；完整策略 `config` 与生效的 `initial_capital` / `max_positions` 同在这一列。因子定义和因子库版本**不落盘**，追溯须对照当时的 `factors/` 库与 `factor_specs` |
 | ml_predictions | run_id/date/symbol/model/score；ml_log=full 扩大 panel 落盘范围 |
-| debug/replay | 原始日面板包含 panel 分数；holding 分数在决策点注入，查 ml_predictions |
+| debug/replay | 快照 `bars_subset` 取自决策现场 bar dict，panel/holding 分数（`ml_*` 列）都往其中可见；分数落盘另查 ml_predictions |
 | artifact/meta 缺失 | 首训内联 features 并训练；回测不能用占位文件 |
 | features 不一致 | 与 meta 对齐，或用新路径重训；不要手写 meta 绕过契约 |
 | 模型不触发 | 查缺失特征、分数覆盖、阈值与 scope，再查撮合拒单 |
@@ -252,8 +252,8 @@ trigger 为 ML_EXIT，附带 model 和 score。阈值属于策略，模型不自
 
 ### 已知边界（当前实现）
 
-以下行为有回归证据并在 backlog 登记，不是文档笔误；遇到时按列出的影响判断，
-不要假设相反语义（ID 对应 `docs/review_backlog.yaml`）。
+以下行为有回归证据，不是文档笔误；遇到时按列出的影响判断，
+不要假设相反语义（括号内为历史登记 ID，仅作定位符，不代表仍在 backlog）。
 
 - **YAML 内联 `state` 不参与一致性校验**（`F-ML-05`）：meta 存在时只比对 `factors` / `raw`，
   YAML 里写错 `state` 不报错，scope 恒按 meta 的 `state_features` 推导。改 scope 必须重新
@@ -262,9 +262,3 @@ trigger 为 ML_EXIT，附带 model 和 score。阈值属于策略，模型不自
 - **panel 标签按行位移**（`F-ML-06`）：`xs_forward_return` 用组内 `shift(-horizon)`；个股
   期内停牌缺行时，实际跨度可能多于 horizon 个市场交易日。稀疏面板下 horizon 不是严格
   日历意义上的“N 个交易日”。
-- **holding 分数不在 debug 快照里**（`F-ML-07`）：快照的 `bars_subset` 取自 `day_bars`，
-  而 holding 分数只注入决策用的 bar dict；查 holding 分数看 `ml_predictions`，不要从快照
-  推断“当天没算分”。
-- **训练侧两处显示口径**（`F-ML-04`、`F-ML-08`）：`dataset.build_panel` 按
-  `getattr(logger, issue["level"])` 输出因子校验问题，未知 level 会崩（引擎侧已加白名单）；
-  meta 的 `metrics.pos_rate_train` 实际是全量样本正类率，不是切分后训练段。

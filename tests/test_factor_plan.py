@@ -463,6 +463,35 @@ class TestValidateMaterialization:
         assert any(i["level"] == "warning" for i in issues), issues
         assert any("无值" in i["message"] for i in issues), issues
 
+    def test_noncollapse_all_nan_column_is_warning(self):
+        """F-FDX-03：非坍缩因子列整列 NaN 须报 warning。
+
+        模拟事件列在窗口内无数据（如 limit_list_d 晚于窗口开始）：
+        此前 validate 只遍历坍缩因子，非坍缩因子整列 NaN 零告警
+        （实测返回 []）。独立期望：整列无值是元异常形态，与坍缩
+        因子整列 NaN（test_all_nan_column_is_warning）同判 warning。
+        """
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        main["evt"] = np.nan
+        p = plan.build_factor_plan({"f": {"expr": "evt + 0"}}, ["f"])
+        plan.materialize(main, None, p)
+        assert main["f"].isna().all()
+        issues = plan.validate_materialization(main, p)
+        warns = [i for i in issues if i["level"] == "warning"]
+        assert any("全窗口无值" in i["message"] for i in warns), issues
+
+    def test_noncollapse_valid_column_no_warning(self):
+        """F-FDX-03 对照：有值的非坍缩因子列不产生 warning issue。"""
+        dates = pd.date_range("2024-01-01", periods=10).strftime("%Y%m%d")
+        main = _mk_panel(dates, ["A", "B", "C"])
+        p = plan.build_factor_plan(
+            {"f": {"expr": "close_hfq / close_hfq"}}, ["f"]
+        )
+        plan.materialize(main, None, p)
+        issues = plan.validate_materialization(main, p)
+        assert issues == [], issues
+
 
 class TestProjectWarnings:
     """_project() NaN 告警测试。"""

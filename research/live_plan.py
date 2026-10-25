@@ -1309,6 +1309,7 @@ class PlanStore:
             if duplicate is not None:
                 same_report = (
                     duplicate.order_ref == client_order_id
+                    and duplicate.date == date
                     and duplicate.symbol == order.symbol
                     and duplicate.side == order.side
                     and duplicate.quantity == quantity
@@ -1706,9 +1707,13 @@ def gate_order(store: "PlanStore", client_order_id: str) -> OrderGate:
             client_order_id, False, 0,
             f"依赖卖单 {no_fill} 尚无成交回报——先执行卖出并回报成交，"
             "部分回款只释放相应预算")
-    available_value = order.budget_reserved + released
-    qty = int(available_value / order.ref_price / LOT_SIZE) * LOT_SIZE \
-        if order.ref_price > 0 else 0
+    # partial 状态仍保留原现金预留，必须扣除已成交的实际支出，
+    # 否则同一份已解锁预算能在连续查询中反复用于买入。
+    spent = order.filled_qty * (order.avg_fill_price or 0.0) + order.filled_fees
+    available_value = max(0.0, order.budget_reserved + released - spent)
+    unit_cost = order.ref_price + order.est_fees / order.planned_qty
+    qty = int(available_value / unit_cost / LOT_SIZE) * LOT_SIZE \
+        if unit_cost > 0 else 0
     qty = min(qty, remaining)
     if qty < LOT_SIZE:
         detail = f"；未成交依赖卖单 {unfilled}" if unfilled else ""

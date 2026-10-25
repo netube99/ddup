@@ -17,18 +17,9 @@ import pandas as pd
 
 from btcore.backend import DataBackend
 
-
-def benchmark_price_column(df: pd.DataFrame) -> str | None:
-    """基准价格列口径：优先 hfq_close，缺列回退 close；两列都没有返回 None。
-
-    后端基准表可能只提供裸价。engine 的 benchmark_nav 提取与
-    get_benchmark_returns 共用此单一口径。
-    """
-    if "hfq_close" in df.columns:
-        return "hfq_close"
-    if "close" in df.columns:
-        return "close"
-    return None
+# benchmark_price_column 定义在 btcore/types（F-STA-03：stats 纯函数层不能
+# import provider，共享口径下沉到零依赖层）；此处再导出保持既有导入路径
+from btcore.types import benchmark_price_column  # noqa: F401
 
 
 class DataProvider:

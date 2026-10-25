@@ -249,3 +249,24 @@ def test_calc_ic_decay_index_order_independent():
                        t_s["rank_ic_mean"].values, equal_nan=True)
     assert np.allclose(t_d["ic_mean"].values, t_s["ic_mean"].values,
                        equal_nan=True)
+
+
+# ═══════════════════════════════════════════
+# F-FEV-02：前瞻天数非正数 fail-fast
+# ═══════════════════════════════════════════
+
+
+def test_forward_nonpositive_rejected(backend, capsys):
+    """--forward 0/负数拒绝：负 horizon 会把 shift(-h) 反转为回顾口径，
+    方向翻转的 IC 仍正常出表（均值回复因子显示成动量）。"""
+    for fwd in (0, -1):
+        rc = run_eval(backend, ["mom5"], "20240610", "20240628", forward=fwd)
+        assert rc == 1
+        assert "--forward 前瞻天数需为正整数" in capsys.readouterr().err
+
+
+def test_decay_nonpositive_horizon_rejected(backend, capsys):
+    """--decay 含 0/负数天数拒绝（互斥检查只拦 forward≠5，负 horizon 可直入）。"""
+    rc = run_eval(backend, ["mom5"], "20240610", "20240628", decay="-1,5")
+    assert rc == 1
+    assert "--decay 前瞻天数需为正整数" in capsys.readouterr().err

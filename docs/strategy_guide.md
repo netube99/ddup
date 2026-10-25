@@ -253,7 +253,7 @@ factor_specs:
     materialize_only: true     # 仅物化为 bars 列供 calc_conditions 读取，不参与评分
 ```
 
-每条目被 loader 规范化为 `{name, weight, ascending, materialize_only}`，挂接到 `strategy.FACTOR_SPECS`。`materialize_only: true` 的因子只物化不参与 `eval_factor_specs` 的加权合成——无需编造假权重来触发物化。引用的因子名必须在因子库中存在，否则加载时报错。
+每条目被 loader 规范化为 `{name, weight, ascending, materialize_only}`，挂接到 `strategy.FACTOR_SPECS`。`materialize_only: true` 的因子只物化不参与 `eval_factor_specs` 的加权合成——无需编造假权重来触发物化。引用的因子名必须在因子库中存在，否则加载时报错；参与评分的条目（非 `materialize_only`）权重之和必须为正，否则加载期报错（权重和 ≤ 0 会退化为全 1.0 均匀分，等于索引序任意选股）。
 
 <a id="filters"></a>
 ### filter_rules
@@ -272,6 +272,7 @@ factor_specs:
 要点：
 
 - 未知键 → WARNING 并被忽略（不报错）。
+- `index_universe` / `factor_universe` 必须是非空字符串列表：写字符串或其他类型会在加载期报 `ValueError`（字符串会被拆成字符序列查无成分、静默退化全市场，不再容忍此类笔误）。
 - `exclude_st` / `exclude_new_stock` / `exclude_loss` 三个布尔规则**默认关闭**：未声明 = 不过滤、不 preload 对应列、也不告警（不再“假开启”）。显式开启而 ST/上市日期能力缺失时告警一次并跳过相应规则；亏损过滤缺 eps 时告警并尝试 pe_ttm 回退。`exclude_loss` 的 `eps` 缺个别行（非整列）时，引擎在 preload 汇总告警一次（含缺失行数与北交所行数），这些行仍按 pe_ttm<=0 回退；无法判定时保留。
 - `index_universe` / `factor_universe` 可用的指数代码取决于后端数据库已有的成分数据。缺 `get_index_members` 方法：preload 裁剪与 `StockFilter` 逐日白名单**各告警一次**，分别回退全市场 / 白名单不生效。方法存在但无成分快照：preload 裁剪**静默**回退全市场（`resolve_index_snapshots` 先查 `[start-45d, end]`，再回退查全历史，仍空则弃用），`StockFilter` 构造时告警一次。详见[后端指南的能力缺失速查](backend_guide.md#10-能力缺失行为速查)。
 - `StockFilter` 是策略侧工具：引擎不过滤，策略在 `select()` 中自行调用 `self._filter.filter(bars, date_str)`。
@@ -331,7 +332,7 @@ return self._cond.calc(symbol, entry_price, bar, holding_days)
 
 ```python
 {
-    "symbol": "000001.SZ",
+    "symbol": "000001.SZ",     # 必填，非空字符串（否则 ValueError）
     "type": "LIMIT_BUY",          # 或 "BREAKOUT_BUY" 或自定义注册类型
     "price": 12.50,               # 触发价（必填，必须 > 0）
     "value": 20000.0,             # 买入金额（与 shares 二选一，恰填一个）

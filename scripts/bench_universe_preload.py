@@ -63,12 +63,29 @@ def main() -> int:
     parser.add_argument("--skip-engine", action="store_true", help="跳过端到端基准")
     args = parser.parse_args()
 
+    # 两段基准都依赖成分并集；提前解析并 fail-fast：None 在引擎侧是合法
+    # 语义（=全市场），但对基准对比意味着『成分并集』段静默退化、计时
+    # 结果失真（加载段则直接 len(None) 崩溃）——显式报错而非崩溃/退化
+    # （F-CLI-04）
+    symbols = None
+    if not (args.skip_load and args.skip_engine):
+        provider = cli_common.make_provider()
+        try:
+            symbols = resolve_index_universe(provider.backend, INDEX_CODES,
+                                             args.start, args.end)
+        finally:
+            provider.backend.close()
+        if symbols is None:
+            print(f"错误: 指数 {', '.join(INDEX_CODES)} 在 "
+                  f"{args.start}~{args.end} 无成分快照"
+                  "（或后端无 get_index_members），成分并集基准不可用",
+                  file=sys.stderr)
+            return 1
+
     if not args.skip_load:
         provider = cli_common.make_provider()
         backend = provider.backend
         try:
-            symbols = resolve_index_universe(backend, INDEX_CODES,
-                                             args.start, args.end)
             print(f"指数成分并集: {len(symbols)} 只 (指数: {', '.join(INDEX_CODES)})",
                   flush=True)
 

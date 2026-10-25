@@ -128,6 +128,13 @@ def _validate_buy_conditions(conds: list) -> list:
         missing = {"symbol", "type", "price"} - set(order)
         if missing:
             raise ValueError(f"buy_conditions[{i}] 缺必填键: {missing}")
+        sym = order["symbol"]
+        # 与 buy/sell 名单同口径 fail-fast（F-ENG-03：非字符串/空串过去
+        # 混过校验后以“无当日行情”告警静默跳过）
+        if not isinstance(sym, str) or not sym.strip():
+            raise ValueError(
+                f"buy_conditions[{i}].symbol 必须是非空字符串: {sym!r}"
+            )
         if not _is_valid_positive(order["price"]):
             raise ValueError(
                 f"buy_conditions[{i}].price 必须是正数: {order['price']!r}"
@@ -679,6 +686,18 @@ class Engine:
                 "FACTOR_SPECS 需要 FACTOR_NODES（因子闭包）——"
                 "请经 btcore.strategy_loader 加载策略，或自行设置该属性"
             )
+        # V-ENG-01：绕过 loader 手搓的策略可能挂空闭包 {}（raw-only 模型场景
+        # 的合法值），非 ml 入口名不在闭包内会被 build_factor_plan 静默裁掉，
+        # 列永不物化、条件单读到 None 静默不触发——在此 fail-fast
+        outside = sorted(
+            s["name"] for s in specs
+            if not s["name"].startswith("ml_") and s["name"] not in nodes
+        )
+        if outside:
+            raise ValueError(
+                f"FACTOR_SPECS 引用的因子不在 FACTOR_NODES 闭包内: {outside}——"
+                "请经 btcore.strategy_loader 加载，或补齐因子闭包"
+            )
         return factor_plan.build_factor_plan(
             nodes, [s["name"] for s in specs]
         )
@@ -797,7 +816,11 @@ class Engine:
                 if self._model_specs:
                     self._write_ml_predictions(conn, today, bars_dict)
                 if self._debug:
-                    self._write_debug_snapshot(conn, today, self.pending_actions, day_bars)
+                    # F-ML-07：快照用决策现场的 bars_dict（holding 模型的 ml_*
+                    # 分数只注入这里，不在 day_bars 列）；panel 模型分数两处都有
+                    self._write_debug_snapshot(
+                        conn, today, self.pending_actions, bars_dict
+                    )
         except Exception:
             self._restore_state()
             raise
@@ -1001,9 +1024,13 @@ class Engine:
         if self.provider is not None:
             self.provider.set_as_of(self._saved_as_of)
 
-    def _write_debug_snapshot(self, conn, today, pending_actions, day_bars):
-        """收集每日调试快照并写入 debug_snapshots 表。"""
-        bars = day_bars.to_dict("index")
+    def _write_debug_snapshot(self, conn, today, pending_actions, bars_dict):
+        """收集每日调试快照并写入 debug_snapshots 表。
+
+        bars_dict 是当日决策现场的 bar dict（含 holding 模型注入的 ml_* 分数），
+        快照因此与策略可见现场一致（F-ML-07）。
+        """
+        bars = bars_dict
 
         # holdings 详情
         holdings_detail = {}

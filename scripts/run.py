@@ -83,10 +83,16 @@ def main() -> int:
                 report_path = report_dir / f"{stem}_{args.start}_{args.end}.html"
             else:
                 report_path = Path(args.report)
-            generate_report(
-                result, str(report_path),
-                title=f"{strategy.__class__.__name__} {args.start} ~ {args.end}",
-            )
+            try:
+                generate_report(
+                    result, str(report_path),
+                    title=f"{strategy.__class__.__name__} {args.start} ~ {args.end}",
+                )
+            except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+                # 与 scripts/report.py 同一写操作的错误通道：回测结果已落盘，
+                # 报告写失败打印可读错误而非裸 traceback（F-CLI-06）
+                return cli_common.fail(
+                    f"无法写报告 {str(report_path)!r}: {e}")
             print(f"  report: {report_path}")
     finally:
         provider.backend.close()

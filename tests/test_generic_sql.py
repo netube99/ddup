@@ -559,3 +559,54 @@ def test_sqlite_file_rejected(tmp_path):
     conn.close()
     with pytest.raises(ValueError, match="不是 DuckDB 格式"):
         GenericSQLBackend(MINIMAL_FORM, path)
+
+
+# ── 重复键/空值契约（F-INF-04 / F-INF-05 / F-INF-07）──
+
+
+def _exec(path, sql, params=None):
+    conn = duckdb.connect(path)
+    try:
+        conn.execute(sql, params or [])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_get_calendar_dedupes_same_date_rows(db_path):
+    """F-INF-04: 日历表同日多行（多交易所各一行）→ DISTINCT 去重。
+
+    修复前返回重复交易日，引擎将对同日 step 两次（公司行为/结算重复）。
+    """
+    _exec(db_path, "INSERT INTO cal VALUES (?, ?)", ["20240102", 1])
+    b = GenericSQLBackend(FULL_FORM, db_path)
+    assert b.get_calendar("20240101", "20240131") == ["20240102", "20240103"]
+
+
+def test_benchmark_close_duplicate_keys_fail_fast(db_path):
+    """F-INF-05: 基准 close 表同 (代码, 日期) 多行 → 回源处报错。
+
+    修复前 merge 多对多行数爆炸，下游 np.cov 维度不匹配才崩。
+    """
+    _exec(db_path, "INSERT INTO bench VALUES (?, ?, ?)",
+          ["510300.SH", "20240102", 10.5])
+    b = GenericSQLBackend(FULL_FORM, db_path)
+    with pytest.raises(ValueError, match="重复的 \\(代码, 交易日\\) 键"):
+        b.get_benchmark_bars("510300.SH", "20240102", "20240103")
+
+
+def test_benchmark_adj_duplicate_keys_fail_fast(db_path):
+    """F-INF-05: 基准复权因子表同键多行同样 fail-fast。"""
+    _exec(db_path, "INSERT INTO badj VALUES (?, ?, ?)",
+          ["510300.SH", "20240102", 2.1])
+    b = GenericSQLBackend(FULL_FORM, db_path)
+    with pytest.raises(ValueError, match="badj"):
+        b.get_benchmark_bars("510300.SH", "20240102", "20240103")
+
+
+def test_stock_industries_null_name_excluded(db_path):
+    """F-INF-07: 行业名 NULL 的行等同未找到，不进入结果（值契约是 str）。"""
+    _exec(db_path, "INSERT INTO ind VALUES (?, ?)", ["600000.SH", None])
+    b = GenericSQLBackend(FULL_FORM, db_path)
+    assert b.get_stock_industries(["000001.SZ", "600000.SH"]) == \
+        {"000001.SZ": "银行"}

@@ -12,6 +12,7 @@
 ts 窗口。
 """
 
+from math import isfinite
 from pathlib import Path
 
 import pandas as pd
@@ -153,7 +154,7 @@ def resolve_spec(spec: dict, library: dict | None = None) -> dict:
     _get_spec(name, lib)
     weight = spec.get("weight", 1.0)
     if isinstance(weight, bool) or not isinstance(weight, (int, float)) \
-            or weight != weight:
+            or not isfinite(weight):
         raise ValueError(f"factor_specs 条目 weight 必须是有限数值: {weight!r}")
     ascending = spec.get("ascending", False)
     if not isinstance(ascending, bool):

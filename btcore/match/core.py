@@ -81,10 +81,13 @@ def check_tradable(side: str, price, up, down, *, slip_fn=None,
                    slip_ticks: int = 0) -> str | None:
     """可成交校验：涨跌停可判定 + 价格合法 + 未封板（涨停不买 / 跌停不卖）。
 
+    涨跌停 None 或 NaN 都视为无法判定（F-MAT-03：NaN 比较恒 False 会让
+    封板校验静默放行）；引擎路径只产生有限值或 (None, None)，NaN 防御
+    面向直接传入原始 NaN 列的调用方。
     slip_fn 存在时同时校验滑点后成交价；拒单发生在现金/持仓变动之前。
     返回 None 表示可成交，否则返回原因代码；日志由调用点按原因各自输出。
     """
-    if up is None or down is None:
+    if up is None or down is None or up != up or down != down:
         return LIMIT_UNKNOWN
     if not is_valid_price(price):
         return INVALID_PRICE

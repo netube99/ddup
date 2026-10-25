@@ -392,13 +392,17 @@ def validate_materialization(
     main_df: pd.DataFrame,
     plan: dict,
 ) -> list[dict]:
-    """物化后验证：检查坍缩因子的完整性和数据质量（唯一验证入口）。
+    """物化后验证：检查因子列的完整性和数据质量（唯一验证入口）。
 
     NaN 语义区分（FAC-08）：
       - 前导整日 NaN = 窗口预热 → info 直接落日志（不进 issues）
       - 首个有值日之后的整日 NaN = 真缺口 → warning issue（占比 > 5%）
       - 部分行 NaN = where 掩码 / 面板网格缺行 → info「掩码缺失」直接落
         日志（不进 issues，避免引擎 issue 通道把 info 当 warning 刷屏）
+
+    非坍缩因子列整列 NaN（全窗口无值）→ warning issue（F-FDX-03：源
+    列在整个面板无数据，如事件列数据起点晚于窗口开始；仅整列异常
+    形态，前导预热/部分行 NaN 不属于此形态）。
 
     info 类发现直接 logger.info，不经 issues 返回——引擎的 issue
     通道白名单只有 warning/error，返回 info 会被降级为 warning 噪声。
@@ -436,6 +440,19 @@ def validate_materialization(
             msg = (f"坍缩因子 {name!r} 掩码缺失 {st['partial_rows']} 行 NaN"
                    f"（{st['partial_days']} 个交易日部分行有值, 非整日缺失）")
             logger.info(msg)
+
+    # 非坍缩因子只查整列形态：整列 NaN 意味着源列在整个窗口无数据
+    # （事件列晚于窗口开始、where 恒 False 等）；部分行 NaN 不在此报，
+    # 避免把预热/掩码噪声引入 issue 通道。cse 临时列已删除，get 为 None
+    # 时跳过（含未物化列，缺列由 materialize/eval 自身 fail-fast）。
+    for name in sorted(plan.get("main", ())):
+        col = main_df.get(name)
+        if col is None or not col.isna().all():
+            continue
+        msg = (f"因子列 {name!r} 全窗口无值（{len(col)} 行全 NaN）"
+               f"——源数据缺失或窗口配置不当")
+        logger.warning(msg)
+        issues.append({"level": "warning", "message": msg})
 
     return issues
 

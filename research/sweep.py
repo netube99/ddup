@@ -25,11 +25,19 @@ def expand_params(params_def):
 
     params 为空是配置错误：itertools.product() 会产出 1 个空标签组合，
     把 base 配置当扫描结果写库（TOOL-08），此处 fail-fast。
+    候选值必须是列表：标量无法展开组合；字符串会被 itertools 按单字符
+    展开（文档要求候选值必须为列表），同样在此 fail-fast（F-CLI-03）。
     """
     if not params_def:
         raise ValueError(
             "params 为空：没有可扫描的参数组合（至少需要一个参数路径）"
         )
+    for key, candidates in params_def.items():
+        if not isinstance(candidates, (list, tuple)):
+            raise ValueError(
+                f"参数 {key} 的候选值必须是列表，实际 {candidates!r}："
+                "标量无法展开组合，字符串会被按单字符展开（写法如 [5, 10]）"
+            )
     keys = list(params_def.keys())
     values = [params_def[k] for k in keys]
     results = []

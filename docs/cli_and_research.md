@@ -59,9 +59,9 @@ python scripts/factor_eval.py <因子列表> --start YYYYMMDD --end YYYYMMDD \
 | `--model` | ML 模型 ONNX 路径；模型分数物化为 `ml_<name>` 列后与因子同口径评估（仅支持 panel scope，详见 [ml_guide.md](./ml_guide.md)） |
 | `--start` / `--end` | **必填** |
 | `--universe` | 股票池：简称 `CSI300`/`CSI500`/`CSI1000`（对应 000300.SH/000905.SH/000852.SH）或其他指数代码（原样透传）；默认全市场。取成分快照并集为候选池，因子面板上再按 **point-in-time 成分**逐日过滤；不能把该过滤等同于引擎物化前逐日裁池 |
-| `--forward` | 前瞻收益天数，默认 5 |
+| `--forward` | 前瞻收益天数（正整数），默认 5 |
 | `--exec-price` | close（默认，T 收盘到 T+h 收盘）或 next-open（T+1 开盘到 T+h 收盘） |
-| `--decay` | IC 衰减模式，逗号分隔天数（如 `1,3,5,10,20`）；不能与非默认的 `--forward` 同用 |
+| `--decay` | IC 衰减模式，逗号分隔正整数天数（如 `1,3,5,10,20`）；不能与非默认的 `--forward` 同用 |
 | `--n-quantiles` | 分层回测档数，默认 5 |
 | `--benchmark` | 基准指数代码（如 `000300.SH`）；因子表达式引用 `idx_ret`（市场相对强弱）时必需，口径同引擎（见 [factor_library.md](./factor_library.md)） |
 
@@ -173,9 +173,9 @@ params:
 
 路径从实际 base YAML 结构出发：顶层 factor_specs 用 `factor_specs.0.weight`；
 config 下的字段用 `config.top_k`。base 路径相对当前工作目录；候选值必须为列表，
-字符串可能被展开为字符，标量会失败。先 dry-run 检查组合数。
+标量或字符串在展开前报错（字符串不会按字符展开）。先 dry-run 检查组合数。
 
-**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程串行调用 `run.py` 执行（`--no-report` 关闭浪费的 HTML 生成）；失败组合打印 FAIL（保留 stderr 尾部真实异常）并跳过，不中断扫描；全组合失败时非零退出且不打印「结果已保存到」；`params` 为空报错 exit 2。
+**执行方式**：每组参数在 base 配置上覆写后生成临时 YAML，子进程串行调用 `run.py` 执行（`--no-report` 关闭浪费的 HTML 生成）；失败组合打印 FAIL（保留 stderr 尾部真实异常）并跳过，不中断扫描；全组合失败时非零退出且不打印「结果已保存到」；`params` 为空或候选值非列表报错 exit 2。
 
 **输出**：每组参数作为**标准 run** 写入 `--out` 库的 `runs` 表（`config_json` 含参数，`compare.py`/`report.py` 原生可读）；同时写 `sweep_results` 表（`id, label, params_json, stats_json`，stats_json 内含 label 与 params 字段）保留参数标签汇总；终端按 收益/Sharpe/MDD 列打印汇总表。
 
@@ -233,12 +233,12 @@ python scripts/dump_brinson_data.py <行情库路径> [--out brinson_data] \
 | `--out` | 输出目录，默认 `brinson_data` |
 | `--index` | 基准指数代码，默认 `000300.SH`。使用其他基准时显式指定，不能混合多个指数权重 |
 | `--start` / `--end` | 日期范围（可选，缺省导出全表） |
-| `--result-db` | 回测结果库；提供且同时给 `--start`/`--end` 时自动导出 `bars.parquet`（该库交易过的股票在区间内的 close/pct_chg） |
+| `--result-db` | 回测结果库；提供且同时给 `--start`/`--end` 时自动导出 `bars.parquet`（该库交易过的股票在区间内的 close/pct_chg）；缺少日期组合在写出任何文件前报错 |
 
 | 输出文件 | 内容 | 结构 |
 |---------|------|------|
 | `industry_map.parquet` | 股票→申万 L1 行业 | 列 `ts_code, l1_name` |
-| `sw_returns.parquet` | 行业日收益 | index=trade_date，columns=行业名，值为小数（已除以 100） |
+| `sw_returns.parquet` | L1 行业日收益（仅 index_member_all 登记的 L1 行业代码；同名重复按 ts_code 升序取首行，取值不依赖库文件扫描顺序） | index=trade_date，columns=L1 行业名，值为小数（已除以 100） |
 | `benchmark_weights.parquet` | 基准行业权重（单指数） | index=trade_date，columns=行业名，每日归一化到和为 1 |
 | `bars.parquet` | 个股 bars（--result-db 与 --start/--end 同时提供时导出） | MultiIndex (trade_date, symbol)，列 close/pct_chg |
 所有参数也可用 `python scripts/<命令>.py --help` 查实际 argparse；成功退出不证明数据口径或收益结论正确。

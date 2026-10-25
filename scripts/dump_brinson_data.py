@@ -38,6 +38,10 @@ def main() -> int:
     if args.start or args.end:
         if not (args.start and args.end):
             parser.error("--start 与 --end 必须同时给出")
+    # TOOL-01：--result-db 的日期前置校验必须在写出任何 parquet 之前，
+    # 不能先导出 3 个文件再报错留下看似完成的目录（F-CLI-02）
+    if args.result_db and not (args.start and args.end):
+        parser.error("--result-db 需要同时提供 --start/--end 才能导出 bars.parquet")
     date_filter = ""
     date_params: list = []
     if args.start:
@@ -76,11 +80,25 @@ def main() -> int:
 
     # sw_returns: pivot to date × industry
     # sw_daily 按 (trade_date, name) 有多 ts_code 同名行（如 20180102 水泥制造×3），
-    # 不先去重 pivot 会 ValueError（2026-08 审计实证：全表 66,110 组重复）
-    sql = "SELECT trade_date, name, pct_change FROM sw_daily WHERE 1=1"
-    sql += date_filter
-    df = conn.execute(sql, date_params).df()
-    df = df.drop_duplicates(subset=["trade_date", "name"])
+    # 不先去重 pivot 会 ValueError（2026-08 审计实证：全表 66,110 组重复）。
+    # 与消费方 _load_sw_returns 同口径：仅跟 index_member_all.l1_code 登记
+    # 的 L1 行业代码，同名重复按 ts_code 升序取首行——取值不依赖库文件
+    # 物理扫描顺序（F-CLI-01）
+    l1_codes = [r[0] for r in conn.execute(
+        "SELECT DISTINCT l1_code FROM index_member_all "
+        "WHERE l1_code IS NOT NULL AND l1_code != ''"
+    ).fetchall()]
+    if not l1_codes:
+        print("错误: index_member_all 无 l1_code，无法限定 L1 行业收益口径",
+              file=sys.stderr)
+        conn.close()
+        return 1
+    placeholders = ",".join("?" * len(l1_codes))
+    sql = ("SELECT trade_date, ts_code, name, pct_change FROM sw_daily "
+           f"WHERE ts_code IN ({placeholders}){date_filter} "
+           "ORDER BY trade_date, ts_code")
+    df = conn.execute(sql, [*l1_codes, *date_params]).df()
+    df = df.drop_duplicates(subset=["trade_date", "name"], keep="first")
     df["pct_change"] = df["pct_change"].astype(float) / 100
     sw_wide = df.pivot(index="trade_date", columns="name", values="pct_change")
     sw_wide.to_parquet(f"{args.out}/sw_returns.parquet")
@@ -93,10 +111,8 @@ def main() -> int:
     print(f"benchmark_weights: {bw_wide.shape} (index={args.index})")
 
     # bars: 仅当提供结果库 + 日期区间时导出（成交过股票）
+    # （--result-db 与日期的配对已在写出任何文件前校验）
     if args.result_db:
-        if not (args.start and args.end):
-            conn.close()
-            parser.error("--result-db 需要同时提供 --start/--end 才能导出 bars.parquet")
         bt_conn = connect_result_db(args.result_db, read_only=True)
         try:
             traded = bt_conn.execute(

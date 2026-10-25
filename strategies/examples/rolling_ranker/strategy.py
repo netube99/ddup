@@ -127,7 +127,9 @@ class RollingRanker(Strategy):
                     c["price"] = entry_price * 0.97      # 新仓紧止损
                 elif holding_days > 30:
                     c["price"] = entry_price * 0.85      # 老仓放宽
-            elif c.get("type") == "TAKE_PROFIT" and holding_days <= 3:
-                conds.remove(c)  # 新仓不挂止盈，避免小涨震出
+        # 列表重建移除新仓止盈：条件单按列表顺序评估，循环内 remove
+        # 会跳过下一个元素的自适应分支
+        if holding_days <= 3:
+            conds = [c for c in conds if c.get("type") != "TAKE_PROFIT"]
 
         return conds

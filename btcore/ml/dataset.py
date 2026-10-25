@@ -19,6 +19,11 @@ from btcore.ml.spec import ModelSpec
 
 logger = logging.getLogger(__name__)
 
+# 因子物化验证 issue 的合法 level → 日志方法白名单（EDGE-08，F-ML-04：
+# 与 engine._FACTOR_ISSUE_LEVELS 同语义；validate_materialization 新增
+# 未知 level 时按 warning 处理并告警，杜绝 getattr(logger, level) 崩训练）
+_FACTOR_ISSUE_LEVELS = {"warning": logger.warning, "error": logger.error}
+
 
 def build_panel(
     backend,
@@ -89,7 +94,14 @@ def build_panel(
         factor_plan.materialize(bars_df, breadth_df, fplan)
         issues = factor_plan.validate_materialization(bars_df, fplan)
         for issue in issues:
-            getattr(logger, issue["level"])("[因子验证] %s", issue["message"])
+            level = _FACTOR_ISSUE_LEVELS.get(issue["level"])
+            if level is None:
+                logger.warning(
+                    "[因子验证] 未知 issue level %r, 按 warning 处理",
+                    issue["level"],
+                )
+                level = logger.warning
+            level("[因子验证] %s", issue["message"])
 
     # 裁掉 warmup，返回训练区间
     dates = bars_df.index.get_level_values("trade_date")

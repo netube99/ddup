@@ -61,3 +61,17 @@ def bar_get(bar, key, default=None):
     if isinstance(bar, dict):
         return bar.get(key, default)
     return getattr(bar, key, default)
+
+
+def benchmark_price_column(df) -> str | None:
+    """基准价格列口径：优先 hfq_close，缺列回退 close；两列都没有返回 None。
+
+    provider/engine/stats 三侧共用的单一口径（F-STA-03：stats 此前用
+    iloc[:, 0] 取第一列，后端返回不含 close/hfq_close 的 frame 时与
+    provider 的“无有效基准”判定相矛盾）。
+    """
+    if "hfq_close" in df.columns:
+        return "hfq_close"
+    if "close" in df.columns:
+        return "close"
+    return None

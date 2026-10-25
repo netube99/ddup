@@ -117,6 +117,9 @@ factors:
 TS 窗口按标的已有行计数，缺行情行不自动补成交易日。
 neutralize 有效样本数不超过设计矩阵列数时当日全 NaN；缺行业值的行并非自动剔除，
 其行业哑变量为零。不要把缺分类当作经过了可靠行业中性化。
+回归族算子（corr/beta/resid_std）以闭式矩（E[xy]−E[x]E[y]）向量化实现：
+对原始量纲的大数列（amount、total_mv 级别）存在灾难性消除，有效精度显著下降，
+对大数列先做 rank/zscore/roc 等变换再回归。
 
 <a id="columns"></a>
 ## 数据列与量纲
@@ -173,7 +176,8 @@ EMA 的无限记忆近似、不同数据起点和计算域仍是比较时必须�
 
 CSE 自动合并完全相同 `(expr, where)` 节点，并提取重复的非坍缩 Call 子树为临时节点；
 where 不做子树重写，含坍缩调用的子树不提取。临时列物化后删除。
-`validate_materialization` 返回 issues；缺列或过多 NaN 会告警，告警不等于自动补齐数据。
+`validate_materialization` 返回 issues；缺列、坍缩因子缺口或因子列整列无值
+会告警，告警不等于自动补齐数据。
 
 <a id="api"></a>
 ## Python 入口

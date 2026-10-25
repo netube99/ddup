@@ -70,6 +70,8 @@ def eval_factor_specs(
     不参与百分比排名和加权合成。
     其余因子先转截面 percentile rank（ascending=True 时值小者得分高），
     再按 weight 加权平均为 score（∈ [0,1]，越大越优）。
+    存在评分条目但权重和 <= 0 时无法合成有效得分，直接报错
+    （F-STR-01：恒 1.0 均匀分等于索引序任意选股）。
 
     Returns:
         (factor_df, score): factor_df 每列一个因子值；score 为合成得分 Series，
@@ -78,6 +80,7 @@ def eval_factor_specs(
     factor_df = pd.DataFrame(index=df.index)
     score = pd.Series(0.0, index=df.index)
     total_weight = 0.0
+    has_scoring = False
 
     for spec in factor_specs or []:
         name = spec["name"]
@@ -90,6 +93,7 @@ def eval_factor_specs(
         if spec.get("materialize_only"):
             factor_df[name] = df[name]
             continue
+        has_scoring = True
         values = df[name]
         factor_df[name] = values
         weight = float(spec.get("weight", 1.0))
@@ -99,6 +103,11 @@ def eval_factor_specs(
 
     if total_weight > 0:
         score = score / total_weight
+    elif has_scoring:
+        raise ValueError(
+            "factor_specs 评分因子权重和必须为正（得到 "
+            f"{total_weight}），否则 score 退化为均匀分任意选股"
+        )
     else:
         score = pd.Series(1.0, index=df.index)
     return factor_df, score

@@ -295,11 +295,12 @@ class MultiModel(Strategy):
         # 持仓超时强退
         conds.append({"type": "TIME_STOP", "price": None, "max_days": 60})
 
-        # holding_days 自适应：新仓紧止损
+        # holding_days 自适应：新仓紧止损；止盈移除用列表重建——
+        # 条件单按列表顺序评估，循环内 remove 会跳过下一元素的自适应分支
         for c in conds:
             if c.get("type") == "STOP_LOSS" and holding_days <= 3:
                 c["price"] = entry_price * 0.97
-            elif c.get("type") == "TAKE_PROFIT" and holding_days <= 3:
-                conds.remove(c)
+        if holding_days <= 3:
+            conds = [c for c in conds if c.get("type") != "TAKE_PROFIT"]
 
         return conds

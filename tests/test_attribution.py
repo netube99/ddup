@@ -13,6 +13,7 @@ from btcore import database
 from research.attribution import (
     _aggregate_period,
     _compute_brinson_daily,
+    _load_calendar_dates,
     _reconstruct_daily_holdings,
     brinson_attribute,
     brinson_attribute_from_files,
@@ -692,3 +693,158 @@ class TestBrinsonFromFiles:
         assert "error" in result
         assert "bars 起点" in result["error"]
         assert "20240603" in result["error"]
+
+
+# ═══════════════════════════════════════════
+# F-ATT-02/03/04 回归：基准独有行业明细 / 期间平均权重 / 交易日历轴
+# ═══════════════════════════════════════════
+
+
+class TestBenchmarkOnlyIndustryDetail:
+    """F-ATT-02：基准独有行业计入 industry_detail，明细与 summary 可对账。"""
+
+    def test_detail_reconciles_with_summary(self):
+        dates = ["20240603", "20240604", "20240605"]
+        # 策略 3 日满仓 X；基准 X 60% / Y 40%（Y 从未被持有）
+        holdings_df = pd.DataFrame([
+            {"date": d, "X_weight": 1.0, "X_return": 0.01,
+             "portfolio_return": 0.01}
+            for d in dates
+        ]).set_index("date")
+        bw = pd.DataFrame({"X": 0.6, "Y": 0.4}, index=dates)
+        sw = pd.DataFrame({"X": 0.01, "Y": 0.02}, index=dates)
+
+        daily_df = _compute_brinson_daily(holdings_df, bw, sw)
+        result = _aggregate_period(daily_df, holdings_df, bw, sw)
+
+        assert "Y" in result["industry_detail"]
+        y = result["industry_detail"]["Y"]
+        # 手算（r_b_total = 0.6×0.01 + 0.4×0.02 = 0.014）：
+        # A_Y/日 = (0-0.4)×(0.02-0.014) = -0.0024 → 3 日 -0.0072
+        assert y["allocation_effect"] == pytest.approx(-0.0072)
+        assert y["avg_portfolio_weight"] == 0.0
+        sm = result["summary"]
+        detail_sum = sum(
+            d["total_contribution"] for d in result["industry_detail"].values()
+        )
+        assert detail_sum == pytest.approx(
+            sm["allocation_effect"] + sm["selection_effect"]
+            + sm["interaction_effect"], abs=1e-6,
+        )
+
+
+class TestExposurePeriodAverage:
+    """F-ATT-03：平均权重是期间平均（未持有日计 0），不是持有日条件均值。"""
+
+    def test_rotation_effective_n(self):
+        dates = ["20240603", "20240604", "20240605", "20240606"]
+        records = [
+            {"date": d, "X_weight": 1.0, "X_return": 0.01,
+             "portfolio_return": 0.01}
+            for d in dates[:2]
+        ] + [
+            {"date": d, "Y_weight": 1.0, "Y_return": 0.02,
+             "portfolio_return": 0.02}
+            for d in dates[2:]
+        ]
+        holdings_df = pd.DataFrame(records).set_index("date")
+        bw = pd.DataFrame({"X": 0.5, "Y": 0.5}, index=dates)
+        sw = pd.DataFrame({"X": 0.01, "Y": 0.02}, index=dates)
+
+        daily_df = _compute_brinson_daily(holdings_df, bw, sw)
+        result = _aggregate_period(daily_df, holdings_df, bw, sw)
+
+        exp = result["exposure_summary"]
+        # 期间平均 X=0.5、Y=0.5（Σ=1）；条件均值口径得到 1.0/1.0（Σ=2）
+        assert exp["max_single_industry_weight"] == pytest.approx(0.5)
+        assert exp["effective_n_industries"] == pytest.approx(2.0, abs=0.01)
+        assert exp["max_single_industry_name"] in ("X", "Y")
+        detail = result["industry_detail"]
+        assert detail["X"]["avg_portfolio_weight"] == pytest.approx(0.5)
+        assert detail["X"]["active_weight"] == pytest.approx(0.0)
+
+
+class TestCalendarAxis:
+    """F-ATT-04：日期轴以交易日历为准，集中持仓整体停牌日不静默丢失。"""
+
+    def _bars(self):
+        return pd.DataFrame(
+            {"close": [10.0, 10.2], "pct_chg": [0.0, 2.0]},
+            index=pd.MultiIndex.from_tuples(
+                [("20240603", "S.SH"), ("20240605", "S.SH")],
+                names=["trade_date", "symbol"],
+            ),
+        )
+
+    def _trade_log(self):
+        return pd.DataFrame([
+            {"id": 1, "date": "20240603", "symbol": "S.SH",
+             "side": "BUY", "shares": 100},
+        ])
+
+    def test_suspension_day_in_axis(self):
+        df = _reconstruct_daily_holdings(
+            self._trade_log(), self._bars(), {"S.SH": "银行"},
+            calendar_dates=["20240603", "20240604", "20240605"],
+        )
+        assert list(df.index) == ["20240603", "20240604", "20240605"]
+        # 停牌日：持仓仍在但无 bar → 组合收益按 0（估值沿用前收盘）
+        assert df.loc["20240604", "portfolio_return"] == 0.0
+
+    def test_calendar_outside_bars_range_ignored(self):
+        df = _reconstruct_daily_holdings(
+            self._trade_log(), self._bars(), {"S.SH": "银行"},
+            calendar_dates=["20240601", "20240602", "20240603",
+                            "20240604", "20240605", "20240606"],
+        )
+        # bars 首尾之外的日历日（数据截断场景）不外推轴
+        assert list(df.index) == ["20240603", "20240604", "20240605"]
+
+    def test_no_calendar_falls_back_to_bars(self):
+        df = _reconstruct_daily_holdings(
+            self._trade_log(), self._bars(), {"S.SH": "银行"},
+        )
+        assert list(df.index) == ["20240603", "20240605"]
+
+    def test_benchmark_accrues_over_suspension_day(self):
+        """端到端（单元级）：停牌日组合收益 0、基准收益照常计入。"""
+        holdings_df = _reconstruct_daily_holdings(
+            self._trade_log(), self._bars(), {"S.SH": "银行"},
+            calendar_dates=["20240603", "20240604", "20240605"],
+        )
+        dates = ["20240603", "20240604", "20240605"]
+        bw = pd.DataFrame({"银行": 1.0}, index=dates)
+        sw = pd.DataFrame({"银行": 0.01}, index=dates)
+
+        daily_df = _compute_brinson_daily(holdings_df, bw, sw)
+        assert list(daily_df.index) == dates
+        # 修复前日期轴取 bars 行集：0604 整日缺失，基准累计只有 0.02
+        assert daily_df["benchmark_return"].sum() == pytest.approx(0.03)
+        assert daily_df.loc["20240604", "portfolio_return"] == 0.0
+
+
+def test_load_calendar_dates_filters_open_days(tmp_path):
+    db = tmp_path / "cal.duckdb"
+    conn = duckdb.connect(str(db))
+    conn.execute(
+        "CREATE TABLE trade_cal (exchange VARCHAR, cal_date VARCHAR, is_open INT)"
+    )
+    conn.executemany(
+        "INSERT INTO trade_cal VALUES (?, ?, ?)",
+        [("SSE", "20240603", 1), ("SSE", "20240604", 0),
+         ("SSE", "20240605", 1), ("SZSE", "20240606", 1),
+         ("SSE", "20240701", 1)],
+    )
+    try:
+        dates = _load_calendar_dates(conn, "20240601", "20240607")
+    finally:
+        conn.close()
+    assert dates == ["20240603", "20240605"]
+
+
+def test_load_calendar_dates_missing_table_returns_empty():
+    conn = duckdb.connect(":memory:")
+    try:
+        assert _load_calendar_dates(conn, "20240601", "20240607") == []
+    finally:
+        conn.close()

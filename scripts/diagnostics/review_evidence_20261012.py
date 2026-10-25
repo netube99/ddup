@@ -1,11 +1,16 @@
 """本次审查复现与独立结果重建；不是引擎实现或生产命令。
 
-运行：.venv/bin/python scripts/diagnostics/review_evidence_20261012.py [--result /tmp/run.duckdb]
+运行：.venv/bin/python scripts/diagnostics/review_evidence_20261012.py \
+    [--result /tmp/run.duckdb] [--market /path/to/market.duckdb]
+
+--market 缺省取 DDUP_MARKET_DB 环境变量，再回退本机行情库路径；
+私有路径仅作本机回退，跨机复现请显式传入或设置环境变量（F-DIAG-01）。
 """
 
 import argparse
 import json
 import math
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -85,7 +90,7 @@ def reproduce() -> dict:
     }
 
 
-def shadow(result_path: str) -> dict:
+def shadow(result_path: str, market_path: str) -> dict:
     """仅使用结果表与原始行情独立重建；不调用 btcore 计算函数。"""
     conn = duckdb.connect(result_path, read_only=True)
     try:
@@ -98,7 +103,6 @@ def shadow(result_path: str) -> dict:
     finally:
         conn.close()
     capital, config, stats = run[0], json.loads(run[1]), json.loads(run[2])
-    market_path = "/home/netube/aiwork/tushare_db/data/market.duckdb"
     market = duckdb.connect(market_path, read_only=True)
     try:
         prices = market.execute(
@@ -182,11 +186,19 @@ def shadow(result_path: str) -> dict:
     return out
 
 
-if __name__ == "__main__":
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result")
+    parser.add_argument("--market", default=os.environ.get(
+        "DDUP_MARKET_DB", "/home/netube/aiwork/tushare_db/data/market.duckdb"),
+        help="行情库路径（缺省 DDUP_MARKET_DB，回退本机路径）")
     args = parser.parse_args()
     output = {"reproduction": reproduce()}
     if args.result:
-        output["real_window_shadow"] = shadow(args.result)
+        output["real_window_shadow"] = shadow(args.result, args.market)
     print(json.dumps(output, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

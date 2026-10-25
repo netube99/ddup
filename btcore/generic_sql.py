@@ -475,8 +475,10 @@ class GenericSQLBackend(DataBackend):
         dcol = _q(sec["date"])
         frag, fparams = self._filter_sql(sec["table"])
         where = f"({frag}) AND " if frag else ""
+        # DISTINCT（F-INF-04）：日历表同日多行（如多交易所各一行）时
+        # 直接返回会重复交易日，引擎将对同日 step 两次（公司行为/结算重复）
         rows = self._conn.execute(
-            f"SELECT {dcol} FROM {_qt(sec['table'])}"
+            f"SELECT DISTINCT {dcol} FROM {_qt(sec['table'])}"
             f" WHERE {where}{dcol} >= ? AND {dcol} <= ? ORDER BY {dcol}",
             (*fparams, start, end),
         ).fetchall()
@@ -599,6 +601,22 @@ class GenericSQLBackend(DataBackend):
     # 鸭子类型扩展实现（经 __getattr__ 按已填的空装配）
     # ═══════════════════════════════════
 
+    @staticmethod
+    def _check_benchmark_dup_keys(table: str, code: str, df: pd.DataFrame) -> None:
+        """基准表重复 (代码, 交易日) 键 fail-fast（F-INF-05）。
+
+        源表同键多行会让 close/adj 的 merge 多对多爆炸，行数异常放大后
+        下游 np.cov 维度不匹配才崩——远离根因；与 query_bars 的重复键
+        fail-fast 同一哲学，回源处拦截。
+        """
+        dup = df["trade_date"].duplicated(keep=False)
+        if dup.any():
+            sample = df.loc[dup, "trade_date"].head(3).tolist()
+            raise ValueError(
+                f"基准表 {table} 存在重复的 (代码, 交易日) 键，"
+                f"code={code} 示例 {sample}：请检查源表数据"
+            )
+
     def _impl_get_benchmark_bars(
         self, code: str | None = None, start: str = "", end: str = ""
     ) -> pd.DataFrame | None:
@@ -616,6 +634,7 @@ class GenericSQLBackend(DataBackend):
         ).df()
         if df.empty:
             return None
+        self._check_benchmark_dup_keys(sec["close_table"], code, df)
         if sec["adj_table"] is None:
             # 未填 benchmark_adj_factor（如指数点位基准，无复权概念）：直接用 close
             merged = df
@@ -629,6 +648,7 @@ class GenericSQLBackend(DataBackend):
                 f" ORDER BY {_q(adate)}",
                 [code, start, end],
             ).df()
+            self._check_benchmark_dup_keys(sec["adj_table"], code, adj)
             merged = df.merge(adj, on="trade_date", how="left")
             if len(adj) == 0:
                 # adj 表查空时 merged["adj_factor"] 全 NaN；退化为未复权 close
@@ -684,7 +704,9 @@ class GenericSQLBackend(DataBackend):
             f" WHERE {_q(sym)} IN ({ph})",
             ts_codes,
         ).fetchall()
-        return {r[0]: r[1] for r in rows}
+        # 行业名为 NULL 的行等同未找到，不进入结果（F-INF-07：{sym: None}
+        # 违反值为行业名称 str 的契约，下游 exclude_industries 对 None 静默失配）
+        return {r[0]: r[1] for r in rows if r[1] is not None}
 
     def _impl_get_recent_listings(
         self, cutoff_days: int = 60, as_of: str | None = None

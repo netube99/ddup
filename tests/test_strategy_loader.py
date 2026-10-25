@@ -191,6 +191,25 @@ class TestIndexUniverseLoading:
         assert strategy.get_universe(provider, "20240603", "20240630") is None
         assert caplog.text.count("白名单规则不生效") == 1
 
+    @pytest.mark.parametrize("bad", [
+        'index_universe: "000905.SH"',
+        'index_universe: ["000905.SH", 300]',
+        'factor_universe: "000300.SH"',
+        'index_universe: ["", "000905.SH"]',
+    ])
+    def test_universe_type_mismatch_fails_fast(self, tmp_path, bad):
+        """F-STO-01: 字符串等类型笔误加载期报错，不再静默退化全市场。
+
+        此前 list("000905.SH") 把字符串拆成字符序列查无成分，
+        universe hook 静默回退全市场，load_strategy 无任何报错。
+        """
+        yaml_body = (
+            "strategy: strategies.examples.rolling_ranker:RollingRanker\n"
+            f"filter_rules:\n  {bad}\n"
+        )
+        with pytest.raises(ValueError, match="必须是非空字符串列表"):
+            load_strategy(_write(tmp_path, yaml_body))
+
 
 # ── build_strategy 程序化接口测试 ──
 
@@ -522,3 +541,54 @@ class TestEvalFactorSpecsMaterializeOnly:
         assert score["Z"] == pytest.approx(2.0 / 3.0)
         assert score["Y"] == pytest.approx(1.0 / 3.0)
         assert "b" in factor_df.columns
+
+
+# ── F-STR-01: 评分因子权重和守卫 ──
+
+
+class TestScoringWeightSumGuard:
+    _YAML_HEAD = "strategy: strategies.examples.rolling_ranker:RollingRanker\n"
+
+    def test_yaml_zero_total_weight_fails_at_load(self, tmp_path):
+        """唯一评分因子 weight: 0 → 加载期报错（此前恒 1.0 均匀分任意选股）。"""
+        body = (
+            self._YAML_HEAD
+            + "factor_specs:\n"
+            "  - factor: mom20\n    weight: 0\n"
+        )
+        with pytest.raises(ValueError, match="权重和必须为正"):
+            load_strategy(_write(tmp_path, body))
+
+    def test_yaml_negative_sum_fails_at_load(self, tmp_path):
+        """+1/-1 权重组合总和为 0 → 加载期报错。"""
+        body = (
+            self._YAML_HEAD
+            + "factor_specs:\n"
+            "  - factor: mom20\n    weight: 1\n"
+            "  - factor: low_turnover\n    weight: -1\n"
+        )
+        with pytest.raises(ValueError, match="权重和必须为正"):
+            load_strategy(_write(tmp_path, body))
+
+    def test_build_strategy_all_materialize_only_not_blocked(self):
+        """全部 materialize_only（无评分因子）不受守卫：保持空 specs 语义。"""
+        specs = [{"name": "mom20", "weight": 0.0, "materialize_only": True}]
+        strategy = build_strategy(RollingRanker, config={}, factor_specs=specs)
+        assert strategy.FACTOR_SPECS[0]["materialize_only"] is True
+
+
+def test_eval_factor_specs_nonpositive_total_weight_raises():
+    """F-STR-01 运行时守卫：绕过 loader 的 specs 权重和 <= 0 → 报错。"""
+    df = pd.DataFrame({"a": [0.3, 0.1, 0.2]}, index=["X", "Y", "Z"])
+    with pytest.raises(ValueError, match="权重和必须为正"):
+        eval_factor_specs(df, [{"name": "a", "weight": -1.0}])
+    with pytest.raises(ValueError, match="权重和必须为正"):
+        eval_factor_specs(df, [
+            {"name": "a", "weight": 1.0}, {"name": "a", "weight": -1.0}])
+
+
+def test_eval_factor_specs_empty_specs_still_uniform():
+    """空 specs 的全 1.0 语义不变（文档承诺）。"""
+    df = pd.DataFrame({"a": [0.3]}, index=["X"])
+    _, score = eval_factor_specs(df, [])
+    assert (score == 1.0).all()

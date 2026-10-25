@@ -68,6 +68,10 @@ class ConditionHunter(Strategy):
     ——这些买单在非调仓日也可通过 on_tick 提交。
     """
 
+    # calc_conditions 命令式访问 turnover_rate（估算波动），必须声明
+    # 以确保引擎列裁剪保留该列，否则 .get 默认值静默归 0
+    REQUIRED_FIELDS: list[str] = ["turnover_rate"]
+
     def on_start(self, provider, first_date: str, end_date: str | None = None) -> None:
         # ── 注册自定义 handler（必须在此调用，进程级全局）──
         register_condition_handler("DYNAMIC_STOP", _dynamic_stop_handler)

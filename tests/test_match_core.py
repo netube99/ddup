@@ -1,7 +1,28 @@
 from btcore.costs import calc_trade_costs
-from btcore.match.core import execute_buy, execute_sell
+from btcore.match.core import (
+    LIMIT_UNKNOWN,
+    check_tradable,
+    execute_buy,
+    execute_sell,
+)
 from btcore.slippage import apply_slippage
 from tests.conftest import make_account, make_bar, make_holding
+
+NAN = float("nan")
+
+
+def test_check_tradable_nan_limits_rejected():
+    """F-MAT-03: 涨跌停 NaN 与 None 同样无法判定，买卖双双拒单。
+
+    NaN 与任何价格比较恒 False，若放行会绕开封板校验静默成交。
+    """
+    assert check_tradable("BUY", 10.0, NAN, 10.2) == LIMIT_UNKNOWN
+    assert check_tradable("SELL", 10.0, 10.2, NAN) == LIMIT_UNKNOWN
+    assert check_tradable("BUY", 10.0, None, 10.2) == LIMIT_UNKNOWN
+    # 有限涨跌停不受影响：正常买卖可成交、封板拒单
+    assert check_tradable("BUY", 10.0, 11.0, 9.0) is None
+    assert check_tradable("BUY", 11.0, 11.0, 9.0) == "LIMIT_UP"
+    assert check_tradable("SELL", 9.0, 11.0, 9.0) == "LIMIT_DOWN"
 
 
 def test_execute_sell():

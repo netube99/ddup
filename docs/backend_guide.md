@@ -235,7 +235,7 @@ FROM read_csv('cal.csv', header=true);
 |------|------|---------|---------|
 | `get_benchmark_bars` | `(code: str \| None = None, start: str = "", end: str = "") -> pd.DataFrame \| None` | 单列 `hfq_close`（后复权收盘价）；日期索引（datetime 或 YYYYMMDD 字符串均可，引擎归一化）；无数据返回 `None` | 基准收益统计、`idx_ret` 因子 |
 | `get_st_map` | `(from_date: str) -> dict[str, set[str]]` | `{date: {symbol, ...}}`，date 为 YYYYMMDD；日频快照，当日有记录 = 当日 ST | `exclude_st` 过滤 |
-| `get_stock_industries` | `(ts_codes: list[str]) -> dict[str, str]` | `{symbol: 行业名称}`，未找到的不出现在结果中 | `industry` 分组伪列、`exclude_industries` 过滤 |
+| `get_stock_industries` | `(ts_codes: list[str]) -> dict[str, str]` | `{symbol: 行业名称}`，未找到或行业名为 NULL 的不出现在结果中 | `industry` 分组伪列、`exclude_industries` 过滤 |
 | `get_recent_listings` | `(cutoff_days: int = 60, as_of: str \| None = None) -> set[str]` | 上市日距 `as_of` ≤ `cutoff_days` 的股票代码集合；`as_of=None` 取当前日期 | `exclude_new_stock` 过滤 |
 | `get_index_members` | `(index_codes: list[str], start: str, end: str) -> dict[str, set[str]]` | `{date: {symbol, ...}}`，多指数并集；快照可为月频，引擎按"最近一期 ≤ 当日"取值 | `index_universe` / `factor_universe` 股票池限定 |
 | `backend_bar_columns` | `() -> set[str]` | 后端可供给的 bars 列名（canonical 名，与 `query_bars` 校验口径一致）；不实现 = 引擎按"全部可供给"处理 | preload 列裁剪：`exclude_loss` 等过滤规则依赖列与后端能力取交集，缺列（如 `eps`）时由 filters 逐 bar 软回退（见“能力缺失行为速查”） |
@@ -495,7 +495,7 @@ preload 只算一次不痛，后者需要物化性能与状态语义。新接事
 与软回退相反，以下问题在 `GenericSQLBackend` 加载期直接 `ValueError`，不会静默跑出错误结果：
 
 - **键列类型探针**：日期键列须为 `YYYYMMDD` 文本、代码键列须为 `VARCHAR`（首次连接时逐表抽样验证）。键列存成 `BIGINT`/`DATE` 会使（交易日, 代码）对齐失真或查询报错，初始化期直接拒绝。
-- **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 FULL OUTER JOIN 多对多爆炸、策略层 `to_dict` 静默丢行。
+- **重复键检查**：任何面板表的 `(交易日, 代码)` 出现重复即报错（提示前 3 条示例）。重复键会让 FULL OUTER JOIN 多对多爆炸、策略层 `to_dict` 静默丢行。基准 close/复权因子表的同 `(代码, 交易日)` 重复同样回源处报错（merge 多对多爆炸会让下游维度失配远离根因）。日历表同日多行（如多交易所各一行）不报错，`get_calendar` 按日期 DISTINCT 去重后返回。
 - **旧格式拒绝**：SQLite 等非 DuckDB 文件在连接期显式报错（DuckDB 的 sqlite_scanner 会静默打开旧库，必须 fail-fast）。
 - **空 universe 语义**：`query_bars` 的 `symbols=[]` 返回空面板，`None` 才表示全市场（引擎 preload 用 None；勿用空列表表达“全市场”）。
 

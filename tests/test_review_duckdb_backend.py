@@ -134,16 +134,19 @@ def test_dump_brinson_rejects_sqlite_provider(tmp_path, monkeypatch):
 
 def _make_brinson_provider(path) -> str:
     conn = duckdb.connect(str(path))
-    conn.execute("CREATE TABLE index_member_all (ts_code VARCHAR, l1_name VARCHAR)")
     conn.execute(
-        "CREATE TABLE sw_daily (trade_date VARCHAR, name VARCHAR, pct_change DOUBLE)"
+        "CREATE TABLE index_member_all (ts_code VARCHAR, l1_name VARCHAR, l1_code VARCHAR)"
+    )
+    conn.execute(
+        "CREATE TABLE sw_daily (trade_date VARCHAR, ts_code VARCHAR, name VARCHAR,"
+        " pct_change DOUBLE)"
     )
     conn.execute(
         "CREATE TABLE index_weight (index_code VARCHAR, con_code VARCHAR,"
         " trade_date VARCHAR, weight DOUBLE)"
     )
-    conn.execute("INSERT INTO index_member_all VALUES ('600036.SH','银行')")
-    conn.execute("INSERT INTO sw_daily VALUES ('20240603','银行',1.0)")
+    conn.execute("INSERT INTO index_member_all VALUES ('600036.SH','银行','801780.SI')")
+    conn.execute("INSERT INTO sw_daily VALUES ('20240603','801780.SI','银行',1.0)")
     conn.execute(
         "INSERT INTO index_weight VALUES ('000300.SH','600036.SH','20240603',30.0)"
     )

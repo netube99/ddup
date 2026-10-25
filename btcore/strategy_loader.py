@@ -323,6 +323,15 @@ def _resolve_factor_specs(
             resolved.append(resolve_spec(raw, library))
         except ValueError as exc:
             raise ValueError(f"factor_specs[{i}]: {exc}") from exc
+    # F-STR-01：评分因子权重和 <= 0 时合成得分退化为全 1.0 均匀分
+    # （索引序任意选股），配置笔误在加载期 fail-fast；全部
+    # materialize_only（无评分因子）不在此跟，保持空 specs 语义
+    scoring = [s for s in resolved if not s.get("materialize_only")]
+    if scoring and sum(s["weight"] for s in scoring) <= 0:
+        raise ValueError(
+            "factor_specs 评分因子权重和必须为正，得到: "
+            f"{[(s['name'], s['weight']) for s in scoring]}"
+        )
     return resolved
 
 
@@ -332,6 +341,17 @@ def _validate_filter_rules(rules: dict) -> dict:
     for key in rules:
         if key not in _KNOWN_FILTER_KEYS:
             logger.warning("filter_rules 含未知键 %r，StockFilter 将忽略", key)
+    # F-STO-01：宇宙配置声明为 list[str]，字符串等笔误会被 list() 拆成
+    # 字符序列静默退化成全市场（F-RSR-02 同类）——加载期 fail-fast
+    for key in ("index_universe", "factor_universe"):
+        codes = rules.get(key)
+        if codes is None:
+            continue
+        if (not isinstance(codes, list)
+                or any(not isinstance(c, str) or not c.strip() for c in codes)):
+            raise ValueError(
+                f"filter_rules.{key} 必须是非空字符串列表: {codes!r}"
+            )
     return dict(rules)
 
 

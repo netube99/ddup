@@ -207,10 +207,31 @@ def _load_benchmark_weights(
 # ═══════════════════════════════════════════
 
 
+def _load_calendar_dates(
+    conn: duckdb.DuckDBPyConnection, start: str, end: str,
+) -> list[str]:
+    """交易日历（trade_cal SSE 开市日，与 adapters/tushare 同源）。
+
+    无 trade_cal 表或无行时返回空列表，调用方回退 bars 日期轴
+    （可选能力缺失告警软回退，不阻断归因）。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT cal_date FROM trade_cal "
+            "WHERE exchange = 'SSE' AND is_open = 1 "
+            "AND cal_date >= ? AND cal_date <= ? ORDER BY cal_date",
+            [start, end],
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    return [str(r[0]) for r in rows if r[0]]
+
+
 def _reconstruct_daily_holdings(
     trade_log_df: pd.DataFrame,
     bars_df: pd.DataFrame,
     industry_map: dict[str, str],
+    calendar_dates: list[str] | None = None,
 ) -> pd.DataFrame:
     """从 trade_log 回放重建每日持仓，计算行业权重和行业收益。
 
@@ -218,6 +239,8 @@ def _reconstruct_daily_holdings(
         trade_log_df: 回测 trade_log 表，含 date/symbol/side/shares。
         bars_df: stk_factor_pro 数据，MultiIndex (trade_date, symbol)，含 close/pct_chg。
         industry_map: {ts_code: industry_name}。
+        calendar_dates: provider 交易日历；提供时作为日期轴（限定在 bars
+            首尾日内），整体停牌日（全部持仓当日无 bar）也在轴上。
 
     Returns:
         DataFrame，index=date，每行含：
@@ -250,9 +273,18 @@ def _reconstruct_daily_holdings(
     results: list[dict] = []
 
     # 口径：持仓沿交易日轴逐日结转——只遍历 trade_log 出现过的日期会漏掉
-    # 无成交日（买入持有 20 天只贡献 1 天归因，total_return 对不上回测）；
-    # 日期轴取 bars 的交易日（traded symbols 全区间有 bar）
-    all_dates = sorted(bars_df.index.get_level_values("trade_date").unique())
+    # 无成交日（买入持有 20 天只贡献 1 天归因，total_return 对不上回测）。
+    # 日期轴优先取交易日历：集中持仓组合整体停牌日 bars 无行，按 bars
+    # 行集取轴会静默丢掉该日（组合收益 0 与基准收益都不再计入，F-ATT-04）；
+    # 日历缺失时回退 bars 出现过的日期
+    bars_dates = bars_df.index.get_level_values("trade_date").unique()
+    if calendar_dates:
+        lo, hi = min(bars_dates), max(bars_dates)
+        all_dates = sorted(
+            d for d in set(calendar_dates) if lo <= d <= hi
+        ) or sorted(bars_dates)
+    else:
+        all_dates = sorted(bars_dates)
 
     for date in all_dates:
         # 处理当日买卖
@@ -480,20 +512,31 @@ def _aggregate_period(
         "unexplained": round(float(daily_df["unexplained"].sum()), 8),
     }
 
-    # industry_detail: 每个行业的平均权重、累计收益、三效应分解
+    # industry_detail: 每个行业的平均权重、累计收益、三效应分解。
+    # 行业全集含基准独有行业（策略从未持有）：其 allocation 效应已计入
+    # summary（基准收益按全部基准行业累加），明细缺失会使 Σ total_contribution
+    # 无法与 summary 对账（F-ATT-02）
     industry_names = set()
     for col in holdings_df.columns:
         if col.endswith("_weight"):
             industry_names.add(col[:-7])
+    industry_names |= set(benchmark_weights.columns)
 
     industry_detail = {}
     bw_daily = _ffill_benchmark(benchmark_weights, holdings_df.index)
     for ind in sorted(industry_names):
-        w_p_series = holdings_df.get(f"{ind}_weight", pd.Series(dtype=float))
+        # 基准独有行业无持仓列：回退全 0 序列（而非空序列——空序列会使
+        # common_dates 为空，该行业 allocation 恒 0，与 summary 不再对账）
+        w_p_series = holdings_df.get(
+            f"{ind}_weight", pd.Series(0.0, index=holdings_df.index)
+        )
         w_b_series = bw_daily.get(ind, pd.Series(dtype=float))
         r_b_series = sw_returns.get(ind, pd.Series(dtype=float))
 
-        avg_w_p = float(w_p_series.mean()) if len(w_p_series) > 0 else 0.0
+        # 期间平均权重：未持有日按 0 计（fillna 后 mean），不是跳过 NaN 的
+        # “持有日条件均值”——后者 Σ平均权重可 >1，effective_n 落到公式
+        # 定义域外（F-ATT-03）；基准侧为已知快照日的均值
+        avg_w_p = float(w_p_series.fillna(0).mean()) if len(w_p_series) > 0 else 0.0
         avg_w_b = float(w_b_series.mean()) if len(w_b_series) > 0 else 0.0
 
         # 行业层面 Brinson（对齐日期的累计）
@@ -544,7 +587,11 @@ def _aggregate_period(
     for col in holdings_df.columns:
         if col.endswith("_weight"):
             ind = col[:-7]
-            avg_weights[ind] = float(holdings_df[col].mean()) if len(holdings_df[col]) > 0 else 0.0
+            # 同 F-ATT-03：期间平均（未持有日计 0），保证 Σ平均权重 = 1
+            avg_weights[ind] = (
+                float(holdings_df[col].fillna(0).mean())
+                if len(holdings_df[col]) > 0 else 0.0
+            )
 
     if avg_weights:
         max_ind = max(avg_weights, key=avg_weights.get)
@@ -697,8 +744,14 @@ def brinson_attribute(
         if bars_df.empty:
             return _error_result("bars 数据为空")
 
-        # 6. 重建每日持仓（行业权重 + 行业收益）
-        holdings_df = _reconstruct_daily_holdings(trade_log_df, bars_df, industry_map)
+        # 6. 重建每日持仓（行业权重 + 行业收益）；日期轴优先用交易日历，
+        # 整体停牌日不丢（无 trade_cal 时回退 bars 行集并告警）
+        calendar_dates = _load_calendar_dates(provider_conn, trade_start, end)
+        if not calendar_dates:
+            logger.warning("trade_cal 无数据：持仓日期轴回退为 bars 行集")
+        holdings_df = _reconstruct_daily_holdings(
+            trade_log_df, bars_df, industry_map, calendar_dates=calendar_dates
+        )
         if holdings_df.empty:
             return _error_result("持仓重建失败")
 

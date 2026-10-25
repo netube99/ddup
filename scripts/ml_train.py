@@ -145,6 +145,13 @@ def main() -> int:
                 )
 
         benchmark = (doc.get("config") or {}).get("benchmark")
+        if benchmark is None:
+            # 引擎在 config.benchmark 缺省时从单指数 index_universe 推导基准、
+            # 多指数/未配置则回退 000300.SH（engine.py 同款规则）；训练/回测
+            # 同源，否则 idx_ret 特征只能在回测侧解析（F-FD4-07）
+            benchmark = (index_codes[0] if len(index_codes) == 1
+                         else "000300.SH")
+        benchmark = benchmark or None
 
         if is_holding:
             return _train_holding(

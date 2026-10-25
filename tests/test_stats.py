@@ -328,3 +328,39 @@ def test_corporate_action_rows_excluded_from_trade_counts():
     assert mc["min_buy_amount"] == pytest.approx(10000.0)
     total_cost = (5.0 + 0.1 + 2.0) + (6.0 + 18.0 + 0.1 + 3.0)  # 两笔真实成交
     assert stats["trading_friction"]["cost_per_trade"] == pytest.approx(total_cost / 2)
+
+
+# ── F-STA-03: 基准价格列共享口径 ──
+
+
+def test_benchmark_compare_missing_price_column_returns_empty():
+    """基准 frame 无 close/hfq_close 列 → 与 provider 同判无有效基准（空 dict）。
+
+    此前 iloc[:, 0] 拿第一列（如常数哑列）伪造出 alpha/beta 伪指标，
+    与 provider 的“无有效基准返回 None”矛盾。
+    """
+    dates = ["20240603", "20240604", "20240605"]
+    bench = pd.DataFrame({"date": dates, "dummy": [1.0, 1.0, 1.0]})
+    adf = make_account_daily([1_000_000.0, 1_010_000.0, 1_020_000.0])
+    stats = calculate_statistics(adf, make_trades([]), bench)
+    assert stats["benchmark_compare"] == {}
+
+
+def test_benchmark_compare_close_only_backend_unchanged():
+    """close-only 基准（无 hfq_close）回退口径保持可用。"""
+    adf = make_account_daily([1_000_000.0, 1_010_000.0, 1_020_000.0])
+    stats = calculate_statistics(
+        adf, make_trades([]), _benchmark([1000.0, 1010.0, 1020.0]))
+    assert math.isfinite(stats["benchmark_compare"]["beta"])
+
+
+def test_annualized_return_zero_final_value_is_full_loss():
+    """零终值年化 = -100%（0 ** (1/n_years) - 1 = -1.0）。
+
+    F-STA-01 撤回记录时钉住既有语义：掩蔽式守卫曾把合法 -1.0 改成 0.0
+    （回归）。负权益（幂底 < 0）年化无通用实数解释，维持原行为不发明口径。
+    """
+    adf = make_account_daily([1_000_000.0, 0.0])
+    stats = calculate_statistics(adf, make_trades([]))
+    assert stats["total_return"] == -1.0
+    assert stats["annualized_return"] == -1.0

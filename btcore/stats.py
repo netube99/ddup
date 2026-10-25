@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from btcore.constants import CAL_DAYS_ANNUAL, TRADE_EVENT_PRIORITY
+from btcore.types import benchmark_price_column
 
 logger = logging.getLogger(__name__)
 
@@ -670,8 +671,14 @@ def _compute_benchmark_compare(account_daily_df: pd.DataFrame,
     if len(common_dates) < 2:
         return {}
 
+    # F-STA-03：与 provider 共用基准价格列口径（hfq_close 优先、close 回
+    # 退）；两列皆缺时与 provider 同判“无有效基准”，不再拿第一列伪造指标
+    price_col = benchmark_price_column(bdf)
+    if price_col is None:
+        return {}
+
     strat_vals = adf.loc[common_dates, "total_value"].values
-    bench_vals = bdf.loc[common_dates].iloc[:, 0].values
+    bench_vals = bdf.loc[common_dates, price_col].values
 
     strat_rets = strat_vals[1:] / strat_vals[:-1] - 1.0
     bench_rets = bench_vals[1:] / bench_vals[:-1] - 1.0

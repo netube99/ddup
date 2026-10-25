@@ -156,3 +156,81 @@ def test_dump_fixtures_bars_clause_runs_on_twin_columns(monkeypatch):
     finally:
         conn.close()
 
+
+
+def test_load_backend_missing_module(monkeypatch):
+    """F-CLI-07：模块不存在与格式错误/类不存在同走 ValueError 通道。"""
+    monkeypatch.setenv("DDUP_BACKEND", "nope_module_for_test:Nope")
+    with pytest.raises(ValueError, match="模块不存在"):
+        cli_common._load_backend()
+
+
+def test_load_backend_missing_parent_package(monkeypatch):
+    """父包不存在同样视为配置错误（ModuleNotFoundError.name 指向父包）。"""
+    monkeypatch.setenv("DDUP_BACKEND", "nope_pkg_for_test.sub:Nope")
+    with pytest.raises(ValueError, match="模块不存在"):
+        cli_common._load_backend()
+
+
+def test_load_backend_internal_dependency_error_kept(tmp_path, monkeypatch):
+    """模块内部依赖缺失保留原始 ModuleNotFoundError，不误报为模块不存在。"""
+    mod_file = tmp_path / "fake_broken_backend_for_test.py"
+    mod_file.write_text("import definitely_missing_dep_xyz\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("DDUP_BACKEND", "fake_broken_backend_for_test:Backend")
+    with pytest.raises(ModuleNotFoundError, match="definitely_missing_dep_xyz"):
+        cli_common._load_backend()
+
+
+def test_run_report_write_failure_clean_channel(tmp_path, monkeypatch, capsys):
+    """F-CLI-06：--report 写失败 → 可读错误 + exit 1，不裸 traceback。
+
+    回测结果已打印、provider 已关闭（与 scripts/report.py 同一写操作的
+    错误通道对齐）。触发等价于 report.py:518 的 FileNotFoundError。
+    """
+    from scripts import run
+
+    yaml_path = tmp_path / "s.yaml"
+    yaml_path.write_text("initial_capital: 100000\n", encoding="utf-8")
+
+    class _Backend:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    backend = _Backend()
+
+    class _Strategy:
+        pass
+
+    class _Engine:
+        def __init__(self, strategy, provider, initial_capital=None,
+                     db_path=None):
+            pass
+
+        def run(self, start, end):
+            return {"statistics": {"total_return": 0.1}, "trade_log": []}
+
+    def _boom(*args, **kwargs):
+        raise FileNotFoundError(
+            2, "No such file or directory", "/nonexistent_dir/r.html")
+
+    monkeypatch.setattr(run, "load_strategy", lambda p: _Strategy())
+    monkeypatch.setattr(run, "Engine", _Engine)
+    monkeypatch.setattr(run, "generate_report", _boom)
+    monkeypatch.setattr(run.cli_common, "make_provider",
+                        lambda: types.SimpleNamespace(backend=backend))
+    monkeypatch.setattr(sys, "argv", [
+        "run.py", str(yaml_path), "--start", "20240603", "--end", "20240628",
+        "--report", str(tmp_path / "no_dir" / "r.html"),
+    ])
+    rc = run.main()
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "无法写报告" in captured.err
+    assert "Traceback" not in captured.err
+    # 回测已完成：统计已打印，报告路径不再被宣称写出
+    assert "total_return" in captured.out
+    assert "report:" not in captured.out
+    assert backend.closed

@@ -167,7 +167,6 @@ def train_guard(
 
     if len(samples) < 100:
         raise ValueError(f"训练样本过少: {len(samples)}（需要 >= 100）")
-    pos_rate = float(samples["label"].mean())
     if samples["label"].sum() < 20:
         raise ValueError(f"正样本过少: {int(samples['label'].sum())}（需要 >= 20）")
     dates = samples["trade_date"]
@@ -175,6 +174,9 @@ def train_guard(
     train_mask, test_mask = time_split_masks(dates, lookahead)
     x_all = samples[feature_cols].astype(np.float64).to_numpy()
     y_all = samples["label"].to_numpy().astype(int)
+    # F-ML-08：键名是 pos_rate_train，取切分后训练段正类率
+    # （此前用切分前全量样本率，名不副实）
+    pos_rate = float(y_all[train_mask].mean())
 
     mean, std = _fit_scaler(x_all[train_mask])
     x_scaled = _scale(x_all, mean, std)

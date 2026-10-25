@@ -254,12 +254,13 @@ def validate_trades(trades, config, strategy_name="", capital: float = 0,
         min_buy = buy_trades["turnover"].min()
         notes.append(f"买入均值: {avg_buy:,.0f} 元, 最小: {min_buy:,.0f} 元")
         # 小单判定与引擎成本模型同口径：commission = max(turnover × rate,
-        # min_commission)，触发最低佣金的边界 = min_commission / commission_rate
+        # min_commission)，触发最低佣金 ⇔ turnover × rate < min_commission。
+        # 不用 min_commission/rate 除法阈值：rate=0 是合法配置，此时每笔买入
+        # 都触发最低佣金（min_commission>0），除法阈值会退化为永不标记
         commission_rate = float(config.get("commission_rate", COMMISSION_RATE))
-        small_threshold = (
-            min_commission / commission_rate if commission_rate > 0 else float("inf")
-        )
-        small_buys = buy_trades[buy_trades["turnover"] < small_threshold]
+        small_buys = buy_trades[
+            buy_trades["turnover"] * commission_rate < min_commission
+        ]
         if len(small_buys) > 0:
             pct = len(small_buys) / len(buy_trades)
             notes.append(f"小单买入: {len(small_buys)}/{len(buy_trades)} ({pct:.1%}) "

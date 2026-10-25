@@ -251,3 +251,26 @@ def test_corporate_rows_excluded_from_trade_count_notes():
     assert any("总成交: 2 笔" in n for n in notes)
     assert any("日均交易: 0.7 笔" in n for n in notes)
     assert not any("HIGH_FREQ" in i for i in issues)
+
+
+def test_small_buy_zero_commission_rate_flags_all_buys():
+    """V-MRD-01：commission_rate=0 是合法配置，此时每笔买入都触发最低佣金
+    （max(0, min_commission)）；除法阈值会退化为 inf 恒不标记。"""
+    rows = [
+        ["20240603", "000001.SZ", "BUY", "MANUAL", 10.0, 1000, 100000.0,
+         5.0, 0.0, 0.0, 0.0, -100005.0, ""],
+        ["20240604", "000002.SZ", "BUY", "MANUAL", 20.0, 500, 100000.0,
+         5.0, 0.0, 0.0, 0.0, -100005.0, ""],
+    ]
+    config = {"initial_capital": 200000, "commission_rate": 0.0,
+              "min_commission": 5.0}
+    issues, notes = validate_trades(make_trades(rows), config)
+    assert any("小单买入: 2/2 (100.0%)" in n for n in notes)
+    # 资金 20 万 ≥ 10 万 且 100% > 50% → 告警（修复前恒 false-pass）
+    assert any("TOO_MANY_SMALL_TRADES" in i for i in issues)
+
+    # min_commission 同为 0 时佣金恒 0，无最低佣金可触发
+    config_zero = dict(config, min_commission=0.0)
+    issues0, notes0 = validate_trades(make_trades(rows), config_zero)
+    assert not any("小单买入" in n for n in notes0)
+    assert not any("TOO_MANY_SMALL_TRADES" in i for i in issues0)

@@ -23,6 +23,8 @@ from research.live_account import (  # noqa: F401  (公共门面再导出)
     AccountLedger,
     AccountValidationError,
     LiveAccountError,
+    require_finite,
+    require_whole_int,
 )
 from research.live_plan import (  # noqa: F401
     ManualExecutor,
@@ -38,10 +40,7 @@ _SHARE_CATEGORIES = frozenset({"corporate_action", "manual"})
 
 
 def _finite(value, field: str) -> float:
-    number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
-        raise AccountValidationError(f"{field} 非法（NaN/Inf）: {value!r}")
-    return number
+    return require_finite(value, field)
 
 
 def import_statement(ledger: AccountLedger, statement: dict, *,
@@ -105,7 +104,7 @@ def import_statement(ledger: AccountLedger, statement: dict, *,
                     f"（允许 {sorted(_SHARE_CATEGORIES)}）")
             adj = ledger.record_share_adjustment(
                 date=str(row.get("date") or date), symbol=str(row["symbol"]),
-                delta_shares=int(_finite(row["delta_shares"], "delta_shares")),
+                delta_shares=require_whole_int(row["delta_shares"], "delta_shares"),
                 category=category, reason=str(row.get("reason") or ""),
                 source=source,
                 event_id=str(row.get("event_id") or f"{import_id}:sa{i}"))
@@ -146,10 +145,10 @@ def import_statement(ledger: AccountLedger, statement: dict, *,
             if row.get(key) is None:
                 raise AccountValidationError(f"holdings 第 {i} 行缺 {key}: {row!r}")
         item = {"symbol": str(row["symbol"]),
-                "shares": int(_finite(row["shares"],
-                                      f"holdings 第 {i} 行 shares"))}
+                "shares": require_whole_int(row["shares"],
+                                             f"holdings 第 {i} 行 shares", 1)}
         if row.get("available") is not None:
-            item["available"] = int(_finite(row["available"], "available"))
+            item["available"] = require_whole_int(row["available"], "available", 0)
         if row.get("cost") is not None:
             item["cost"] = _finite(row["cost"], "cost")
         normalized_holdings.append(item)
@@ -160,16 +159,15 @@ def import_statement(ledger: AccountLedger, statement: dict, *,
             holdings=normalized_holdings, raw=json.dumps(
                 statement, ensure_ascii=False, default=str), **snapshot_kwargs)
 
-    if ledger.confirmed_snapshot() is None:
-        # 首份对账单：券商日终状态即开仓基准（opening）；其携带的事实
-        # （成交/入金）随后入账——日期 ≤ 基准日，仅作审计不重复投影
-        snapshot = _import_snapshot()
-        flow_results, adj_results, fills_result = _record_facts()
-    else:
-        # 后续对账单：先入事实再导快照，差异即"账本未解释的差额"，
-        # clean 自动确认，否则存候选等用户分类/接管
-        flow_results, adj_results, fills_result = _record_facts()
-        snapshot = _import_snapshot()
+    with ledger.transaction():
+        if ledger.confirmed_snapshot() is None:
+            # 首份日终快照作为基准，同日事实仅审计，不重复投影。
+            snapshot = _import_snapshot()
+            flow_results, adj_results, fills_result = _record_facts()
+        else:
+            # 后续先事实后快照；整份导入失败时一起回滚。
+            flow_results, adj_results, fills_result = _record_facts()
+            snapshot = _import_snapshot()
 
     return {"snapshot": snapshot, "fills": fills_result,
             "cash_flows": flow_results, "share_adjustments": adj_results}

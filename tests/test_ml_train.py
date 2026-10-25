@@ -336,3 +336,88 @@ def test_ml_train_warns_when_index_snapshots_empty(tmp_path, monkeypatch, capsys
     assert mt.main() == 0
     out = capsys.readouterr().out
     assert "警告" in out and "全市场" in out
+
+
+def test_pos_rate_train_is_train_segment_rate():
+    """F-ML-08: pos_rate_train 取切分后训练段正类率，不是全量样本率。
+
+    构造：训练段（前 80% 日期）正类率 0.5，测试段全负样本；
+    全量率 = 0.4，训练段率 = 0.5——修复前返回 0.4。
+    """
+    pytest.importorskip("xgboost", reason="需要 xgboost")
+    rows = []
+    n_dates = 20
+    uniq = _dates(n_dates, start="2024-03-01")
+    for d in uniq:
+        is_train = d < uniq[int(n_dates * 0.8)]
+        for k in range(10):
+            rows.append({
+                "trade_date": d,
+                "mom20": float(k),
+                "turnover_rate": float(k),
+                "label": 1 if (is_train and k < 5) else 0,
+            })
+    samples = pd.DataFrame(rows)
+    res = train_guard(samples, ["mom20", "turnover_rate"], lookahead=3)
+    assert res.metrics["pos_rate_train"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "index_universe,config_benchmark,expected",
+    [
+        # F-FD4-07：单指数 index_universe 且未写 benchmark → 推导该指数
+        (["000905.SH"], None, "000905.SH"),
+        # 多指数 → 回退 000300.SH（engine.py 同款规则）
+        (["000300.SH", "000905.SH"], None, "000300.SH"),
+        # 显式 benchmark 优先，不受 index_universe 影响
+        (["000905.SH"], "000852.SH", "000852.SH"),
+        # 显式空字符串 = 无基准（引擎语义），不参与推导
+        (["000905.SH"], "", None),
+    ],
+)
+def test_ml_train_derives_benchmark_like_engine(
+    tmp_path, monkeypatch, index_universe, config_benchmark, expected,
+):
+    """F-FD4-07：config.benchmark 缺省时与引擎同款推导，idx_ret 特征可训练。
+
+    修复前 benchmark 恒为 None，含 idx_ret 的特征因子在 ml_train 的
+    build_panel 直接 ValueError，而引擎回测可跑（训练/回测同源契约破裂）。
+    """
+    import yaml
+
+    import scripts.ml_train as mt
+
+    doc = {
+        "models": {"m": {"artifact": "m.onnx",
+                         "features": {"factors": ["mom20"]}}},
+        "filter_rules": {"index_universe": index_universe},
+    }
+    if config_benchmark is not None:
+        doc["config"] = {"benchmark": config_benchmark}
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+    class _Backend:
+        def close(self):
+            pass
+
+    class _Provider:
+        backend = _Backend()
+
+    captured = {}
+
+    def fake_train_panel(args, spec, backend, symbols, library, benchmark,
+                         pit_members=None):
+        captured["benchmark"] = benchmark
+        return 0
+
+    monkeypatch.setattr(mt.cli_common, "make_provider", lambda: _Provider())
+    monkeypatch.setattr(mt, "resolve_index_snapshots",
+                        lambda *a, **k: {index_universe[0]: {"600000.SH"}})
+    monkeypatch.setattr(mt, "_train_panel", fake_train_panel)
+    monkeypatch.setattr(sys, "argv", [
+        "ml_train.py", str(cfg), "--model", "m",
+        "--start", "20240101", "--end", "20240630",
+    ])
+    assert mt.main() == 0
+    assert captured["benchmark"] == expected

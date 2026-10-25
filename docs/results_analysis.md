@@ -117,7 +117,7 @@ Engine.run 返回 account_daily、trade_log、statistics、benchmark_nav、bench
 | 买卖比例平衡 | 卖出/买入比 > 3 或 < 0.3 |
 | 同日买卖冲突 | 同日同票既有 BUY 又有 SELL |
 | 交易磨损/资金比 | 超动态阈值（最低佣金开销×2 + 印花税底 + 按资金规模的可变上限）；资金 ≤5 万时降级为 INFO |
-| 小单买入 | 资金 ≥10 万且 >50% 买入触发最低佣金——边界 = min_commission / commission_rate（引擎成本模型 commission=max(turnover×rate, min_commission)），默认费率 ≈33333 元 |
+| 小单买入 | 资金 ≥10 万且 >50% 买入触发最低佣金——触发条件 = turnover × commission_rate < min_commission（引擎成本模型 commission=max(turnover×rate, min_commission)；rate=0 合法配置下全部买入触发），默认费率 ≈33333 元 |
 | 交易频率 | 日均成交 > 10 笔 |
 | 持仓上限 | 最大持仓数超 `config.max_positions` |
 | 现金非负 | 存在负现金日 |
@@ -128,7 +128,8 @@ Engine.run 返回 account_daily、trade_log、statistics、benchmark_nav、bench
 磨损阈值 = `2 × 买入次数 × min_commission / capital + stamp_tax_rate + 分档上限`。
 分档上限：资金 ≤5 万为 3%，≤50 万为 1%，其余 0.5%；≤5 万超限仅 INFO。
 资金取显式 --capital、run 配置，最后兜底 1,000,000；账本以 ledger_meta 初始资金为准。
-小单边界是 min_commission/commission_rate，默认约 33333 元。
+小单条件是 turnover×commission_rate < min_commission（rate=0 时全部买入触发），
+默认费率下约 33333 元。
 
 逐条区分预期拒单、数据缺口、计算差异和策略磨损；高成本本身不等于引擎算错。
 需要独立核验时按[核查清单](audit_checklist.md)选择受影响不变量，达到范围即停。
@@ -231,7 +232,7 @@ result = brinson_attribute(
     ],
     "exposure_summary": {
         "max_single_industry_weight": ..., "max_single_industry_name": ...,
-        "effective_n_industries": ...,   # 有效行业数 = 1/Σ(w²)，按平均权重
+        "effective_n_industries": ...,   # 有效行业数 = 1/Σ(w²)，按期间平均权重（未持有日计 0）
         "top3_industries": [{"name": ..., "weight": ...}, ...],
     },
 }
@@ -241,10 +242,11 @@ result = brinson_attribute(
 
 **口径与限制**：
 
-- 持仓沿交易日逐日结转——无成交日不丢（买入持有 N 天贡献 N 天归因）；`summary.total_portfolio_return` 是逐日策略收益之和，不能与回测复利总收益直接等同
+- 持仓沿交易日轴逐日结转——无成交日不丢（买入持有 N 天贡献 N 天归因）；`summary.total_portfolio_return` 是逐日策略收益之和，不能与回测复利总收益直接等同。日期轴取 provider 交易日历（`trade_cal` SSE 开市日，无表时回退 bars 行集并告警）：集中持仓整体停牌日也在轴上，当日组合收益按 0、基准收益照常计入；离线 parquet 入口无日历源，仍用 bars 行集
 - 基准行业权重快照（约每月 2 次）**向前填充到日频**：快照延续至下次调整，首个快照前的日期因无已知基准构成而排除
-- 基准收益按**全部基准行业**累加（含策略从未持有的行业）；`portfolio_return` 为全部持仓的市值加权收益，无行业映射/缺 bar 的部分计入 `unexplained`
+- 基准收益按**全部基准行业**累加（含策略从未持有的行业）；`industry_detail` 同样含基准独有行业（持仓权重为 0、只承载配置效应），各行业 `total_contribution` 之和与 summary 三效应可对账；`portfolio_return` 为全部持仓的市值加权收益，无行业映射/缺 bar 的部分计入 `unexplained`
 - `start/end` 与 run 实际区间不一致时告警：持仓自 run 起点重建（期初建仓不被丢失），归因统计按用户区间；离线数据必须具有明确的单指数与窗口标识
+- 平均权重是期间平均（未持有日计 0，策略侧 Σ平均权重 = 1）；基准侧为已知快照日的均值
 
 ### `brinson_attribute_from_files`（离线 parquet）
 

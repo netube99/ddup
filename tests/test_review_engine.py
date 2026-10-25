@@ -57,3 +57,35 @@ def test_load_strategy_yaml_absent_keys_fall_back_to_class_defaults(tmp_path):
     assert strategy.FILTER_RULES == {"min_price": 5.0}
     assert [spec["name"] for spec in strategy.FACTOR_SPECS] == ["mom20"]
     assert strategy.FACTOR_NODES["mom20"]["expr"] == "roc(close_hfq, 20)"
+
+
+# ── 显式空值覆盖语义（V-ENG-02 钉住回归）──
+# docs/strategy_guide.md §3.1: 类变量是声明式默认值，YAML/显式传参可覆盖；
+# 显式空 list/dict 是覆盖（清空类默认），与缺省键（None → 回退类默认）不同。
+# 此前该行为仅由 probe 证据支撑，无测试钉住。
+
+
+def test_build_strategy_explicit_empty_overrides_class_defaults():
+    """程序化路径：factor_specs=[] / filter_rules={} 显式清空类默认值。"""
+    strategy = build_strategy(
+        ClassDefaultStrategy, config={}, factor_specs=[], filter_rules={}
+    )
+    assert strategy.FACTOR_SPECS == []
+    assert strategy.FILTER_RULES == {}
+    # 空 specs 不挂 FACTOR_NODES（引擎按无因子计划处理）
+    assert getattr(strategy, "FACTOR_NODES", None) is None
+
+
+def test_load_strategy_yaml_explicit_empty_overrides_class_defaults(tmp_path):
+    """YAML 路径等价：显式空键覆盖，缺键回退。"""
+    path = tmp_path / "s.yaml"
+    path.write_text(
+        "strategy: tests.test_review_engine:ClassDefaultStrategy\n"
+        "config: {}\n"
+        "factor_specs: []\n"
+        "filter_rules: {}\n",
+        encoding="utf-8",
+    )
+    strategy = load_strategy(str(path))
+    assert strategy.FACTOR_SPECS == []
+    assert strategy.FILTER_RULES == {}

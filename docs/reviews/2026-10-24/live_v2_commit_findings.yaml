@@ -1,0 +1,29 @@
+meta:
+  date: '2026-10-24'
+  commit: 2d15b96f81ba22e13e33256c3efc009f9dc20337
+  scope: 最后提交实盘 V2；对账导入与订单预算直接调用链，临时账本独立回归
+findings:
+  - id: LIVE-V2-02
+    severity: P1
+    rule: docs/live_redesign.md §3.2：同身份不同内容报冲突，不静默覆盖
+    file: research/live_plan.py
+    line: 1326
+    note: '原重复回报双增数量已修复；本轮发现同一身份内容校验遗漏成交日期。触发：已记录sim/T1在20240108买100股@10，再以20240109回报同ID及相同数量价格。复现：.venv/bin/python -m pytest tests/test_live_plan.py -k same_trade_id_different_content -q。实际：静默no-op，1 passed/1 failed；独立期望：不同日期属异内容，明确拒绝且保留原事实。影响：计划回报入口隐瞒日期冲突，破坏账户身份契约。'
+  - id: LIVE-V2-06
+    severity: P1
+    rule: docs/live_redesign.md §6：失败事务不留下半账本/半计划
+    file: research/live.py
+    line: 163
+    note: '触发：对账单含合法入金1000及非法quantity=0成交。复现：.venv/bin/python -m pytest tests/test_live_v2_review.py -k statement_failure -q。实际：首份导入失败仍留下确认快照及入金，后续导入失败仍留下入金；独立期望：整份失败后快照/现金流/审计计数与原状相同，后续账户现金仍为10000。影响：CLI import 和公共门面留下半账本。'
+  - id: LIVE-V2-07
+    severity: P1
+    rule: docs/live_redesign.md §3.1/A20：拒绝小数股数及布尔伪整数
+    file: research/live.py
+    line: 145
+    note: '触发：statement shares=100.5、available=99.5、delta_shares=1.5 或布尔金额/股数。复现：.venv/bin/python -m pytest tests/test_live_v2_review.py -k lossy -q。实际：分别静默落为100/99/1，True转为1；独立期望：拒绝非法输入且不落快照。影响：CLI及门面绕过账户层严格校验，记入与原始输入不同的事实。'
+  - id: LIVE-V2-08
+    severity: P1
+    rule: docs/live_redesign.md §5.2/A11：部分回款只释放相应预算，不能重复使用
+    file: research/live_plan.py
+    line: 1700
+    note: '触发：现金预留1000、分配卖单回款1000，卖单成交40%，买单已买100股@10。复现：.venv/bin/python -m pytest tests/test_live_v2_review.py -k dependency -q。实际：gate仍允许再买100股；独立期望：1000+1000*40%-100*10=400不足一手，禁止；卖单全部成交后可再买100股。影响：orders给出超出已解锁额度的执行建议。'

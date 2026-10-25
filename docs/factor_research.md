@@ -58,7 +58,7 @@ layers = calc_layered_returns(factor_df["mom20"], fwd, n_quantiles=5)
 | summarize_ic(ic) | ic_mean/ic_std/icir/ic_positive_ratio/n_days；无有效观测时统计量 NaN、n_days=0 |
 | calc_layered_returns(values, forward_returns, n_quantiles=5, date_col="trade_date") | 档号→累计曲线；分位边界重复会减少档数 |
 | calc_factor_corr(factor_df, date_col="trade_date") | 每日截面 Pearson 相关的均值；不足两列为空，缺有效日为 NaN |
-| calc_ic_decay(values, close_hfq, horizons, date_col="trade_date") | horizon 索引表；ic_mean/ic_ir/ic_win/rank_ic_mean/rank_ic_ir/rank_ic_win/n_days |
+| calc_ic_decay(values, close_hfq, horizons, date_col="trade_date") | horizon 索引表；ic_mean/ic_ir/ic_win/rank_ic_mean/rank_ic_ir/rank_ic_win/n_days；horizons 需为正整数天数（非正数 ValueError） |
 
 <a id="composite"></a>
 ## 多因子合成

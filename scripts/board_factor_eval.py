@@ -3,7 +3,7 @@
 用法:
     python scripts/board_factor_eval.py dv_z,vol_z,ep_z \
         --start 20240101 --end 20250630 [--pool main] [--forward 5] \
-        [--decay 5,10,20] [--exec-price close|next-open]
+        [--decay 5,10,20] [--exec-price close|next-open] [--benchmark 000300.SH]
 
 池（--pool）:
     all       全市场（对照）
@@ -69,10 +69,27 @@ def main() -> int:
     parser.add_argument("--end", required=True)
     parser.add_argument("--pool", default="main", choices=_POOLS)
     parser.add_argument("--forward", type=int, default=5)
-    parser.add_argument("--decay", default=None)
+    parser.add_argument("--decay", default=None,
+                        help="多前瞻期 IC 衰减（逗号分隔天数，如 5,10,20）")
     parser.add_argument("--exec-price", default="close",
                         choices=["close", "next-open"])
+    parser.add_argument("--benchmark", default=None,
+                        help="基准指数代码（因子引用 idx_ret 时必需，"
+                             "口径同 factor_eval/引擎）")
     args = parser.parse_args()
+
+    # --decay 前置校验：int("abc") 不裸 traceback（F-CLI-05）
+    horizons = None
+    if args.decay is not None:
+        try:
+            horizons = [int(h.strip()) for h in args.decay.split(",") if h.strip()]
+        except ValueError:
+            print("错误：--decay 需为逗号分隔的天数（如 5,10,20）",
+                  file=sys.stderr)
+            return 1
+        if not horizons or any(h <= 0 for h in horizons):
+            print("错误：--decay 前瞻天数需为正整数", file=sys.stderr)
+            return 1
 
     factor_names = [n.strip() for n in args.factors.split(",") if n.strip()]
     library = load_library()
@@ -102,7 +119,8 @@ def main() -> int:
         derive_fields(bars_df)
         needs = dict(fplan["needs"])
         needs["mktcap_main"] = True
-        ensure_pseudo_columns(bars_df, needs, "main", backend=backend)
+        ensure_pseudo_columns(bars_df, needs, "main", backend=backend,
+                              benchmark=args.benchmark)
 
         # 坍缩因子走全市场广度（与 factor_eval 同源）
         collapse_names = [
@@ -123,7 +141,8 @@ def main() -> int:
         )
         for name in collapse_names:
             from btcore.factors.library import compute_breadth
-            daily = compute_breadth(name, backend, library, args.start, args.end)
+            daily = compute_breadth(name, backend, library, args.start, args.end,
+                                    benchmark=args.benchmark)
             factor_df[name] = factor_df.index.get_level_values(
                 "trade_date").map(daily)
             print(f"  坍缩因子 {name}: 全市场广度口径")
@@ -190,7 +209,6 @@ def main() -> int:
         print(f"  指定池 {pool}（日均 {int(n_stocks.median())} 只）— IC 汇总")
         print("=" * 60)
         if args.decay:
-            horizons = [int(h) for h in args.decay.split(",")]
             for name in factor_names:
                 print(f"\n  {name}:")
                 ddf = calc_ic_decay(fdf[name], close_hfq, horizons,
@@ -227,6 +245,11 @@ def main() -> int:
                 ls = layers[qs[-1]].iloc[-1] - layers[qs[0]].iloc[-1]
                 print(f"  {name:<20s}  {line}  |  多空 {ls:+.3f}")
         return 0
+    except ValueError as e:
+        # 与 scripts/factor_eval.py 同一错误通道：缺 --benchmark、因子引用
+        # idx_ret 等配置/数据错误打印可读消息，不裸 traceback（F-CLI-05）
+        print(f"错误：{e}", file=sys.stderr)
+        return 1
     finally:
         backend.close()
 

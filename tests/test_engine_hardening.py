@@ -529,6 +529,51 @@ def test_on_tick_buy_conditions_merged():
     assert conds[0]["symbol"] == "000002.SZ"
 
 
+@pytest.mark.parametrize("bad_symbol", [123, "", "  "])
+def test_buy_conditions_bad_symbol_fails_fast(bad_symbol):
+    """F-ENG-03: buy_conditions.symbol 非字符串/空串在决策时点报错。
+
+    此前仅查键存在性，脏 symbol 混过校验后以“无当日行情”告警
+    静默跳过，与 buy/sell 名单的 fail-fast 不一致。
+    """
+    engine = _make_engine(_DuckStrategy(actions={
+        "buy_conditions": [{"symbol": bad_symbol, "type": "LIMIT_BUY",
+                             "price": 9.0, "value": 10000}]}))
+    with pytest.raises(ValueError, match="symbol 必须是非空字符串"):
+        engine.compute_pending("20240603", {"000001.SZ": make_bar()}, [])
+
+
+def test_factor_plan_rejects_specs_outside_nodes():
+    """V-ENG-01: 绕过 loader 手搓的策略闭包外非 ml 因子名报错。
+
+    FACTOR_NODES={} 是 raw-only 模型的合法值，但非 ml 入口名不在闭包内
+    会被 build_factor_plan 静默裁掉：列永不物化、条件单读到 None 静默
+    不触发，run 完整跑完无报错。
+    """
+
+    class _Handmade:
+        config = {}
+        FACTOR_SPECS = [{"name": "mom20", "weight": 1.0}]
+        FACTOR_NODES = {}
+
+    engine = _make_engine(_Handmade())
+    with pytest.raises(ValueError, match="不在 FACTOR_NODES 闭包内"):
+        engine._build_factor_plan()
+
+
+def test_factor_plan_accepts_raw_only_empty_nodes():
+    """V-ENG-01 回归：raw-only 模型场景的空闭包 {} + 纯 ml_ specs 不误伤。"""
+
+    class _RawOnly:
+        config = {}
+        FACTOR_SPECS = [{"name": "ml_alpha", "weight": 1.0}]
+        FACTOR_NODES = {}
+
+    engine = _make_engine(_RawOnly())
+    plan = engine._build_factor_plan()
+    assert isinstance(plan, dict)  # 空闭包 + 纯 ml_ specs：不报错，返回空计划
+
+
 # ── 无当日行情（停牌/缺数据）跳过告警 ──
 
 

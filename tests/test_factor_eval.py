@@ -6,7 +6,9 @@ import pytest
 
 from research.factor_eval import (
     _fmt_number,
+    calc_factor_corr,
     calc_ic,
+    calc_ic_decay,
     calc_layered_returns,
     summarize_ic,
 )
@@ -132,3 +134,60 @@ class TestFmtNumber:
 
     def test_number_keeps_four_decimals(self):
         assert _fmt_number(0.123456) == "0.1235"
+
+
+class TestCalcFactorCorr:
+    def _panel(self, n_sym=20, n_days=10, seed=7):
+        rng = np.random.default_rng(seed)
+        days = [f"2024010{d}" for d in range(1, 10)] + ["20240110"]
+        syms = [f"S{i}" for i in range(n_sym)]
+        idx = pd.MultiIndex.from_product(
+            [days, syms], names=["trade_date", "symbol"]
+        )
+        a = rng.normal(size=len(idx))
+        b = a * 0.5 + rng.normal(scale=0.5, size=len(idx))
+        return pd.DataFrame({"A": a, "B": b}, index=idx), days
+
+    def test_constant_day_skips_only_that_day(self):
+        """F-FEV-01：某因子当日截面退化为常量（std=0 → 当日 pair corr NaN）
+        只跳过该日该对，均值仍等于其余日的逐日 corr 均值，不得整对变 NaN。"""
+        df, days = self._panel()
+        df.loc[("20240104", slice(None)), "B"] = 0.0
+        mat = calc_factor_corr(df)
+        # 独立期望：np.corrcoef 逐日手算再取均值（跳过常量日 20240104）
+        daily = [
+            np.corrcoef(df.loc[d, "A"], df.loc[d, "B"])[0, 1]
+            for d in days if d != "20240104"
+        ]
+        assert len(daily) == 9
+        assert mat.loc["A", "B"] == pytest.approx(float(np.mean(daily)))
+
+    def test_all_nan_day_matches_constant_day_skip(self):
+        """整列缺失日（dropna 跳过整日）与常量日（只跳该对）语义一致。"""
+        df, _ = self._panel()
+        df_const = df.copy()
+        df_const.loc[("20240104", slice(None)), "B"] = 0.0
+        df_nan = df.copy()
+        df_nan.loc[("20240104", slice(None)), "B"] = np.nan
+        assert calc_factor_corr(df_const).loc["A", "B"] == pytest.approx(
+            calc_factor_corr(df_nan).loc["A", "B"]
+        )
+
+    def test_pair_with_no_valid_day_is_nan(self):
+        """全窗口常量因子无任何有效日 → 该对 NaN（文档：缺有效日为 NaN）。"""
+        df, _ = self._panel()
+        df["C"] = 1.0
+        mat = calc_factor_corr(df)
+        assert pd.isna(mat.loc["A", "C"])
+        assert pd.isna(mat.loc["C", "A"])
+        assert mat.loc["A", "B"] == pytest.approx(calc_factor_corr(
+            df[["A", "B"]]).loc["A", "B"])
+
+
+def test_calc_ic_decay_rejects_nonpositive_horizon():
+    """F-FEV-02：horizon ≤ 0 会把 shift(-h) 反转为回顾口径，fail-fast 拒绝。"""
+    s = pd.Series(dtype=float)
+    with pytest.raises(ValueError, match="正整数"):
+        calc_ic_decay(s, s, [-1, 1])
+    with pytest.raises(ValueError, match="正整数"):
+        calc_ic_decay(s, s, [0])

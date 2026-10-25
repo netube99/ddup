@@ -54,7 +54,15 @@ def _load_backend():
         raise ValueError(
             f"DDUP_BACKEND 需为 'module:Class' 格式，实际: {spec!r}"
         )
-    module = importlib.import_module(module_name)
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        # 仅当缺失的正是 spec 指向的模块（或其父包）才视为配置错误；
+        # 模块内部依赖缺失保留原始 traceback，不误报为模块不存在
+        missing = exc.name or ""
+        if missing == module_name or module_name.startswith(missing + "."):
+            raise ValueError(f"DDUP_BACKEND 指向的模块不存在: {spec}") from exc
+        raise
     try:
         backend_cls = getattr(module, class_name)
     except AttributeError as exc:

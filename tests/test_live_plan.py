@@ -796,7 +796,8 @@ def test_a19_duplicate_fill_report_is_idempotent_noop(ledger, store):
     assert ledger.projection().cash == pytest.approx(10000 - 1000)
 
 
-def test_a19_same_trade_id_different_content_rejected(ledger, store):
+@pytest.mark.parametrize("date,price", [("20240108", 11.0), ("20240109", 10.0)])
+def test_a19_same_trade_id_different_content_rejected(ledger, store, date, price):
     """同 trade_id 异内容不是幂等：必须拒绝且订单/账本均不变。"""
     draft = make_draft_for_store({"buy": ["BBB", "CCC"]})
     plan = store.accept_plan(draft, activation_id=1, snapshot_id=1,
@@ -808,8 +809,8 @@ def test_a19_same_trade_id_different_content_rejected(ledger, store):
     store.record_fill(order.client_order_id, date="20240108", quantity=100,
                       price=10.0, source="sim", trade_id="T1")
     with pytest.raises(Exception):
-        store.record_fill(order.client_order_id, date="20240108",
-                          quantity=100, price=11.0, source="sim",
+        store.record_fill(order.client_order_id, date=date,
+                          quantity=100, price=price, source="sim",
                           trade_id="T1")
     assert store.order(order.client_order_id).filled_qty == 100
     assert len(ledger.fills()) == 1

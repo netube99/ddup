@@ -63,7 +63,12 @@ def main():
     if not isinstance(params_def, dict) or not params_def:
         parser.error("sweep 配置的 params 为空：没有可扫描的参数组合")
 
-    combinations = expand_params(params_def)
+    try:
+        combinations = expand_params(params_def)
+    except ValueError as e:
+        # 配置错误走 parser.error（与上方 params 为空同通道，exit 2），
+        # 不裸 traceback（F-CLI-03）
+        parser.error(str(e))
     print(f"参数组合数: {len(combinations)}")
 
     if args.dry_run:

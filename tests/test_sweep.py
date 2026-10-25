@@ -3,6 +3,7 @@
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 from research.sweep import expand_params, nested_set
@@ -76,6 +77,37 @@ def test_expand_params_dict_values():
     assert param_dict == {"top_k": 3, "config.max_positions": 5}
     assert "top_k=3" in label
     assert "max_positions=5" in label
+
+
+def test_expand_params_scalar_candidate_raises():
+    """F-CLI-03：标量候选值 fail-fast，不再 itertools.product 裸 TypeError。"""
+    with pytest.raises(ValueError, match="候选值必须是列表"):
+        expand_params({"config.top_k": 3})
+
+
+def test_expand_params_string_candidate_raises():
+    """字符串候选值同样拒绝：按单字符展开必是笔误（文档要求候选值必须为列表）。"""
+    with pytest.raises(ValueError, match="候选值必须是列表"):
+        expand_params({"config.benchmark": "000300.SH"})
+
+
+def test_scalar_candidate_exit_2_no_traceback(tmp_path):
+    """F-CLI-03：标量候选值经 parser.error 通道 exit 2，dry-run 不被打断。"""
+    sweep_config = tmp_path / "sweep.yaml"
+    base_config = tmp_path / "base.yaml"
+    base_config.write_text("top_k: 5\n")
+    sweep_config.write_text(
+        yaml.dump({"base": str(base_config), "params": {"config.top_k": 3}})
+    )
+
+    result = subprocess.run(
+        [sys.executable, "scripts/sweep.py", str(sweep_config),
+         "--start", "20240101", "--end", "20240131", "--dry-run"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "候选值必须是列表" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_dry_run_flag(tmp_path):

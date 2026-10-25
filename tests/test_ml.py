@@ -1001,6 +1001,32 @@ class TestEngineIntegration:
 
 
 class TestTrainingPipeline:
+    def test_build_panel_unknown_issue_level_warns_not_crash(
+            self, tmp_path, monkeypatch, caplog):
+        """F-ML-04: 物化验证 issue 未知 level 按警告处理，不 AttributeError 崩训练。
+
+        引擎侧 EDGE-08 已加白名单，训练侧此前裸 getattr(logger, level)。
+        """
+        from btcore.factors.library import load_library
+        from btcore.ml import dataset
+
+        monkeypatch.setattr(
+            dataset.factor_plan, "validate_materialization",
+            lambda *a, **k: [{"level": "fatal", "message": "合成未知级别"}],
+        )
+        spec = ModelSpec(
+            name="p", artifact="x.onnx",
+            features=["mom20"], raw_features=[], state_features=[],
+        )
+        with caplog.at_level(logging.WARNING, logger="btcore.ml.dataset"):
+            panel = dataset.build_panel(
+                MockDataBackend(), None, "20240603", "20240614",
+                spec, load_library(), benchmark="000300.SH",
+            )
+        assert len(panel) > 0
+        assert any("未知 issue level" in r.message for r in caplog.records)
+        assert any("合成未知级别" in r.message for r in caplog.records)
+
     def test_dataset_matches_engine_panel(self, tmp_path):
         """训练面板与引擎 preload 面板逐列一致（同源验收）。"""
         from btcore.factors.library import load_library

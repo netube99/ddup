@@ -213,3 +213,43 @@ class TestReplayDefaultRun:
         )
         assert r.returncode == 1
         assert "run 99 不存在" in r.stderr
+
+
+class TestSnapshotUsesDecisionSiteBars:
+    """F-ML-07: 快照 bars_subset 取自决策现场 bars_dict。
+
+    holding scope 模型的 ml_* 分数只注入 bars_dict（engine 逐持仓求值），
+    不回写 day_bars 列；快照若取 day_bars 会漏掉这些分数，与
+    docs/ml_guide.md 决策快照可见当日模型分数的承诺漂移。
+    """
+
+    def test_holding_model_columns_in_snapshot(self, tmp_path):
+        provider = DataProvider(MockDataBackend())
+        strategy = AccumulateBuyStrategy({"slippage_ticks": 0, "max_positions": 2})
+        engine = Engine(strategy, provider, initial_capital=1_000_000,
+                        db_path=":memory:", debug=True)
+        engine.run_id = 1
+        conn = init_backtest_db(":memory:")
+        try:
+            bar = {"trade_date": "20240603", "open": 10.0, "close": 10.5,
+                   "ml_holding_model": 0.73, "_private_cache": 1}
+            engine._write_debug_snapshot(
+                conn, "20240603",
+                {"buy": ["000001.SZ"], "sell": [], "buy_conditions": []},
+                {"000001.SZ": bar, "000002.SZ": {"trade_date": "20240603",
+                                                 "open": 20.0}},
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT snapshot_json FROM debug_snapshots"
+                " WHERE run_id=1 AND date='20240603'"
+            ).fetchone()
+            snap = json.loads(row[0])
+            subset = snap["bars_subset"]
+            assert "000001.SZ" in subset  # 持仓/买入目标
+            # 决策现场注入的模型分数进入快照；私有下划线键仍被过滤
+            assert subset["000001.SZ"]["ml_holding_model"] == 0.73
+            assert "_private_cache" not in subset["000001.SZ"]
+            assert "000002.SZ" not in subset  # 无关 symbol 不进快照
+        finally:
+            conn.close()
